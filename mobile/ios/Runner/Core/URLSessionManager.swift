@@ -149,7 +149,9 @@ class URLSessionManager: NSObject {
     config.urlCache = urlCache
     config.httpCookieStorage = cookieStorage
     config.httpMaximumConnectionsPerHost = 64
-    config.timeoutIntervalForRequest = 60
+    // Initial sync stages a consistent snapshot before the first response byte.
+    // Keep this aligned with NetworkRepository.readTimeout on Android.
+    config.timeoutIntervalForRequest = 30 * 60
 
     var headers = UserDefaults.group.dictionary(forKey: HEADERS_KEY) as? [String: String] ?? [:]
     headers["User-Agent"] = headers["User-Agent"] ?? userAgent

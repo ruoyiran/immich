@@ -16,6 +16,7 @@ mobile/gradle.properties
 mobile/*.jks
 mobile/libisar.dylib
 mobile/ios/build
+mobile/android/.kotlin/
 
 packages/**/build
 mobile/android/fastlane/report.xml

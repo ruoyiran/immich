@@ -48,8 +48,10 @@ class ApiService {
   }
   final _log = Logger("ApiService");
 
+  static String? get nativeAccessToken => Store.tryGet(StoreKey.accessToken);
+
   Future<void> updateHeaders() async {
-    await NetworkRepository.setHeaders(getRequestHeaders(), getServerUrls());
+    await NetworkRepository.setHeaders(getRequestHeaders(), getServerUrls(), token: nativeAccessToken);
     _apiClient.client = NetworkRepository.client;
   }
 

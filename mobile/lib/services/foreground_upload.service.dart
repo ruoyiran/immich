@@ -20,7 +20,6 @@ import 'package:immich_mobile/providers/infrastructure/storage.provider.dart';
 import 'package:immich_mobile/repositories/asset_media.repository.dart';
 import 'package:immich_mobile/repositories/upload.repository.dart';
 import 'package:logging/logging.dart';
-import 'package:openapi/api.dart';
 import 'package:path/path.dart' as p;
 import 'package:photo_manager/photo_manager.dart' show PMProgressHandler;
 
@@ -243,8 +242,20 @@ class ForegroundUploadService {
   }) async {
     File? file;
     File? livePhotoFile;
+    File? pmliveFile;
+    var removePMLive = false;
 
     try {
+      final checksum = await _uploadRepository.ensureAssetChecksum(asset.id, asset.checksum);
+      final terminal = await _uploadRepository.preflightResumableTerminal(checksum: checksum, uploadId: asset.id);
+      if (terminal != null) {
+        if (terminal.isSuccess && terminal.remoteAssetId != null) {
+          callbacks.onSuccess?.call(asset.localId!, terminal.remoteAssetId!);
+        } else if (terminal.errorMessage != null) {
+          callbacks.onError?.call(asset.localId!, terminal.errorMessage!);
+        }
+        return;
+      }
       final entity = await _storageRepository.getAssetEntityForAsset(asset);
       if (entity == null) {
         callbacks.onError?.call(
@@ -313,8 +324,28 @@ class ForegroundUploadService {
       final fileName = await _assetMediaRepository.getOriginalFilename(asset.id) ?? asset.name;
       // Some apps (e.g. DJI/Fusion) return names without an extension; fall back to the asset name for those.
       final extension = p.extension(file.path).isNotEmpty ? p.extension(file.path) : p.extension(asset.name);
-      final originalFileName = p.setExtension(fileName, extension);
+      var originalFileName = p.setExtension(fileName, extension);
       final deviceId = Store.get(StoreKey.deviceId);
+      var uploadFile = file;
+
+      if (entity.isLivePhoto) {
+        if (livePhotoFile == null) {
+          return;
+        }
+        final motionName = p.setExtension(fileName, p.extension(livePhotoFile.path));
+        pmliveFile = await _uploadRepository.createPMLiveBundle(
+          assetId: asset.id,
+          checksum: checksum,
+          stillFile: file,
+          motionFile: livePhotoFile,
+          stillOriginalName: originalFileName,
+          motionOriginalName: motionName,
+          createdAt: asset.createdAt,
+          modifiedAt: asset.updatedAt,
+        );
+        uploadFile = pmliveFile;
+        originalFileName = p.setExtension(fileName, '.pmlive');
+      }
 
       final fields = {
         // deviceAssetId/deviceId required by server v2.7.5 and below (drop in v4.0 per #27818).
@@ -326,34 +357,7 @@ class ForegroundUploadService {
         'duration': (asset.durationMs ?? 0).toString(),
       };
 
-      // Upload live photo video first if available
-      String? livePhotoVideoId;
-      if (entity.isLivePhoto && livePhotoFile != null) {
-        final livePhotoTitle = p.setExtension(originalFileName, p.extension(livePhotoFile.path));
-
-        final onProgress = callbacks.onProgress;
-        final livePhotoResult = await _uploadRepository.uploadFile(
-          file: livePhotoFile,
-          originalFileName: livePhotoTitle,
-          // Visibility hidden on upload to prevent the server from running regular jobs on the live photo asset
-          fields: {...fields, 'visibility': AssetVisibility.hidden.toString()},
-          cancelToken: cancelToken,
-          onProgress: onProgress != null
-              ? (bytes, totalBytes) => onProgress(asset.localId!, livePhotoTitle, bytes, totalBytes)
-              : null,
-          logContext: 'livePhotoVideo[${asset.localId}]',
-        );
-
-        if (livePhotoResult.isSuccess && livePhotoResult.remoteAssetId != null) {
-          livePhotoVideoId = livePhotoResult.remoteAssetId;
-        }
-      }
-
-      if (livePhotoVideoId != null) {
-        fields['livePhotoVideoId'] = livePhotoVideoId;
-      }
-
-      // Add cloudId metadata only to the still image, not the motion video, becasue when the sync id happens, the motion video can get associated with the wrong still image.
+      // Cloud metadata remains attached to the one logical still asset.
       if (CurrentPlatform.isIOS && asset.cloudId != null) {
         fields['metadata'] = jsonEncode([
           RemoteAssetMetadataItem(
@@ -371,7 +375,7 @@ class ForegroundUploadService {
 
       final onProgress = callbacks.onProgress;
       final result = await _uploadRepository.uploadFile(
-        file: file,
+        file: uploadFile,
         originalFileName: originalFileName,
         fields: fields,
         cancelToken: cancelToken,
@@ -379,7 +383,11 @@ class ForegroundUploadService {
             ? (bytes, totalBytes) => onProgress(asset.localId!, originalFileName, bytes, totalBytes)
             : null,
         logContext: 'asset[${asset.localId}]',
+        checksum: checksum,
+        uploadId: asset.id,
       );
+
+      removePMLive = result.isSuccess;
 
       if (result.isSuccess && result.remoteAssetId != null) {
         callbacks.onSuccess?.call(asset.localId!, result.remoteAssetId!);
@@ -401,14 +409,24 @@ class ForegroundUploadService {
       _logger.severe(() => "Error backup asset: $error", stackTrace);
       callbacks.onError?.call(asset.localId!, error.toString());
     } finally {
-      if (Platform.isIOS) {
-        try {
-          await file?.delete();
-          await livePhotoFile?.delete();
-        } catch (error, stackTrace) {
-          _logger.severe(() => "ERROR deleting file: $error", stackTrace);
+      if (CurrentPlatform.isIOS) {
+        await _deleteTempFile(file);
+        await _deleteTempFile(livePhotoFile);
+        if (removePMLive) {
+          await _deleteTempFile(pmliveFile);
         }
       }
+    }
+  }
+
+  Future<void> _deleteTempFile(File? file) async {
+    if (file == null || !file.existsSync()) {
+      return;
+    }
+    try {
+      await file.delete();
+    } catch (error, stackTrace) {
+      _logger.severe(() => 'ERROR deleting ${file.path}: $error', stackTrace);
     }
   }
 
@@ -434,6 +452,7 @@ class ForegroundUploadService {
         'isFavorite': 'false',
         'duration': '0',
       };
+      final checksum = await _uploadRepository.hashShareIntentFile(file);
 
       return await _uploadRepository.uploadFile(
         file: file,
@@ -442,6 +461,8 @@ class ForegroundUploadService {
         cancelToken: cancelToken,
         onProgress: onProgress,
         logContext: 'shareIntent[$deviceAssetId]',
+        checksum: checksum,
+        uploadId: deviceAssetId,
       );
     } catch (e) {
       return UploadResult.error(errorMessage: e.toString());

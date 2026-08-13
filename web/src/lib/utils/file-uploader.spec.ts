@@ -1,4 +1,10 @@
-import { AssetMediaStatus, type AssetMediaResponseDto, type UserAdminResponseDto } from '@immich/sdk';
+import {
+  AssetMediaStatus,
+  AssetUploadAction,
+  type AssetMediaResponseDto,
+  type UserAdminResponseDto,
+} from '@immich/sdk';
+import * as sdk from '@immich/sdk';
 import { get } from 'svelte/store';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { authManager } from '$lib/managers/auth-manager.svelte';
@@ -20,6 +26,27 @@ describe('fileUploader error handling', () => {
     vi.spyOn(uploadManager, 'getExtensions').mockReturnValue(['.jpg']);
     uploadAssetsStore.reset();
     authManager.reset();
+    vi.spyOn(sdk, 'checkBulkUpload').mockResolvedValue({
+      results: [{ id: mockFile.name, action: AssetUploadAction.Accept }],
+    });
+    vi.stubGlobal(
+      'Worker',
+      class {
+        private onMessage?: (event: MessageEvent<{ result: string }>) => void;
+
+        addEventListener(type: string, listener: (event: MessageEvent<{ result: string }>) => void) {
+          if (type === 'message') {
+            this.onMessage = listener;
+          }
+        }
+
+        postMessage() {
+          queueMicrotask(() => this.onMessage?.(new MessageEvent('message', { data: { result: '0123456789abcdef' } })));
+        }
+
+        terminate() {}
+      },
+    );
   });
 
   for (const [name, mockUser] of [
@@ -68,5 +95,68 @@ describe('fileUploader error handling', () => {
     const items = get(uploadAssetsStore);
     expect(items.length).toBe(1);
     expect(items[0].state).toBe(UploadState.STARTED);
+  });
+
+  describe('pinned upload compatibility contract', () => {
+    beforeEach(() => authManager.setUser(mockUserObject));
+
+    it('uploads an accepted checksum and handles a 201 created response', async () => {
+      vi.spyOn(sdk, 'checkBulkUpload').mockResolvedValue({
+        results: [{ id: mockFile.name, action: AssetUploadAction.Accept }],
+      });
+      const upload = vi
+        .spyOn(utils, 'uploadRequest')
+        .mockResolvedValue({ status: 201, data: { id: 'created-id', status: AssetMediaStatus.Created } });
+
+      expect(await fileUploadHandler({ files: [mockFile] })).toEqual(['created-id']);
+
+      expect(upload).toHaveBeenCalledOnce();
+      expect(get(uploadAssetsStore)[0]).toMatchObject({ state: UploadState.DONE, assetId: 'created-id' });
+    });
+
+    for (const [name, isTrashed] of [
+      ['active', false],
+      ['trashed', true],
+    ] as const) {
+      it(`uses the ${name} bulk-check duplicate without uploading bytes`, async () => {
+        vi.spyOn(sdk, 'checkBulkUpload').mockResolvedValue({
+          results: [
+            {
+              id: mockFile.name,
+              action: AssetUploadAction.Reject,
+              assetId: `${name}-duplicate-id`,
+              isTrashed,
+            },
+          ],
+        });
+        const upload = vi.spyOn(utils, 'uploadRequest');
+
+        expect(await fileUploadHandler({ files: [mockFile] })).toEqual([`${name}-duplicate-id`]);
+
+        expect(upload).not.toHaveBeenCalled();
+        expect(get(uploadAssetsStore)[0]).toMatchObject({
+          state: UploadState.DUPLICATED,
+          assetId: `${name}-duplicate-id`,
+          isTrashed,
+        });
+      });
+    }
+
+    it('handles a 200 duplicate response after an accepted bulk check', async () => {
+      vi.spyOn(sdk, 'checkBulkUpload').mockResolvedValue({
+        results: [{ id: mockFile.name, action: AssetUploadAction.Accept }],
+      });
+      vi.spyOn(utils, 'uploadRequest').mockResolvedValue({
+        status: 200,
+        data: { id: 'raced-duplicate-id', status: AssetMediaStatus.Duplicate },
+      });
+
+      expect(await fileUploadHandler({ files: [mockFile] })).toEqual(['raced-duplicate-id']);
+
+      expect(get(uploadAssetsStore)[0]).toMatchObject({
+        state: UploadState.DUPLICATED,
+        assetId: 'raced-duplicate-id',
+      });
+    });
   });
 });

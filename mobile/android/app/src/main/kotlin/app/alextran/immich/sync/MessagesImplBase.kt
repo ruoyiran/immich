@@ -108,6 +108,10 @@ open class NativeSyncApiImplBase(context: Context) : ImmichPlugin(), ActivityAwa
           SdkExtensions.getExtensionVersion(Build.VERSION_CODES.S) >= 21)
   }
 
+  fun createPMLive(input: PMLiveInput, callback: (Result<String>) -> Unit) {
+    callback(Result.failure(UnsupportedOperationException("PMLive is only supported for iOS Live Photos")))
+  }
+
   protected fun getCursor(
     volume: String,
     selection: String,

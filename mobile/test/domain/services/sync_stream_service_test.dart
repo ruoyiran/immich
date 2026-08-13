@@ -218,6 +218,33 @@ void main() {
       verifyNever(() => mockAbortCallbackWrapper());
     });
 
+    test("acknowledges every completion carried by a SyncAckV1 batch", () async {
+      final events = [
+        const SyncEvent(type: SyncEntityType.syncAckV1, data: Object(), ack: "AssetV2|74032|complete"),
+        const SyncEvent(type: SyncEntityType.syncAckV1, data: Object(), ack: "AssetExifV1|74032|complete"),
+        const SyncEvent(type: SyncEntityType.syncAckV1, data: Object(), ack: "PersonV1|74032|complete"),
+      ];
+
+      await simulateEvents(events);
+
+      verify(
+        () => mockSyncApiRepo.ack(["AssetV2|74032|complete", "AssetExifV1|74032|complete", "PersonV1|74032|complete"]),
+      ).called(1);
+      verifyNever(() => mockSyncApiRepo.ack(["PersonV1|74032|complete"]));
+    });
+
+    test("compacts repeated SyncAckV1 progress by embedded entity type", () async {
+      final events = [
+        for (var cursor = 1; cursor <= 1001; cursor++)
+          SyncEvent(type: SyncEntityType.syncAckV1, data: Object(), ack: "AssetV2|$cursor"),
+        const SyncEvent(type: SyncEntityType.syncAckV1, data: Object(), ack: "AssetExifV1|1001|complete"),
+      ];
+
+      await simulateEvents(events);
+
+      verify(() => mockSyncApiRepo.ack(["AssetV2|1001", "AssetExifV1|1001|complete"])).called(1);
+    });
+
     test("does not process or ack when event list is empty", () async {
       await simulateEvents([]);
 

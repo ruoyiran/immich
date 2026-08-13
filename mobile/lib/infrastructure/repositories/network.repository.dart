@@ -8,6 +8,10 @@ import 'package:ok_http/ok_http.dart';
 import 'package:web_socket/web_socket.dart';
 
 class NetworkRepository {
+  // Initial sync stages a consistent snapshot before the first response byte.
+  // Large libraries can legitimately remain read-idle for several minutes.
+  static const Duration readTimeout = Duration(minutes: 30);
+
   static http.Client? _client;
   static Pointer<Void>? _clientPointer;
 
@@ -26,7 +30,7 @@ class NetworkRepository {
         clientPointer,
         configuration: const OkHttpClientConfiguration(
           connectTimeout: Duration(seconds: 30),
-          readTimeout: Duration(seconds: 60),
+          readTimeout: readTimeout,
           writeTimeout: Duration(seconds: 60),
         ),
       );

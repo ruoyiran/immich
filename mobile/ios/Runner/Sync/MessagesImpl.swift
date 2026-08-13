@@ -476,4 +476,27 @@ class NativeSyncApiImpl: ImmichPlugin, NativeSyncApi, FlutterPlugin {
     }
     return mappings;
   }
+
+  func createPMLive(input: PMLiveInput, completion: @escaping (Result<String, Error>) -> Void) {
+    DispatchQueue.global(qos: .utility).async {
+      do {
+        let output = try PMLiveWriter.write(
+          PMLiveWriterInput(
+            stillURL: URL(fileURLWithPath: input.stillPath),
+            motionURL: URL(fileURLWithPath: input.motionPath),
+            outputURL: URL(fileURLWithPath: input.outputPath),
+            stillOriginalName: input.stillOriginalName,
+            motionOriginalName: input.motionOriginalName,
+            stillUTI: input.stillUTI,
+            motionUTI: input.motionUTI,
+            createdUnixNano: input.createdUnixNano,
+            modifiedUnixNano: input.modifiedUnixNano
+          )
+        )
+        completion(.success(output.path))
+      } catch {
+        completion(.failure(error))
+      }
+    }
+  }
 }

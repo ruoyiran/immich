@@ -103,6 +103,30 @@ class CloudIdResult {
   const CloudIdResult({required this.assetId, this.error, this.cloudId});
 }
 
+class PMLiveInput {
+  final String stillPath;
+  final String motionPath;
+  final String outputPath;
+  final String stillOriginalName;
+  final String motionOriginalName;
+  final String stillUTI;
+  final String motionUTI;
+  final int createdUnixNano;
+  final int modifiedUnixNano;
+
+  const PMLiveInput({
+    required this.stillPath,
+    required this.motionPath,
+    required this.outputPath,
+    required this.stillOriginalName,
+    required this.motionOriginalName,
+    required this.stillUTI,
+    required this.motionUTI,
+    required this.createdUnixNano,
+    required this.modifiedUnixNano,
+  });
+}
+
 @HostApi()
 abstract class NativeSyncApi {
   @async
@@ -143,4 +167,7 @@ abstract class NativeSyncApi {
 
   @TaskQueue(type: TaskQueueType.serialBackgroundThread)
   List<CloudIdResult> getCloudIdForAssetIds(List<String> assetIds);
+
+  @async
+  String createPMLive(PMLiveInput input);
 }

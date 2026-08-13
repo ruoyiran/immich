@@ -184,8 +184,20 @@ class SyncStreamService {
 
     final type = batch.first.type;
     await _handleSyncData(type, batch.map((e) => e.data));
-    await _syncApiRepository.ack([batch.last.ack]);
+    final acknowledgements = type == SyncEntityType.syncAckV1 ? _compactSyncAcks(batch) : [batch.last.ack];
+    await _syncApiRepository.ack(acknowledgements);
     batch.clear();
+  }
+
+  List<String> _compactSyncAcks(List<SyncEvent> batch) {
+    final latestByEntityType = <String, String>{};
+    for (final event in batch) {
+      // The wrapper type is always SyncAckV1; the checkpoint owner is encoded before the first separator.
+      final separator = event.ack.indexOf('|');
+      final entityType = separator < 0 ? event.ack : event.ack.substring(0, separator);
+      latestByEntityType[entityType] = event.ack;
+    }
+    return latestByEntityType.values.toList(growable: false);
   }
 
   Future<void> _handleSyncData(SyncEntityType type, Iterable<Object> data) async {
