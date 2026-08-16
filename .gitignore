@@ -10,6 +10,7 @@ docker/upload
 docker/library
 uploads
 coverage
+.worktrees/
 
 mobile/generated
 mobile/gradle.properties
