@@ -3,22 +3,9 @@ import { sveltekit } from '@sveltejs/kit/vite';
 import tailwindcss from '@tailwindcss/vite';
 import { svelteTesting } from '@testing-library/svelte/vite';
 import { visualizer } from 'rollup-plugin-visualizer';
-import { defineConfig, type ProxyOptions, type UserConfig } from 'vite';
+import { defineConfig, type UserConfig } from 'vite';
 import path from 'node:path';
-
-const upstream = {
-  target: process.env.IMMICH_SERVER_URL || 'http://immich-server:2283/',
-  secure: true,
-  changeOrigin: true,
-  logLevel: 'info',
-  ws: true,
-};
-
-const proxy: Record<string, string | ProxyOptions> = {
-  '/api': upstream,
-  '/.well-known/immich': upstream,
-  '/custom.css': upstream,
-};
+import { proxy } from './vite-proxy';
 
 export default defineConfig({
   build: {
