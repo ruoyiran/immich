@@ -39,7 +39,6 @@ class DownloadAction extends AssetActionBuilder {
       unawaited(
         Future.delayed(const .new(seconds: 1), () async {
           await backgroundSync.syncLocal();
-          await backgroundSync.hashAssets();
         }),
       );
     } catch (error, stack) {

@@ -280,12 +280,20 @@ class DriftLocalAlbumRepository extends DriftDatabaseRepository {
       for (final asset in localAssets) {
         final companion = LocalAssetEntityCompanion(
           checksum: const Value(null),
+          contentMd5: const Value(null),
+          contentSize: Value(asset.contentSize),
+          hashAlgorithm: const Value(null),
+          hashedModifiedAt: const Value(null),
           adjustmentTime: Value(asset.adjustmentTime),
         );
         batch.update(
           _db.localAssetEntity,
           companion,
-          where: (row) => row.id.equals(asset.id) & row.adjustmentTime.isNotExp(Variable(asset.adjustmentTime)),
+          where: (row) =>
+              row.id.equals(asset.id) &
+              (row.adjustmentTime.isNotExp(Variable(asset.adjustmentTime)) |
+                  row.updatedAt.isNotValue(asset.updatedAt) |
+                  row.contentSize.isNotExp(Variable(asset.contentSize))),
         );
       }
     });
@@ -307,10 +315,17 @@ class DriftLocalAlbumRepository extends DriftDatabaseRepository {
           latitude: Value(asset.latitude),
           longitude: Value(asset.longitude),
           adjustmentTime: Value(asset.adjustmentTime),
+          contentSize: Value(asset.contentSize),
         );
         batch.insert<$LocalAssetEntityTable, LocalAssetEntityData>(
           _db.localAssetEntity,
-          companion.copyWith(checksum: const Value(null)),
+          companion.copyWith(
+            checksum: const Value(null),
+            contentMd5: const Value(null),
+            contentSize: Value(asset.contentSize),
+            hashAlgorithm: const Value(null),
+            hashedModifiedAt: const Value(null),
+          ),
           onConflict: DoUpdate((old) => companion),
         );
       }
@@ -334,6 +349,10 @@ class DriftLocalAlbumRepository extends DriftDatabaseRepository {
           durationMs: Value(asset.durationMs),
           id: asset.id,
           checksum: const Value(null),
+          contentMd5: const Value(null),
+          contentSize: Value(asset.contentSize),
+          hashAlgorithm: const Value(null),
+          hashedModifiedAt: const Value(null),
           orientation: Value(asset.orientation),
           isFavorite: Value(asset.isFavorite),
           playbackStyle: Value(asset.playbackStyle),

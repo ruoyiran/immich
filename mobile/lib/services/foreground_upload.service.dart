@@ -19,6 +19,7 @@ import 'package:immich_mobile/providers/infrastructure/platform.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/storage.provider.dart';
 import 'package:immich_mobile/repositories/asset_media.repository.dart';
 import 'package:immich_mobile/repositories/upload.repository.dart';
+import 'package:immich_mobile/utils/upload_source_metadata.dart';
 import 'package:logging/logging.dart';
 import 'package:path/path.dart' as p;
 import 'package:photo_manager/photo_manager.dart' show PMProgressHandler;
@@ -82,7 +83,7 @@ class ForegroundUploadService {
     UploadCallbacks callbacks = const UploadCallbacks(),
     bool useSequentialUpload = false,
   }) async {
-    final candidates = await _backupRepository.getCandidates(userId);
+    final candidates = await _backupRepository.getCandidates(userId, onlyHashed: false);
     if (candidates.isEmpty) {
       return;
     }
@@ -242,19 +243,52 @@ class ForegroundUploadService {
   }) async {
     File? file;
     File? livePhotoFile;
-    File? pmliveFile;
-    var removePMLive = false;
+    var temporaryLivePhotoFiles = false;
 
     try {
-      final checksum = await _uploadRepository.ensureAssetChecksum(asset.id, asset.checksum);
-      final terminal = await _uploadRepository.preflightResumableTerminal(checksum: checksum, uploadId: asset.id);
-      if (terminal != null) {
-        if (terminal.isSuccess && terminal.remoteAssetId != null) {
-          callbacks.onSuccess?.call(asset.localId!, terminal.remoteAssetId!);
-        } else if (terminal.errorMessage != null) {
-          callbacks.onError?.call(asset.localId!, terminal.errorMessage!);
+      final deviceId = Store.get(StoreKey.deviceId);
+      if ((!CurrentPlatform.isAndroid || !asset.isMotionPhoto) && asset.contentSize != null) {
+        final identityFields = {
+          'deviceAssetId': asset.localId!,
+          'deviceId': deviceId,
+          'fileCreatedAt': asset.createdAt.toUtc().toIso8601String(),
+          'fileModifiedAt': asset.updatedAt.toUtc().toIso8601String(),
+          'sourceMetadata': buildUploadSourceMetadata(asset, originalName: asset.name, deviceId: deviceId),
+        };
+        final linked = await _uploadRepository.preflightLocalAssetIdentity(
+          assetId: asset.id,
+          localAssetId: asset.localId!,
+          deviceId: deviceId,
+          size: asset.contentSize!,
+          modifiedAt: asset.updatedAt,
+          originalFileName: asset.name,
+          fields: identityFields,
+        );
+        if (linked != null) {
+          callbacks.onSuccess?.call(asset.localId!, linked.remoteAssetId!);
+          return;
         }
-        return;
+      }
+      String? checksum;
+      if (!CurrentPlatform.isAndroid || !asset.isMotionPhoto) {
+        checksum = await _uploadRepository.ensureAssetChecksum(
+          asset.id,
+          asset.checksum,
+          contentMd5: asset.contentMd5,
+          contentSize: asset.contentSize,
+          hashAlgorithm: asset.hashAlgorithm,
+          hashedModifiedAt: asset.hashedModifiedAt,
+          modifiedAt: asset.updatedAt,
+        );
+        final terminal = await _uploadRepository.preflightResumableTerminal(checksum: checksum, uploadId: asset.id);
+        if (terminal != null) {
+          if (terminal.isSuccess && terminal.remoteAssetId != null) {
+            callbacks.onSuccess?.call(asset.localId!, terminal.remoteAssetId!);
+          } else if (terminal.errorMessage != null) {
+            callbacks.onError?.call(asset.localId!, terminal.errorMessage!);
+          }
+          return;
+        }
       }
       final entity = await _storageRepository.getAssetEntityForAsset(asset);
       if (entity == null) {
@@ -292,7 +326,14 @@ class ForegroundUploadService {
         }
       } else {
         // Get files locally
-        file = await _storageRepository.getFileForAsset(asset.id);
+        if (entity.isLivePhoto && CurrentPlatform.isAndroid) {
+          final liveFiles = await _storageRepository.getLivePhotoFilesForAsset(asset);
+          file = liveFiles?.still;
+          livePhotoFile = liveFiles?.motion;
+          temporaryLivePhotoFiles = liveFiles?.temporary ?? false;
+        } else {
+          file = await _storageRepository.getFileForAsset(asset.id);
+        }
         if (file == null) {
           _logger.warning("Failed to get file ${asset.id} - ${asset.name}");
           callbacks.onError?.call(
@@ -303,7 +344,7 @@ class ForegroundUploadService {
         }
 
         // For live photos, get the motion video file
-        if (entity.isLivePhoto) {
+        if (entity.isLivePhoto && livePhotoFile == null) {
           livePhotoFile = await _storageRepository.getMotionFileForAsset(asset);
           if (livePhotoFile == null) {
             _logger.warning("Failed to obtain motion part of the livePhoto - ${asset.name}");
@@ -321,32 +362,37 @@ class ForegroundUploadService {
         return;
       }
 
+      final uploadChecksum =
+          checksum ??
+          await _uploadRepository.ensureAssetFileChecksum(
+            asset.id,
+            file,
+            checksum: asset.checksum,
+            contentMd5: asset.contentMd5,
+            contentSize: asset.contentSize,
+            hashAlgorithm: asset.hashAlgorithm,
+            hashedModifiedAt: asset.hashedModifiedAt,
+            modifiedAt: asset.updatedAt,
+          );
+      if (checksum == null) {
+        final terminal = await _uploadRepository.preflightResumableTerminal(
+          checksum: uploadChecksum,
+          uploadId: asset.id,
+        );
+        if (terminal != null) {
+          if (terminal.isSuccess && terminal.remoteAssetId != null) {
+            callbacks.onSuccess?.call(asset.localId!, terminal.remoteAssetId!);
+          } else if (terminal.errorMessage != null) {
+            callbacks.onError?.call(asset.localId!, terminal.errorMessage!);
+          }
+          return;
+        }
+      }
+
       final fileName = await _assetMediaRepository.getOriginalFilename(asset.id) ?? asset.name;
       // Some apps (e.g. DJI/Fusion) return names without an extension; fall back to the asset name for those.
       final extension = p.extension(file.path).isNotEmpty ? p.extension(file.path) : p.extension(asset.name);
-      var originalFileName = p.setExtension(fileName, extension);
-      final deviceId = Store.get(StoreKey.deviceId);
-      var uploadFile = file;
-
-      if (entity.isLivePhoto) {
-        if (livePhotoFile == null) {
-          return;
-        }
-        final motionName = p.setExtension(fileName, p.extension(livePhotoFile.path));
-        pmliveFile = await _uploadRepository.createPMLiveBundle(
-          assetId: asset.id,
-          checksum: checksum,
-          stillFile: file,
-          motionFile: livePhotoFile,
-          stillOriginalName: originalFileName,
-          motionOriginalName: motionName,
-          createdAt: asset.createdAt,
-          modifiedAt: asset.updatedAt,
-        );
-        uploadFile = pmliveFile;
-        originalFileName = p.setExtension(fileName, '.pmlive');
-      }
-
+      final originalFileName = p.setExtension(fileName, extension);
       final fields = {
         // deviceAssetId/deviceId required by server v2.7.5 and below (drop in v4.0 per #27818).
         'deviceAssetId': asset.localId!,
@@ -355,7 +401,33 @@ class ForegroundUploadService {
         'fileModifiedAt': asset.updatedAt.toUtc().toIso8601String(),
         'isFavorite': asset.isFavorite.toString(),
         'duration': (asset.durationMs ?? 0).toString(),
+        'sourceMetadata': buildUploadSourceMetadata(asset, originalName: originalFileName, deviceId: deviceId),
       };
+
+      if (entity.isLivePhoto) {
+        if (livePhotoFile == null) {
+          return;
+        }
+        final motionName = p.setExtension(fileName, p.extension(livePhotoFile.path));
+        final motionChecksum = await _uploadRepository.hashShareIntentFile(livePhotoFile);
+        final motionResult = await _uploadRepository.uploadFile(
+          file: livePhotoFile,
+          originalFileName: motionName,
+          fields: {...fields, 'visibility': 'hidden', 'livePhotoRole': 'motion'},
+          cancelToken: cancelToken,
+          onProgress: callbacks.onProgress != null
+              ? (bytes, totalBytes) => callbacks.onProgress!(asset.localId!, motionName, bytes, totalBytes)
+              : null,
+          logContext: 'livePhotoMotion[${asset.localId}]',
+          checksum: motionChecksum,
+          uploadId: '${asset.id}:motion',
+        );
+        if (!motionResult.isSuccess || motionResult.remoteAssetId == null) {
+          callbacks.onError?.call(asset.localId!, motionResult.errorMessage ?? 'Failed to upload Live Photo motion');
+          return;
+        }
+        fields['livePhotoVideoId'] = motionResult.remoteAssetId!;
+      }
 
       // Cloud metadata remains attached to the one logical still asset.
       if (CurrentPlatform.isIOS && asset.cloudId != null) {
@@ -375,7 +447,7 @@ class ForegroundUploadService {
 
       final onProgress = callbacks.onProgress;
       final result = await _uploadRepository.uploadFile(
-        file: uploadFile,
+        file: file,
         originalFileName: originalFileName,
         fields: fields,
         cancelToken: cancelToken,
@@ -383,11 +455,9 @@ class ForegroundUploadService {
             ? (bytes, totalBytes) => onProgress(asset.localId!, originalFileName, bytes, totalBytes)
             : null,
         logContext: 'asset[${asset.localId}]',
-        checksum: checksum,
+        checksum: uploadChecksum,
         uploadId: asset.id,
       );
-
-      removePMLive = result.isSuccess;
 
       if (result.isSuccess && result.remoteAssetId != null) {
         callbacks.onSuccess?.call(asset.localId!, result.remoteAssetId!);
@@ -409,12 +479,9 @@ class ForegroundUploadService {
       _logger.severe(() => "Error backup asset: $error", stackTrace);
       callbacks.onError?.call(asset.localId!, error.toString());
     } finally {
-      if (CurrentPlatform.isIOS) {
+      if (CurrentPlatform.isIOS || temporaryLivePhotoFiles) {
         await _deleteTempFile(file);
         await _deleteTempFile(livePhotoFile);
-        if (removePMLive) {
-          await _deleteTempFile(pmliveFile);
-        }
       }
     }
   }

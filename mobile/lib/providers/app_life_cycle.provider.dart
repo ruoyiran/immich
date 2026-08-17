@@ -130,16 +130,7 @@ class AppLifeCycleNotifier extends StateNotifier<AppLifeCycleEnum> {
       ]);
       _ref.invalidate(driftMemoryFutureProvider);
       if (syncSuccess) {
-        await Future.wait([
-          _safeRun(backgroundManager.hashAssets, "hashAssets").then((_) {
-            unawaited(_resumeBackup());
-          }),
-          _resumeBackup(),
-          // TODO: Bring back when the soft freeze issue is addressed
-          // _safeRun(backgroundManager.syncCloudIds(), "syncCloudIds"),
-        ]);
-      } else {
-        await _safeRun(backgroundManager.hashAssets, "hashAssets");
+        await _resumeBackup();
       }
 
       if (isAlbumLinkedSyncEnable) {

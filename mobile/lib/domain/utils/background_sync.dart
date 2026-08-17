@@ -19,10 +19,6 @@ class BackgroundSyncManager {
   final SyncCallback? onLocalSyncComplete;
   final SyncErrorCallback? onLocalSyncError;
 
-  final SyncCallback? onHashingStart;
-  final SyncCallback? onHashingComplete;
-  final SyncErrorCallback? onHashingError;
-
   final SyncCallback? onCloudIdSyncStart;
   final SyncCallback? onCloudIdSyncComplete;
   final SyncErrorCallback? onCloudIdSyncError;
@@ -33,7 +29,6 @@ class BackgroundSyncManager {
   Cancelable<void>? _cloudIdSyncTask;
   Cancelable<void>? _deviceAlbumSyncTask;
   Cancelable<void>? _linkedAlbumSyncTask;
-  Cancelable<void>? _hashTask;
 
   BackgroundSyncManager({
     this.onRemoteSyncStart,
@@ -42,9 +37,6 @@ class BackgroundSyncManager {
     this.onLocalSyncStart,
     this.onLocalSyncComplete,
     this.onLocalSyncError,
-    this.onHashingStart,
-    this.onHashingComplete,
-    this.onHashingError,
     this.onCloudIdSyncStart,
     this.onCloudIdSyncComplete,
     this.onCloudIdSyncError,
@@ -54,7 +46,7 @@ class BackgroundSyncManager {
   // stays referenced but frozen, so on resume the dedupe guards would hand back the
   // stale task instead of syncing (#28082). Websocket and cloud-id are excluded - the
   // resume path never restarts them. [_allTasks] builds on this so the lists can't drift.
-  List<Cancelable?> get _resumeSyncTasks => [_syncTask, _deviceAlbumSyncTask, _hashTask, _linkedAlbumSyncTask];
+  List<Cancelable?> get _resumeSyncTasks => [_syncTask, _deviceAlbumSyncTask, _linkedAlbumSyncTask];
 
   List<Cancelable?> get _allTasks => [_syncWebsocketTask, _cloudIdSyncTask, ..._resumeSyncTasks];
 
@@ -66,7 +58,6 @@ class BackgroundSyncManager {
     _cloudIdSyncTask = null;
     _linkedAlbumSyncTask = null;
     _deviceAlbumSyncTask = null;
-    _hashTask = null;
     await _cancelAll(tasks);
   }
 
@@ -75,7 +66,6 @@ class BackgroundSyncManager {
     final tasks = _resumeSyncTasks;
     _syncTask = null;
     _deviceAlbumSyncTask = null;
-    _hashTask = null;
     _linkedAlbumSyncTask = null;
     await _cancelAll(tasks);
   }
@@ -127,32 +117,6 @@ class BackgroundSyncManager {
         .catchError((error) {
           if (error is! CanceledError) {
             onLocalSyncError?.call(error.toString());
-          }
-        });
-  }
-
-  Future<void> hashAssets() {
-    if (_hashTask != null) {
-      return _hashTask!.future.catchError((_) {}, test: (error) => error is CanceledError);
-    }
-
-    onHashingStart?.call();
-
-    final task = _hashTask = runInIsolateGentle(
-      computation: (ref) => ref.read(hashServiceProvider).hashAssets(),
-      debugLabel: 'hash-assets',
-    );
-
-    return task
-        .whenComplete(() {
-          onHashingComplete?.call();
-          if (identical(_hashTask, task)) {
-            _hashTask = null;
-          }
-        })
-        .catchError((error) {
-          if (error is! CanceledError) {
-            onHashingError?.call(error.toString());
           }
         });
   }

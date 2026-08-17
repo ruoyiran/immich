@@ -332,16 +332,7 @@ class SplashScreenPageState extends ConsumerState<SplashScreenPage> {
                   await viewIntentHandler.flushDeferredViewIntent();
 
                   if (syncSuccess) {
-                    await Future.wait([
-                      backgroundManager.hashAssets().then((_) {
-                        unawaited(_resumeBackup(backupProvider));
-                      }),
-                      _resumeBackup(backupProvider),
-                      // TODO: Bring back when the soft freeze issue is addressed
-                      // backgroundManager.syncCloudIds(),
-                    ]);
-                  } else {
-                    await backgroundManager.hashAssets();
+                    await _resumeBackup(backupProvider);
                   }
 
                   if (SettingsRepository.instance.appConfig.backup.syncAlbums) {

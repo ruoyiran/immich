@@ -366,6 +366,7 @@ class LocalSyncService {
           a.createdAt.isAtSameMomentAs(b.createdAt) &&
           a.width == b.width &&
           a.height == b.height &&
+          a.contentSize == b.contentSize &&
           a.durationMs == b.durationMs;
     }
 
@@ -375,6 +376,7 @@ class LocalSyncService {
         a.createdAt.isAtSameMomentAs(b.createdAt) &&
         a.width == b.width &&
         a.height == b.height &&
+        a.contentSize == b.contentSize &&
         a.durationMs == b.durationMs &&
         a.latitude == b.latitude &&
         a.longitude == b.longitude;
@@ -461,6 +463,7 @@ extension PlatformToLocalAsset on PlatformAsset {
     updatedAt: tryFromSecondsSinceEpoch(updatedAt, isUtc: true) ?? DateTime.timestamp(),
     width: width,
     height: height,
+    contentSize: size,
     durationMs: durationMs,
     isFavorite: isFavorite,
     orientation: orientation,

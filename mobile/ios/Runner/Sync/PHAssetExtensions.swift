@@ -21,6 +21,7 @@ extension PHAsset {
       updatedAt: modificationDate.map { Int64($0.timeIntervalSince1970) },
       width: Int64(pixelWidth),
       height: Int64(pixelHeight),
+      size: originalResourceSize,
       durationMs: Int64(duration * 1000),
       orientation: 0,
       isFavorite: isFavorite,
@@ -44,6 +45,14 @@ extension PHAsset {
       return Int64(date.timeIntervalSince1970)
     }
     return nil
+  }
+
+  var originalResourceSize: Int64? {
+    guard let number = getResource()?.value(forKey: "fileSize") as? NSNumber else {
+      return nil
+    }
+    let size = number.int64Value
+    return size > 0 ? size : nil
   }
 
   // This method is expected to be slow as it goes through the asset resources to fetch the originalFilename

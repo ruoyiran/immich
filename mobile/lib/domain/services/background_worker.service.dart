@@ -6,7 +6,6 @@ import 'package:background_downloader/background_downloader.dart';
 import 'package:flutter/material.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:immich_mobile/constants/constants.dart';
-import 'package:immich_mobile/domain/services/hash.service.dart';
 import 'package:immich_mobile/domain/services/local_sync.service.dart';
 import 'package:immich_mobile/domain/services/log.service.dart';
 import 'package:immich_mobile/domain/services/sync_stream.service.dart';
@@ -68,7 +67,6 @@ class BackgroundWorkerBgService extends BackgroundWorkerFlutterApi {
   final Logger _logger = Logger('BackgroundWorkerBgService');
   late LocalSyncService _localSyncService;
   late SyncStreamService _remoteSyncService;
-  late HashService _hashService;
 
   bool _isCleanedUp = false;
 
@@ -94,13 +92,6 @@ class BackgroundWorkerBgService extends BackgroundWorkerFlutterApi {
       permissionRepository: ref.read(permissionRepositoryProvider),
       syncMigrationRepository: ref.read(syncMigrationRepositoryProvider),
       api: ref.read(apiServiceProvider),
-      cancellation: _cancellationToken,
-    );
-    _hashService = HashService(
-      localAlbumRepository: ref.read(localAlbumRepository),
-      localAssetRepository: ref.read(localAssetRepository),
-      nativeSyncApi: ref.read(nativeSyncApiProvider),
-      trashedLocalAssetRepository: ref.read(trashedLocalAssetRepository),
       cancellation: _cancellationToken,
     );
     BackgroundWorkerFlutterApi.setUp(this);
@@ -141,14 +132,9 @@ class BackgroundWorkerBgService extends BackgroundWorkerFlutterApi {
 
   @override
   Future<void> onAndroidUpload(int? maxMinutes) async {
-    final hashTimeout = Duration(minutes: _isBackupEnabled ? 3 : 6);
     final backupTimeout = maxMinutes != null ? Duration(minutes: maxMinutes - 1) : null;
     await _optimizeDB();
-    return _backgroundLoop(
-      hashTimeout: hashTimeout,
-      backupTimeout: backupTimeout,
-      debugLabel: 'Android background upload',
-    );
+    return _backgroundLoop(backupTimeout: backupTimeout, debugLabel: 'Android background upload');
   }
 
   @override
@@ -163,18 +149,9 @@ class BackgroundWorkerBgService extends BackgroundWorkerFlutterApi {
         await _optimizeDB();
       }
 
-      // Run sync local, sync remote, hash and backup concurrently so the bg
-      // refresh task (20s budget) can make progress on all four instead of
-      // racing them sequentially. Phases are independent at the data layer:
-      // hash and handle_backup read drift state and tolerate stale reads
-      // (server-side dedup catches the rare race). The single budget caps the
-      // whole batch; no phase needs its own timeout.
-      final all = Future.wait<dynamic>([
-        _localSyncService.sync(),
-        _remoteSyncService.sync(),
-        _hashService.hashAssets(),
-        _handleBackup(),
-      ]);
+      // Hashing is intentionally on-demand in the uploader. Background sync
+      // must not start a full-library rehash when the server uses MD5+size.
+      final all = Future.wait<dynamic>([_localSyncService.sync(), _remoteSyncService.sync(), _handleBackup()]);
       if (budget != null) {
         await all.timeout(
           budget,
@@ -198,17 +175,11 @@ class BackgroundWorkerBgService extends BackgroundWorkerFlutterApi {
     }
   }
 
-  Future<void> _backgroundLoop({
-    required Duration hashTimeout,
-    required Duration? backupTimeout,
-    required String debugLabel,
-  }) async {
-    _logger.info(
-      '$debugLabel started hashTimeout: ${hashTimeout.inSeconds}s, backupTimeout: ${backupTimeout?.inMinutes ?? '~'}m',
-    );
+  Future<void> _backgroundLoop({required Duration? backupTimeout, required String debugLabel}) async {
+    _logger.info('$debugLabel started backupTimeout: ${backupTimeout?.inMinutes ?? '~'}m');
     final sw = Stopwatch()..start();
     try {
-      if (!await _syncAssets(hashTimeout: hashTimeout)) {
+      if (!await _syncAssets()) {
         _logger.warning("Remote sync did not complete successfully, skipping backup");
         return;
       }
@@ -322,7 +293,7 @@ class BackgroundWorkerBgService extends BackgroundWorkerFlutterApi {
     );
   }
 
-  Future<bool> _syncAssets({Duration? hashTimeout}) async {
+  Future<bool> _syncAssets() async {
     await _localSyncService.sync();
     if (_isCleanedUp) {
       return false;
@@ -333,17 +304,6 @@ class BackgroundWorkerBgService extends BackgroundWorkerFlutterApi {
       return isSuccess;
     }
 
-    var hashFuture = _hashService.hashAssets();
-    if (hashTimeout != null) {
-      hashFuture = hashFuture.timeout(
-        hashTimeout,
-        onTimeout: () {
-          // Consume cancellation errors as we want to continue processing
-        },
-      );
-    }
-
-    await hashFuture;
     return isSuccess;
   }
 }

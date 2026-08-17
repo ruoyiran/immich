@@ -5,6 +5,9 @@ import 'package:immich_mobile/infrastructure/utils/asset.mixin.dart';
 import 'package:immich_mobile/infrastructure/utils/drift_default.mixin.dart';
 
 @TableIndex.sql('CREATE INDEX IF NOT EXISTS idx_local_asset_checksum ON local_asset_entity (checksum)')
+@TableIndex.sql(
+  'CREATE INDEX IF NOT EXISTS idx_local_asset_content_md5_size ON local_asset_entity (content_md5, content_size)',
+)
 @TableIndex.sql('CREATE INDEX IF NOT EXISTS idx_local_asset_cloud_id ON local_asset_entity (i_cloud_id)')
 @TableIndex.sql('CREATE INDEX IF NOT EXISTS idx_local_asset_created_at ON local_asset_entity (created_at)')
 class LocalAssetEntity extends Table with DriftDefaultsMixin, AssetEntityMixin {
@@ -12,6 +15,10 @@ class LocalAssetEntity extends Table with DriftDefaultsMixin, AssetEntityMixin {
 
   TextColumn get id => text()();
   TextColumn get checksum => text().nullable()();
+  TextColumn get contentMd5 => text().nullable()();
+  IntColumn get contentSize => integer().nullable()();
+  TextColumn get hashAlgorithm => text().nullable()();
+  DateTimeColumn get hashedModifiedAt => dateTime().nullable()();
 
   // Only used during backup to mirror the favorite status of the asset in the server
   BoolColumn get isFavorite => boolean().withDefault(const Constant(false))();
@@ -37,6 +44,10 @@ extension LocalAssetEntityDataDomainExtension on LocalAssetEntityData {
     id: id,
     name: name,
     checksum: checksum,
+    contentMd5: contentMd5,
+    contentSize: contentSize,
+    hashAlgorithm: hashAlgorithm,
+    hashedModifiedAt: hashedModifiedAt,
     type: type,
     createdAt: createdAt,
     updatedAt: updatedAt,

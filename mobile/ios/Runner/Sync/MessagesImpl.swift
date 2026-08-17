@@ -343,7 +343,7 @@ class NativeSyncApiImpl: ImmichPlugin, NativeSyncApi, FlutterPlugin {
         }
         
         for missing in missingAssetIds {
-          results.append(HashResult(assetId: missing, error: "Asset not found in library", hash: nil))
+          results.append(HashResult(assetId: missing, error: "Asset not found in library", hash: nil, size: nil, algorithm: nil))
         }
         
         return self?.completeWhenActive(for: completion, with: .success(results))
@@ -392,7 +392,7 @@ class NativeSyncApiImpl: ImmichPlugin, NativeSyncApi, FlutterPlugin {
       }
       
       guard let resource = asset.getResource() else {
-        return HashResult(assetId: asset.localIdentifier, error: "Cannot get asset resource", hash: nil)
+        return HashResult(assetId: asset.localIdentifier, error: "Cannot get asset resource", hash: nil, size: nil, algorithm: nil)
       }
       
       if Task.isCancelled {
@@ -403,13 +403,15 @@ class NativeSyncApiImpl: ImmichPlugin, NativeSyncApi, FlutterPlugin {
       options.isNetworkAccessAllowed = allowNetworkAccess
       
       return await withCheckedContinuation { continuation in
-        var hasher = Insecure.SHA1()
+        var hasher = Insecure.MD5()
+        var size: Int64 = 0
         
         requestRef.id = PHAssetResourceManager.default().requestData(
           for: resource,
           options: options,
           dataReceivedHandler: { data in
             hasher.update(data: data)
+            size += Int64(data.count)
           },
           completionHandler: { error in
             let result: HashResult? = switch (error) {
@@ -417,13 +419,17 @@ class NativeSyncApiImpl: ImmichPlugin, NativeSyncApi, FlutterPlugin {
             case let .some(e): HashResult(
               assetId: asset.localIdentifier,
               error: "Failed to hash asset: \(e.localizedDescription)",
-              hash: nil
+              hash: nil,
+              size: nil,
+              algorithm: nil
             )
             case .none:
               HashResult(
                 assetId: asset.localIdentifier,
                 error: nil,
-                hash: Data(hasher.finalize()).base64EncodedString()
+                hash: Data(hasher.finalize()).base64EncodedString(),
+                size: size,
+                algorithm: "md5"
               )
             }
             continuation.resume(returning: result)

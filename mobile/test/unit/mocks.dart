@@ -197,7 +197,6 @@ class ServiceMocks {
 
   void _stubBackgroundSync() {
     when(() => backgroundSync.syncLocal()).thenAnswer((_) async {});
-    when(() => backgroundSync.hashAssets()).thenAnswer((_) async {});
   }
 
   void _stubForegroundUpload() {

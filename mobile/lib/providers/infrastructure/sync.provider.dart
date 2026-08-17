@@ -1,5 +1,4 @@
 import 'package:hooks_riverpod/hooks_riverpod.dart';
-import 'package:immich_mobile/domain/services/hash.service.dart';
 import 'package:immich_mobile/domain/services/local_sync.service.dart';
 import 'package:immich_mobile/domain/services/sync_stream.service.dart';
 import 'package:immich_mobile/infrastructure/repositories/sync_api.repository.dart';
@@ -42,16 +41,6 @@ final localSyncServiceProvider = Provider(
     assetMediaRepository: ref.watch(assetMediaRepositoryProvider),
     permissionRepository: ref.watch(permissionRepositoryProvider),
     nativeSyncApi: ref.watch(nativeSyncApiProvider),
-    cancellation: ref.watch(cancellationProvider),
-  ),
-);
-
-final hashServiceProvider = Provider(
-  (ref) => HashService(
-    localAlbumRepository: ref.watch(localAlbumRepository),
-    localAssetRepository: ref.watch(localAssetRepository),
-    nativeSyncApi: ref.watch(nativeSyncApiProvider),
-    trashedLocalAssetRepository: ref.watch(trashedLocalAssetRepository),
     cancellation: ref.watch(cancellationProvider),
   ),
 );

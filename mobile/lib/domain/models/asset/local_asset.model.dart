@@ -6,6 +6,10 @@ class LocalAsset extends BaseAsset {
   final String? remoteAssetId;
   final String? cloudId;
   final int orientation;
+  final String? contentMd5;
+  final int? contentSize;
+  final String? hashAlgorithm;
+  final DateTime? hashedModifiedAt;
   @override
   final AssetPlaybackStyle playbackStyle;
 
@@ -27,6 +31,10 @@ class LocalAsset extends BaseAsset {
     super.durationMs,
     super.isFavorite = false,
     this.orientation = 0,
+    this.contentMd5,
+    this.contentSize,
+    this.hashAlgorithm,
+    this.hashedModifiedAt,
     required this.playbackStyle,
     this.adjustmentTime,
     this.latitude,
@@ -63,6 +71,10 @@ class LocalAsset extends BaseAsset {
    remoteId: ${remoteId ?? "<NA>"},
    cloudId: ${cloudId ?? "<NA>"},
    checksum: ${checksum ?? "<NA>"},
+   contentMd5: ${contentMd5 ?? "<NA>"},
+   contentSize: ${contentSize ?? "<NA>"},
+   hashAlgorithm: ${hashAlgorithm ?? "<NA>"},
+   hashedModifiedAt: ${hashedModifiedAt ?? "<NA>"},
    isFavorite: $isFavorite,
    orientation: $orientation,
    adjustmentTime: $adjustmentTime,
@@ -83,6 +95,10 @@ class LocalAsset extends BaseAsset {
     return super == other &&
         id == other.id &&
         cloudId == other.cloudId &&
+        contentMd5 == other.contentMd5 &&
+        contentSize == other.contentSize &&
+        hashAlgorithm == other.hashAlgorithm &&
+        hashedModifiedAt == other.hashedModifiedAt &&
         orientation == other.orientation &&
         playbackStyle == other.playbackStyle &&
         adjustmentTime == other.adjustmentTime &&
@@ -95,6 +111,10 @@ class LocalAsset extends BaseAsset {
       super.hashCode ^
       id.hashCode ^
       remoteId.hashCode ^
+      contentMd5.hashCode ^
+      contentSize.hashCode ^
+      hashAlgorithm.hashCode ^
+      hashedModifiedAt.hashCode ^
       orientation.hashCode ^
       playbackStyle.hashCode ^
       adjustmentTime.hashCode ^
@@ -115,6 +135,10 @@ class LocalAsset extends BaseAsset {
     int? durationMs,
     bool? isFavorite,
     int? orientation,
+    String? contentMd5,
+    int? contentSize,
+    String? hashAlgorithm,
+    DateTime? hashedModifiedAt,
     AssetPlaybackStyle? playbackStyle,
     DateTime? adjustmentTime,
     double? latitude,
@@ -135,6 +159,10 @@ class LocalAsset extends BaseAsset {
       durationMs: durationMs ?? this.durationMs,
       isFavorite: isFavorite ?? this.isFavorite,
       orientation: orientation ?? this.orientation,
+      contentMd5: contentMd5 ?? this.contentMd5,
+      contentSize: contentSize ?? this.contentSize,
+      hashAlgorithm: hashAlgorithm ?? this.hashAlgorithm,
+      hashedModifiedAt: hashedModifiedAt ?? this.hashedModifiedAt,
       playbackStyle: playbackStyle ?? this.playbackStyle,
       adjustmentTime: adjustmentTime ?? this.adjustmentTime,
       latitude: latitude ?? this.latitude,

@@ -25,6 +25,7 @@ class PlatformAsset {
   final int? updatedAt;
   final int? width;
   final int? height;
+  final int? size;
   final int durationMs;
   final int orientation;
   final bool isFavorite;
@@ -43,6 +44,7 @@ class PlatformAsset {
     this.updatedAt,
     this.width,
     this.height,
+    this.size,
     this.durationMs = 0,
     this.orientation = 0,
     this.isFavorite = false,
@@ -91,8 +93,10 @@ class HashResult {
   final String assetId;
   final String? error;
   final String? hash;
+  final int? size;
+  final String? algorithm;
 
-  const HashResult({required this.assetId, this.error, this.hash});
+  const HashResult({required this.assetId, this.error, this.hash, this.size, this.algorithm});
 }
 
 class CloudIdResult {

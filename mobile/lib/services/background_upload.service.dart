@@ -6,12 +6,15 @@ import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:immich_mobile/constants/constants.dart';
 import 'package:immich_mobile/domain/models/asset/base_asset.model.dart';
+import 'package:immich_mobile/domain/models/store.model.dart';
+import 'package:immich_mobile/entities/store.entity.dart';
 import 'package:immich_mobile/extensions/platform_extensions.dart';
 import 'package:immich_mobile/infrastructure/repositories/backup.repository.dart';
 import 'package:immich_mobile/infrastructure/repositories/storage.repository.dart';
 import 'package:immich_mobile/providers/infrastructure/storage.provider.dart';
 import 'package:immich_mobile/repositories/asset_media.repository.dart';
 import 'package:immich_mobile/repositories/upload.repository.dart';
+import 'package:immich_mobile/utils/upload_source_metadata.dart';
 import 'package:logging/logging.dart';
 import 'package:path/path.dart' as p;
 
@@ -101,7 +104,7 @@ class BackgroundUploadService {
     shouldAbortQueuingTasks = false;
     _cancelToken = Completer<void>();
 
-    final candidates = await _backupRepository.getCandidates(userId);
+    final candidates = await _backupRepository.getCandidates(userId, onlyHashed: false);
     if (candidates.isEmpty) {
       _logger.info('No new backup candidates found, finishing background upload');
       return;
@@ -132,20 +135,59 @@ class BackgroundUploadService {
   Future<UploadResult?> uploadSingleAsset(LocalAsset asset, {Completer<void>? cancelToken}) async {
     File? stillFile;
     File? motionFile;
-    File? pmliveFile;
-    var removePMLive = false;
+    var temporaryLivePhotoFiles = false;
     try {
-      final checksum = await _uploadRepository.ensureAssetChecksum(asset.id, asset.checksum);
-      final terminal = await _uploadRepository.preflightResumableTerminal(checksum: checksum, uploadId: asset.id);
-      if (terminal != null) {
-        return terminal;
+      final deviceId = Store.get(StoreKey.deviceId);
+      if ((!CurrentPlatform.isAndroid || !asset.isMotionPhoto) && asset.contentSize != null) {
+        final identityFields = {
+          'deviceAssetId': asset.localId!,
+          'deviceId': deviceId,
+          'fileCreatedAt': asset.createdAt.toUtc().toIso8601String(),
+          'fileModifiedAt': asset.updatedAt.toUtc().toIso8601String(),
+          'sourceMetadata': buildUploadSourceMetadata(asset, originalName: asset.name, deviceId: deviceId),
+        };
+        final linked = await _uploadRepository.preflightLocalAssetIdentity(
+          assetId: asset.id,
+          localAssetId: asset.localId!,
+          deviceId: deviceId,
+          size: asset.contentSize!,
+          modifiedAt: asset.updatedAt,
+          originalFileName: asset.name,
+          fields: identityFields,
+        );
+        if (linked != null) {
+          return linked;
+        }
+      }
+      String? checksum;
+      if (!CurrentPlatform.isAndroid || !asset.isMotionPhoto) {
+        checksum = await _uploadRepository.ensureAssetChecksum(
+          asset.id,
+          asset.checksum,
+          contentMd5: asset.contentMd5,
+          contentSize: asset.contentSize,
+          hashAlgorithm: asset.hashAlgorithm,
+          hashedModifiedAt: asset.hashedModifiedAt,
+          modifiedAt: asset.updatedAt,
+        );
+        final terminal = await _uploadRepository.preflightResumableTerminal(checksum: checksum, uploadId: asset.id);
+        if (terminal != null) {
+          return terminal;
+        }
       }
       final entity = await _storageRepository.getAssetEntityForAsset(asset);
       if (entity == null) {
         _logger.warning('Asset entity not found for ${asset.id} - ${asset.name}');
         return null;
       }
-      stillFile = await _storageRepository.getFileForAsset(asset.id);
+      if (entity.isLivePhoto && CurrentPlatform.isAndroid) {
+        final liveFiles = await _storageRepository.getLivePhotoFilesForAsset(asset);
+        stillFile = liveFiles?.still;
+        motionFile = liveFiles?.motion;
+        temporaryLivePhotoFiles = liveFiles?.temporary ?? false;
+      } else {
+        stillFile = await _storageRepository.getFileForAsset(asset.id);
+      }
       if (stillFile == null) {
         _logger.warning('Failed to get file for asset ${asset.id} - ${asset.name}');
         return null;
@@ -155,56 +197,78 @@ class BackgroundUploadService {
           ? p.extension(stillFile.path)
           : p.extension(asset.name);
       final stillOriginalName = p.setExtension(baseName, stillExtension);
-      var uploadFile = stillFile;
-      var uploadOriginalName = stillOriginalName;
+      final fields = {
+        'deviceAssetId': asset.localId!,
+        'deviceId': deviceId,
+        'fileCreatedAt': asset.createdAt.toUtc().toIso8601String(),
+        'fileModifiedAt': asset.updatedAt.toUtc().toIso8601String(),
+        'isFavorite': asset.isFavorite.toString(),
+        'duration': (asset.durationMs ?? 0).toString(),
+        'sourceMetadata': buildUploadSourceMetadata(asset, originalName: stillOriginalName, deviceId: deviceId),
+      };
+      final uploadChecksum =
+          checksum ??
+          await _uploadRepository.ensureAssetFileChecksum(
+            asset.id,
+            stillFile,
+            checksum: asset.checksum,
+            contentMd5: asset.contentMd5,
+            contentSize: asset.contentSize,
+            hashAlgorithm: asset.hashAlgorithm,
+            hashedModifiedAt: asset.hashedModifiedAt,
+            modifiedAt: asset.updatedAt,
+          );
+      if (checksum == null) {
+        final terminal = await _uploadRepository.preflightResumableTerminal(
+          checksum: uploadChecksum,
+          uploadId: asset.id,
+        );
+        if (terminal != null) {
+          return terminal;
+        }
+      }
       if (entity.isLivePhoto) {
-        motionFile = await _storageRepository.getMotionFileForAsset(asset);
+        motionFile ??= await _storageRepository.getMotionFileForAsset(asset);
         if (motionFile == null) {
           _logger.warning('Failed to get Live Photo motion for ${asset.id}');
           return null;
         }
         final motionOriginalName = p.setExtension(baseName, p.extension(motionFile.path));
-        pmliveFile = await _uploadRepository.createPMLiveBundle(
-          assetId: asset.id,
-          checksum: checksum,
-          stillFile: stillFile,
-          motionFile: motionFile,
-          stillOriginalName: stillOriginalName,
-          motionOriginalName: motionOriginalName,
-          createdAt: asset.createdAt,
-          modifiedAt: asset.updatedAt,
+        final motionChecksum = await _uploadRepository.hashShareIntentFile(motionFile);
+        final motionResult = await _uploadRepository.uploadFile(
+          file: motionFile,
+          originalFileName: motionOriginalName,
+          fields: {...fields, 'visibility': 'hidden', 'livePhotoRole': 'motion'},
+          cancelToken: cancelToken,
+          onProgress: null,
+          logContext: 'backgroundLivePhotoMotion[${asset.id}]',
+          checksum: motionChecksum,
+          uploadId: '${asset.id}:motion',
         );
-        uploadFile = pmliveFile;
-        uploadOriginalName = p.setExtension(baseName, '.pmlive');
+        if (!motionResult.isSuccess || motionResult.remoteAssetId == null) {
+          return motionResult;
+        }
+        fields['livePhotoVideoId'] = motionResult.remoteAssetId!;
       }
 
       final result = await _uploadRepository.uploadFile(
-        file: uploadFile,
-        originalFileName: uploadOriginalName,
-        fields: {
-          'fileCreatedAt': asset.createdAt.toUtc().toIso8601String(),
-          'fileModifiedAt': asset.updatedAt.toUtc().toIso8601String(),
-          'isFavorite': asset.isFavorite.toString(),
-          'duration': (asset.durationMs ?? 0).toString(),
-        },
+        file: stillFile,
+        originalFileName: stillOriginalName,
+        fields: fields,
         cancelToken: cancelToken,
         onProgress: null,
         logContext: 'backgroundAsset[${asset.id}]',
-        checksum: checksum,
+        checksum: uploadChecksum,
         uploadId: asset.id,
       );
-      removePMLive = result.isSuccess;
       return result;
     } catch (error, stackTrace) {
       _logger.warning('Background upload failed for ${asset.id}: $error', error, stackTrace);
       return UploadResult.error(errorMessage: error.toString());
     } finally {
-      if (CurrentPlatform.isIOS) {
+      if (CurrentPlatform.isIOS || temporaryLivePhotoFiles) {
         await _deleteTempFile(stillFile);
         await _deleteTempFile(motionFile);
-        if (removePMLive) {
-          await _deleteTempFile(pmliveFile);
-        }
       }
     }
   }

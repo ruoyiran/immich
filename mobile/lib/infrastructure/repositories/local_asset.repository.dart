@@ -18,6 +18,8 @@ class RemovalCandidatesResult {
   const RemovalCandidatesResult({required this.assets, required this.totalBytes});
 }
 
+typedef LocalAssetContentHash = ({String checksum, String md5, int size, DateTime modifiedAt});
+
 class DriftLocalAssetRepository extends DriftDatabaseRepository {
   final Drift _db;
 
@@ -67,6 +69,28 @@ class DriftLocalAssetRepository extends DriftDatabaseRepository {
           _db.localAssetEntity,
           LocalAssetEntityCompanion(checksum: Value(entry.value)),
           where: (e) => e.id.equals(entry.key),
+        );
+      }
+    });
+  }
+
+  Future<void> updateContentHashes(Map<String, LocalAssetContentHash> hashes) {
+    if (hashes.isEmpty) {
+      return Future.value();
+    }
+    return _db.batch((batch) {
+      for (final entry in hashes.entries) {
+        final value = entry.value;
+        batch.update(
+          _db.localAssetEntity,
+          LocalAssetEntityCompanion(
+            checksum: Value(value.checksum),
+            contentMd5: Value(value.md5),
+            contentSize: Value(value.size),
+            hashAlgorithm: const Value('md5'),
+            hashedModifiedAt: Value(value.modifiedAt),
+          ),
+          where: (entity) => entity.id.equals(entry.key),
         );
       }
     });

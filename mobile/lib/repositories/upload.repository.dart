@@ -1,3 +1,5 @@
+// ignore_for_file: prefer_initializing_formals
+
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -9,8 +11,10 @@ import 'package:http/http.dart';
 import 'package:immich_mobile/constants/constants.dart';
 import 'package:immich_mobile/domain/models/store.model.dart';
 import 'package:immich_mobile/entities/store.entity.dart';
+import 'package:immich_mobile/infrastructure/repositories/local_asset.repository.dart';
 import 'package:immich_mobile/infrastructure/repositories/network.repository.dart';
 import 'package:immich_mobile/platform/native_sync_api.g.dart';
+import 'package:immich_mobile/providers/infrastructure/asset.provider.dart';
 import 'package:immich_mobile/services/api.service.dart';
 import 'package:immich_mobile/utils/debug_print.dart';
 import 'package:logging/logging.dart';
@@ -18,7 +22,9 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:uuid/uuid.dart';
 
-final uploadRepositoryProvider = Provider((ref) => UploadRepository());
+final uploadRepositoryProvider = Provider(
+  (ref) => UploadRepository(localAssetRepository: ref.watch(localAssetRepository)),
+);
 
 class UploadRepository {
   static const int resumableChunkBytes = 4 * 1024 * 1024;
@@ -30,21 +36,25 @@ class UploadRepository {
   );
   final Logger logger = Logger('UploadRepository');
   final NativeSyncApi _nativeSyncApi;
+  final DriftLocalAssetRepository? _localAssetRepository;
   final Client? _clientOverride;
   final Directory? _stateDirectoryOverride;
   final String? _endpointOverride;
   final Map<String, String>? _headersOverride;
+  final Map<String, Future<void>> _serverCapabilityChecks = {};
   void Function(TaskStatusUpdate)? onUploadStatus;
   void Function(TaskProgressUpdate)? onTaskProgress;
 
   UploadRepository({
     NativeSyncApi? nativeSyncApi,
+    DriftLocalAssetRepository? localAssetRepository,
     Client? client,
     Directory? stateDirectory,
     String? endpoint,
     Map<String, String>? headers,
     bool registerDownloaderCallbacks = true,
   }) : _nativeSyncApi = nativeSyncApi ?? NativeSyncApi(),
+       _localAssetRepository = localAssetRepository,
        _clientOverride = client,
        _stateDirectoryOverride = stateDirectory,
        _endpointOverride = endpoint,
@@ -134,6 +144,32 @@ class UploadRepository {
     required String uploadId,
   }) async {
     try {
+      final endpoint =
+          _endpointOverride ?? Store.get(StoreKey.serverEndpoint) ?? (throw StateError('Server endpoint is missing'));
+      await _ensureServerCapability(endpoint);
+      final logicalUploadId = _deriveResumableUploadId(endpoint, uploadId, checksum);
+      if (await _readResumableAttempt(logicalUploadId, checksum) == null) {
+        final size = await file.length();
+        final duplicate = await _bulkUploadCheck(
+          endpoint: endpoint,
+          localAssetId: uploadId,
+          checksum: checksum,
+          size: size,
+        );
+        if (duplicate != null) {
+          final metadata =
+              _buildResumableMetadata(
+                  file: file,
+                  fields: fields,
+                  originalFileName: originalFileName,
+                  isPMLive: p.extension(originalFileName).toLowerCase() == '.pmlive',
+                )
+                ..remove('live_photo_role')
+                ..remove('container');
+          await _updateDuplicateMetadata(endpoint, duplicate.remoteAssetId!, metadata);
+          return duplicate;
+        }
+      }
       return await _uploadResumable(
         file: file,
         originalFileName: originalFileName,
@@ -156,6 +192,7 @@ class UploadRepository {
       await cleanupStalePMLiveArtifacts();
       final endpoint =
           _endpointOverride ?? Store.get(StoreKey.serverEndpoint) ?? (throw StateError('Server endpoint is missing'));
+      await _ensureServerCapability(endpoint);
       final logicalUploadId = _deriveResumableUploadId(endpoint, uploadId, checksum);
       final attempt = await _readResumableAttempt(logicalUploadId, checksum);
       if (attempt == null) {
@@ -180,27 +217,225 @@ class UploadRepository {
     }
   }
 
-  Future<String> ensureAssetChecksum(String assetId, String? checksum) async {
-    if (checksum != null && checksum.isNotEmpty) {
+  Future<String> ensureAssetChecksum(
+    String assetId,
+    String? checksum, {
+    String? contentMd5,
+    int? contentSize,
+    String? hashAlgorithm,
+    DateTime? hashedModifiedAt,
+    required DateTime modifiedAt,
+  }) async {
+    final cachedHashIsCurrent =
+        hashAlgorithm == 'md5' &&
+        contentMd5 != null &&
+        RegExp(r'^[0-9a-f]{32}$').hasMatch(contentMd5) &&
+        contentSize != null &&
+        contentSize > 0 &&
+        hashedModifiedAt == modifiedAt;
+    if (cachedHashIsCurrent && _isBase64MD5(checksum) && _md5Hex(checksum!) == contentMd5) {
       return checksum;
     }
     final results = await _nativeSyncApi.hashAssets([assetId]);
-    if (results.length != 1 || results.first.hash == null) {
+    if (results.length != 1 ||
+        results.first.hash == null ||
+        results.first.algorithm != 'md5' ||
+        results.first.size == null ||
+        results.first.size! <= 0 ||
+        !_isBase64MD5(results.first.hash)) {
       throw StateError(
         results.isEmpty
             ? 'Failed to hash asset before upload'
             : results.first.error ?? 'Failed to hash asset before upload',
       );
     }
-    return results.first.hash!;
+    final result = results.first;
+    final value = result.hash!;
+    await _localAssetRepository?.updateContentHashes({
+      assetId: (checksum: value, md5: _md5Hex(value), size: result.size!, modifiedAt: modifiedAt),
+    });
+    return value;
   }
 
   /// Share-intent files are not [LocalAsset] records and therefore have no
   /// native library identifier. Local asset uploads must use
   /// [ensureAssetChecksum] instead.
   Future<String> hashShareIntentFile(File file) async {
-    final digest = await sha1.bind(file.openRead()).first;
+    final digest = await md5.bind(file.openRead()).first;
     return base64Encode(digest.bytes);
+  }
+
+  Future<UploadResult?> preflightLocalAssetIdentity({
+    required String assetId,
+    required String localAssetId,
+    required String deviceId,
+    required int size,
+    required DateTime modifiedAt,
+    required String originalFileName,
+    required Map<String, String> fields,
+  }) async {
+    if (deviceId.isEmpty || localAssetId.isEmpty || size <= 0) {
+      return null;
+    }
+    final endpoint =
+        _endpointOverride ?? Store.get(StoreKey.serverEndpoint) ?? (throw StateError('Server endpoint is missing'));
+    await _ensureServerCapability(endpoint);
+    final request = Request('POST', Uri.parse('$endpoint/assets/bulk-device-check'))
+      ..headers.addAll(_requestHeaders)
+      ..headers['Content-Type'] = 'application/json'
+      ..body = jsonEncode({
+        'assets': [
+          {
+            'id': assetId,
+            'deviceId': deviceId,
+            'localAssetId': localAssetId,
+            'size': size,
+            'modifiedTime': modifiedAt.toUtc().microsecondsSinceEpoch * 1000,
+          },
+        ],
+      });
+    final response = await _client.send(request);
+    final body = await response.stream.bytesToString();
+    if (response.statusCode != 200) {
+      throw _UploadHTTPException(response.statusCode, _errorMessage(response.statusCode, body));
+    }
+    final value = jsonDecode(body) as Map<String, dynamic>;
+    final results = value['results'] as List<dynamic>?;
+    if (results == null || results.length != 1) {
+      throw const FormatException('Invalid bulk device check response');
+    }
+    final result = results.single as Map<String, dynamic>;
+    if (result['id'] != assetId || (result['action'] != 'accept' && result['action'] != 'reject')) {
+      throw const FormatException('Invalid bulk device check result');
+    }
+    if (result['action'] == 'accept') {
+      return null;
+    }
+    final remoteAssetId = result['assetId'];
+    final checksum = result['checksum'];
+    if (remoteAssetId is! String || remoteAssetId.isEmpty || checksum is! String || !_isBase64MD5(checksum)) {
+      throw const FormatException('Device match is missing its asset identity');
+    }
+    await _localAssetRepository?.updateContentHashes({
+      assetId: (checksum: checksum, md5: _md5Hex(checksum), size: size, modifiedAt: modifiedAt),
+    });
+    final metadata = _buildMetadataWithoutFile(fields: fields, originalFileName: originalFileName, isPMLive: false);
+    await _updateDuplicateMetadata(endpoint, remoteAssetId, metadata);
+    return UploadResult.success(remoteAssetId: remoteAssetId, assetStatus: 'duplicate');
+  }
+
+  Future<String> ensureAssetFileChecksum(
+    String assetId,
+    File file, {
+    String? checksum,
+    String? contentMd5,
+    int? contentSize,
+    String? hashAlgorithm,
+    DateTime? hashedModifiedAt,
+    required DateTime modifiedAt,
+  }) async {
+    final size = await file.length();
+    final cachedHashIsCurrent =
+        hashAlgorithm == 'md5' &&
+        contentMd5 != null &&
+        RegExp(r'^[0-9a-f]{32}$').hasMatch(contentMd5) &&
+        contentSize == size &&
+        hashedModifiedAt == modifiedAt;
+    if (cachedHashIsCurrent && _isBase64MD5(checksum) && _md5Hex(checksum!) == contentMd5) {
+      return checksum;
+    }
+    final value = await hashShareIntentFile(file);
+    await _localAssetRepository?.updateContentHashes({
+      assetId: (checksum: value, md5: _md5Hex(value), size: size, modifiedAt: modifiedAt),
+    });
+    return value;
+  }
+
+  Future<void> _ensureServerCapability(String endpoint) async {
+    final existing = _serverCapabilityChecks[endpoint];
+    if (existing != null) {
+      return existing;
+    }
+    final check = () async {
+      final request = Request('GET', Uri.parse('$endpoint/server/config'))..headers.addAll(_requestHeaders);
+      final response = await _client.send(request);
+      final body = await response.stream.bytesToString();
+      if (response.statusCode != 200) {
+        throw _UploadHTTPException(response.statusCode, _errorMessage(response.statusCode, body));
+      }
+      try {
+        final value = jsonDecode(body) as Map<String, dynamic>;
+        if (value['checksumAlgorithm'] != 'md5-size') {
+          throw const FormatException('unsupported checksum algorithm');
+        }
+      } catch (_) {
+        throw StateError('Server does not support MD5+size uploads. Upgrade photo-classifier before syncing.');
+      }
+    }();
+    _serverCapabilityChecks[endpoint] = check;
+    try {
+      await check;
+    } catch (_) {
+      if (identical(_serverCapabilityChecks[endpoint], check)) {
+        _serverCapabilityChecks.remove(endpoint)?.ignore();
+      }
+      rethrow;
+    }
+  }
+
+  Future<UploadResult?> _bulkUploadCheck({
+    required String endpoint,
+    required String localAssetId,
+    required String checksum,
+    required int size,
+  }) async {
+    final request = Request('POST', Uri.parse('$endpoint/assets/bulk-upload-check'))
+      ..headers.addAll(_requestHeaders)
+      ..headers['Content-Type'] = 'application/json'
+      ..body = jsonEncode({
+        'algorithm': 'md5',
+        'assets': [
+          {'id': localAssetId, 'md5': _md5Hex(checksum), 'size': size},
+        ],
+      });
+    final response = await _client.send(request);
+    final body = await response.stream.bytesToString();
+    if (response.statusCode != 200) {
+      throw _UploadHTTPException(response.statusCode, _errorMessage(response.statusCode, body));
+    }
+    final value = jsonDecode(body) as Map<String, dynamic>;
+    final results = value['results'] as List<dynamic>?;
+    if (results == null || results.length != 1) {
+      throw const FormatException('Invalid bulk upload check response');
+    }
+    final result = results.single as Map<String, dynamic>;
+    if (result['id'] != localAssetId || (result['action'] != 'accept' && result['action'] != 'reject')) {
+      throw const FormatException('Invalid bulk upload check result');
+    }
+    if (result['action'] == 'accept') {
+      return null;
+    }
+    final assetId = result['assetId'];
+    if (assetId is! String || assetId.isEmpty) {
+      throw const FormatException('Duplicate result is missing assetId');
+    }
+    return UploadResult.success(remoteAssetId: assetId, assetStatus: 'duplicate');
+  }
+
+  Future<void> _updateDuplicateMetadata(String endpoint, String assetId, Map<String, Object> metadata) async {
+    final request = Request('POST', Uri.parse('$endpoint/assets/bulk-metadata'))
+      ..headers.addAll(_requestHeaders)
+      ..headers['Content-Type'] = 'application/json'
+      ..body = jsonEncode({
+        'assets': [
+          {'assetId': assetId, 'metadata': metadata},
+        ],
+      });
+    final response = await _client.send(request);
+    final body = await response.stream.bytesToString();
+    if (response.statusCode != 200) {
+      throw _UploadHTTPException(response.statusCode, _errorMessage(response.statusCode, body));
+    }
   }
 
   Future<File> createPMLiveBundle({
@@ -307,8 +542,6 @@ class UploadRepository {
       attempt = null;
     }
     if (attempt == null) {
-      final createdAt = DateTime.parse(fields['fileCreatedAt']!).toUtc();
-      final modifiedAt = DateTime.parse(fields['fileModifiedAt']!).toUtc();
       attempt = _ResumableAttempt(
         logicalUploadId: logicalUploadId,
         uploadId: uploadId,
@@ -317,12 +550,12 @@ class UploadRepository {
         checksum: checksum,
         pmliveContainerSha256: pmliveContainerDigest,
         size: await file.length(),
-        metadata: <String, Object>{
-          'original_created_unix_nano': createdAt.microsecondsSinceEpoch * 1000,
-          'original_modified_unix_nano': modifiedAt.microsecondsSinceEpoch * 1000,
-          if (isPMLive) 'is_live': true,
-          if (isPMLive) 'container': 'pmlive-v1',
-        },
+        metadata: _buildResumableMetadata(
+          file: file,
+          fields: fields,
+          originalFileName: originalFileName,
+          isPMLive: isPMLive,
+        ),
         isFavorite: fields['isFavorite'] == 'true',
         visibility: fields['visibility'] ?? 'timeline',
       );
@@ -372,6 +605,7 @@ class UploadRepository {
             ..headers.addAll(_requestHeaders)
             ..headers['Content-Type'] = 'application/octet-stream'
             ..headers['Content-Range'] = 'bytes $offset-${offset + length - 1}/$size'
+            ..headers['Content-MD5'] = base64Encode(md5.convert(chunk).bytes)
             ..headers['X-Upload-Generation'] = status.generation
             ..bodyBytes = chunk;
           final response = await _client.send(request);
@@ -406,6 +640,63 @@ class UploadRepository {
     return UploadResult.success(remoteAssetId: status.assetId!, assetStatus: status.assetStatus);
   }
 
+  Map<String, Object?>? _decodeSourceMetadata(String? encoded) {
+    if (encoded == null || encoded.isEmpty) {
+      return null;
+    }
+    if (utf8.encode(encoded).length > 64 * 1024) {
+      throw const FormatException('sourceMetadata exceeds 64 KiB');
+    }
+    final decoded = jsonDecode(encoded);
+    if (decoded is! Map<String, dynamic>) {
+      throw const FormatException('sourceMetadata must be a JSON object');
+    }
+    return Map<String, Object?>.from(decoded);
+  }
+
+  Map<String, Object> _buildResumableMetadata({
+    required File file,
+    required Map<String, String> fields,
+    required String originalFileName,
+    required bool isPMLive,
+  }) {
+    final sourceStat = file.statSync();
+    return _buildMetadataWithoutFile(
+      fields: fields,
+      originalFileName: originalFileName,
+      isPMLive: isPMLive,
+      accessedAt: sourceStat.accessed,
+    );
+  }
+
+  Map<String, Object> _buildMetadataWithoutFile({
+    required Map<String, String> fields,
+    required String originalFileName,
+    required bool isPMLive,
+    DateTime? accessedAt,
+  }) {
+    final createdAt = DateTime.parse(fields['fileCreatedAt']!).toUtc();
+    final modifiedAt = DateTime.parse(fields['fileModifiedAt']!).toUtc();
+    final sourceMetadata = <String, Object?>{
+      'schema_version': 1,
+      'source': 'mobile',
+      if (fields['deviceId'] != null) 'device_id': fields['deviceId'],
+      if (fields['deviceAssetId'] != null) 'platform_asset_id': fields['deviceAssetId'],
+      ...?_decodeSourceMetadata(fields['sourceMetadata']),
+      'uploaded_original_name': originalFileName,
+    };
+    return <String, Object>{
+      'original_created_unix_nano': createdAt.microsecondsSinceEpoch * 1000,
+      'original_modified_unix_nano': modifiedAt.microsecondsSinceEpoch * 1000,
+      if (accessedAt != null) 'original_accessed_unix_nano': accessedAt.toUtc().microsecondsSinceEpoch * 1000,
+      'source_metadata': sourceMetadata,
+      if (fields['livePhotoRole'] != null) 'live_photo_role': fields['livePhotoRole']!,
+      if (fields['livePhotoVideoId'] != null) 'live_photo_video_id': fields['livePhotoVideoId']!,
+      if (isPMLive) 'is_live': true,
+      if (isPMLive) 'container': 'pmlive-v1',
+    };
+  }
+
   Future<_ResumableStatus> _sendResumableJSON(Uri uri, String method, String body) async {
     final request = Request(method, uri)
       ..headers.addAll(_requestHeaders)
@@ -423,7 +714,7 @@ class UploadRepository {
     final support = await _supportDirectory();
     final directory = Directory(p.join(support.path, 'resumable-uploads'));
     await directory.create(recursive: true);
-    return File(p.join(directory.path, '${sha1.convert(utf8.encode(uploadId))}.json'));
+    return File(p.join(directory.path, '${sha256.convert(utf8.encode(uploadId))}.json'));
   }
 
   Future<Directory> _supportDirectory() async => _stateDirectoryOverride ?? await getApplicationSupportDirectory();
@@ -455,7 +746,7 @@ class UploadRepository {
     if (stat.type != FileSystemEntityType.file || stat.size != attempt.size) {
       throw StateError('Fresh resumable upload source is unavailable or changed');
     }
-    final digest = await sha1.bind(candidate.openRead()).first;
+    final digest = await md5.bind(candidate.openRead()).first;
     if (base64Encode(digest.bytes) != attempt.checksum) {
       throw StateError('Fresh resumable upload source checksum does not match the persisted attempt');
     }
@@ -467,7 +758,7 @@ class UploadRepository {
     if (stat.type != FileSystemEntityType.file || stat.size != attempt.size) {
       return false;
     }
-    final digest = await sha1.bind(source.openRead()).first;
+    final digest = await md5.bind(source.openRead()).first;
     return base64Encode(digest.bytes) == attempt.checksum;
   }
 
@@ -615,6 +906,25 @@ class UploadRepository {
     final identity = utf8.encode('$logicalUploadId\u0000pmlive-v1\u0000$containerSha256');
     return 'pc-${sha256.convert(identity)}';
   }
+
+  static bool _isBase64MD5(String? value) {
+    if (value == null || value.isEmpty) {
+      return false;
+    }
+    try {
+      return base64Decode(value).length == 16;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  static String _md5Hex(String checksum) {
+    final bytes = base64Decode(checksum);
+    if (bytes.length != 16 || base64Encode(bytes) != checksum) {
+      throw const FormatException('Asset checksum is not a canonical MD5 digest');
+    }
+    return bytes.map((byte) => byte.toRadixString(16).padLeft(2, '0')).join();
+  }
 }
 
 int minInt(int left, int right) => left < right ? left : right;
@@ -667,7 +977,7 @@ class _ResumableAttempt {
     'size': size,
     'metadata': metadata,
     'generation_capability': 'required-v1',
-    'checksum': checksum,
+    'md5': UploadRepository._md5Hex(checksum),
     'is_favorite': isFavorite,
     'visibility': visibility,
   });

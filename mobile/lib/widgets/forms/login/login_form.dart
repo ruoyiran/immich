@@ -189,8 +189,6 @@ class LoginForm extends HookConsumerWidget {
       await backgroundManager.syncLocal(full: true);
       await backgroundManager.syncRemote();
       await viewIntentHandler.flushDeferredViewIntent();
-      await backgroundManager.hashAssets();
-
       if (SettingsRepository.instance.appConfig.backup.syncAlbums) {
         await backgroundManager.syncLinkedAlbum();
       }

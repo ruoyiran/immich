@@ -80,6 +80,7 @@ open class NativeSyncApiImplBase(context: Context) : ImmichPlugin(), ActivityAwa
       add(MediaStore.MediaColumns.BUCKET_ID)
       add(MediaStore.MediaColumns.WIDTH)
       add(MediaStore.MediaColumns.HEIGHT)
+      add(MediaStore.MediaColumns.SIZE)
       add(MediaStore.MediaColumns.DURATION)
       add(MediaStore.MediaColumns.ORIENTATION)
       // IS_FAVORITE is only available on Android 11 and above
@@ -150,6 +151,7 @@ open class NativeSyncApiImplBase(context: Context) : ImmichPlugin(), ActivityAwa
         val bucketIdColumn = c.getColumnIndexOrThrow(MediaStore.MediaColumns.BUCKET_ID)
         val widthColumn = c.getColumnIndexOrThrow(MediaStore.MediaColumns.WIDTH)
         val heightColumn = c.getColumnIndexOrThrow(MediaStore.MediaColumns.HEIGHT)
+        val sizeColumn = c.getColumnIndexOrThrow(MediaStore.MediaColumns.SIZE)
         val durationColumn = c.getColumnIndexOrThrow(MediaStore.MediaColumns.DURATION)
         val orientationColumn =
           c.getColumnIndexOrThrow(MediaStore.MediaColumns.ORIENTATION)
@@ -186,6 +188,7 @@ open class NativeSyncApiImplBase(context: Context) : ImmichPlugin(), ActivityAwa
           val modifiedAt = c.getLong(dateModifiedColumn)
           val width = c.getInt(widthColumn).toLong()
           val height = c.getInt(heightColumn).toLong()
+          val size = c.getLong(sizeColumn).takeIf { it > 0 }
           // Duration is milliseconds
           val duration = if (rawMediaType == MediaStore.Files.FileColumns.MEDIA_TYPE_IMAGE) 0L
           else c.getLong(durationColumn)
@@ -205,6 +208,7 @@ open class NativeSyncApiImplBase(context: Context) : ImmichPlugin(), ActivityAwa
             modifiedAt,
             if (isFlipped) height else width,
             if (isFlipped) width else height,
+            size,
             duration,
             0L,
             isFavorite,
@@ -446,7 +450,8 @@ open class NativeSyncApiImplBase(context: Context) : ImmichPlugin(), ActivityAwa
 
   private suspend fun hashAsset(assetId: String): HashResult {
     return try {
-      val digest = MessageDigest.getInstance("SHA-1")
+      val digest = MessageDigest.getInstance("MD5")
+      var size = 0L
       openOriginalStream(assetId).use { inputStream ->
         val buffer = ByteArray(HASH_BUFFER_SIZE)
         while (true) {
@@ -454,16 +459,17 @@ open class NativeSyncApiImplBase(context: Context) : ImmichPlugin(), ActivityAwa
           if (bytesRead == -1) break
           currentCoroutineContext().ensureActive()
           digest.update(buffer, 0, bytesRead)
+          size += bytesRead
         }
       }
 
-      HashResult(assetId, null, Base64.encodeToString(digest.digest(), Base64.NO_WRAP))
+      HashResult(assetId, null, Base64.encodeToString(digest.digest(), Base64.NO_WRAP), size, "md5")
     } catch (e: CancellationException) {
       throw e
     } catch (e: SecurityException) {
-      HashResult(assetId, "Permission denied accessing asset: ${e.message}", null)
+      HashResult(assetId, "Permission denied accessing asset: ${e.message}", null, null, null)
     } catch (e: Exception) {
-      HashResult(assetId, "Failed to hash asset: ${e.message}", null)
+      HashResult(assetId, "Failed to hash asset: ${e.message}", null, null, null)
     }
   }
 
