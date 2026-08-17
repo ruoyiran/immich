@@ -75,6 +75,143 @@ void main() {
     expect(states.listSync(), isEmpty);
   });
 
+  test('resumable upload uses the server recommended chunk size', () async {
+    final root = await Directory.systemTemp.createTemp('resumable-server-chunk-test-');
+    addTearDown(() => root.delete(recursive: true));
+    final bytes = List<int>.filled(3 * 1024 * 1024, 0x41);
+    final source = File('${root.path}/asset.heic');
+    await source.writeAsBytes(bytes);
+    var offset = 0;
+    final chunks = <int>[];
+    final client = _RecordingClient((request, body) async {
+      if (request.method == 'POST') {
+        return _json(200, {
+          'upload_id': 'asset-server-chunk',
+          'generation': 'gen-a',
+          'offset': offset,
+          'size': bytes.length,
+          'complete': false,
+        });
+      }
+      chunks.add(body.length);
+      offset += body.length;
+      return _json(200, {
+        'upload_id': 'asset-server-chunk',
+        'generation': 'gen-a',
+        'offset': offset,
+        'size': bytes.length,
+        'complete': offset == bytes.length,
+        if (offset == bytes.length) 'asset_id': '77777777-7777-4777-8777-777777777777',
+        if (offset == bytes.length) 'asset_status': 'created',
+      });
+    }, serverConfig: const {'checksumAlgorithm': 'md5-size', 'resumableUploadChunkBytes': 2 * 1024 * 1024});
+    final repository = UploadRepository(
+      client: client,
+      stateDirectory: root,
+      endpoint: 'http://server/api',
+      headers: const {},
+      registerDownloaderCallbacks: false,
+    );
+
+    final result = await repository.uploadFile(
+      file: source,
+      originalFileName: 'asset.heic',
+      fields: const {'fileCreatedAt': '2026-08-12T01:02:03Z', 'fileModifiedAt': '2026-08-12T01:02:03Z'},
+      cancelToken: null,
+      logContext: 'server chunk test',
+      checksum: base64Encode(md5.convert(bytes).bytes),
+      uploadId: 'asset-server-chunk',
+    );
+
+    expect(result.isSuccess, isTrue);
+    expect(chunks, [2 * 1024 * 1024, 1024 * 1024]);
+  });
+
+  test('resumable upload defaults to 8 MiB when the server omits its recommendation', () async {
+    final root = await Directory.systemTemp.createTemp('resumable-default-chunk-test-');
+    addTearDown(() => root.delete(recursive: true));
+    final bytes = List<int>.filled(9 * 1024 * 1024, 0x42);
+    final source = File('${root.path}/asset.heic');
+    await source.writeAsBytes(bytes);
+    var offset = 0;
+    final chunks = <int>[];
+    final client = _RecordingClient((request, body) async {
+      if (request.method == 'POST') {
+        return _json(200, {
+          'upload_id': 'asset-default-chunk',
+          'generation': 'gen-a',
+          'offset': offset,
+          'size': bytes.length,
+          'complete': false,
+        });
+      }
+      chunks.add(body.length);
+      offset += body.length;
+      return _json(200, {
+        'upload_id': 'asset-default-chunk',
+        'generation': 'gen-a',
+        'offset': offset,
+        'size': bytes.length,
+        'complete': offset == bytes.length,
+        if (offset == bytes.length) 'asset_id': '88888888-8888-4888-8888-888888888888',
+        if (offset == bytes.length) 'asset_status': 'created',
+      });
+    });
+    final repository = UploadRepository(
+      client: client,
+      stateDirectory: root,
+      endpoint: 'http://server/api',
+      headers: const {},
+      registerDownloaderCallbacks: false,
+    );
+
+    final result = await repository.uploadFile(
+      file: source,
+      originalFileName: 'asset.heic',
+      fields: const {'fileCreatedAt': '2026-08-12T01:02:03Z', 'fileModifiedAt': '2026-08-12T01:02:03Z'},
+      cancelToken: null,
+      logContext: 'default chunk test',
+      checksum: base64Encode(md5.convert(bytes).bytes),
+      uploadId: 'asset-default-chunk',
+    );
+
+    expect(result.isSuccess, isTrue);
+    expect(chunks, [8 * 1024 * 1024, 1024 * 1024]);
+  });
+
+  test('resumable upload rejects an unsafe server chunk recommendation', () async {
+    final root = await Directory.systemTemp.createTemp('resumable-invalid-chunk-test-');
+    addTearDown(() => root.delete(recursive: true));
+    final source = File('${root.path}/asset.jpg');
+    await source.writeAsBytes(const [1]);
+    var uploadRequests = 0;
+    final client = _RecordingClient((request, body) async {
+      uploadRequests++;
+      return _json(500, {'error': 'unexpected upload request'});
+    }, serverConfig: const {'checksumAlgorithm': 'md5-size', 'resumableUploadChunkBytes': 128 * 1024});
+    final repository = UploadRepository(
+      client: client,
+      stateDirectory: root,
+      endpoint: 'http://server/api',
+      headers: const {},
+      registerDownloaderCallbacks: false,
+    );
+
+    final result = await repository.uploadFile(
+      file: source,
+      originalFileName: 'asset.jpg',
+      fields: const {'fileCreatedAt': '2026-08-12T01:02:03Z', 'fileModifiedAt': '2026-08-12T01:02:03Z'},
+      cancelToken: null,
+      logContext: 'invalid chunk test',
+      checksum: base64Encode(md5.convert(const [1]).bytes),
+      uploadId: 'asset-invalid-chunk',
+    );
+
+    expect(result.isSuccess, isFalse);
+    expect(result.errorMessage, contains('resumableUploadChunkBytes'));
+    expect(uploadRequests, 0);
+  });
+
   test('bulk MD5+size duplicate skips bytes and retains Live Photo association metadata', () async {
     final root = await Directory.systemTemp.createTemp('md5-duplicate-test-');
     addTearDown(() => root.delete(recursive: true));
@@ -1660,14 +1797,19 @@ String _md5Checksum(String value) => base64Encode(md5.convert(utf8.encode(value)
 class _RecordingClient extends BaseClient {
   final _Handler handler;
   final bool interceptBulkUploadCheck;
+  final Map<String, Object> serverConfig;
 
-  _RecordingClient(this.handler, {this.interceptBulkUploadCheck = true});
+  _RecordingClient(
+    this.handler, {
+    this.interceptBulkUploadCheck = true,
+    this.serverConfig = const {'checksumAlgorithm': 'md5-size'},
+  });
 
   @override
   Future<StreamedResponse> send(BaseRequest request) async {
     final body = await request.finalize().toBytes();
     if (request.method == 'GET' && request.url.path.endsWith('/server/config')) {
-      return _json(200, {'checksumAlgorithm': 'md5-size'});
+      return _json(200, serverConfig);
     }
     if (interceptBulkUploadCheck &&
         request.method == 'POST' &&

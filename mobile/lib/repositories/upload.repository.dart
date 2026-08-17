@@ -27,7 +27,9 @@ final uploadRepositoryProvider = Provider(
 );
 
 class UploadRepository {
-  static const int resumableChunkBytes = 4 * 1024 * 1024;
+  static const int defaultResumableChunkBytes = 8 * 1024 * 1024;
+  static const int minResumableChunkBytes = 256 * 1024;
+  static const int maxResumableChunkBytes = 16 * 1024 * 1024;
   static const Duration pmliveArtifactMaxAge = Duration(days: 1);
   static final RegExp _pmliveBundleName = RegExp(r'^pc-[0-9a-f]{64}\.pmlive$');
   static final RegExp _pmlivePartName = RegExp(
@@ -42,6 +44,7 @@ class UploadRepository {
   final String? _endpointOverride;
   final Map<String, String>? _headersOverride;
   final Map<String, Future<void>> _serverCapabilityChecks = {};
+  final Map<String, int> _serverResumableChunkBytes = {};
   void Function(TaskStatusUpdate)? onUploadStatus;
   void Function(TaskProgressUpdate)? onTaskProgress;
 
@@ -363,14 +366,25 @@ class UploadRepository {
       if (response.statusCode != 200) {
         throw _UploadHTTPException(response.statusCode, _errorMessage(response.statusCode, body));
       }
+      late final Map<String, dynamic> value;
       try {
-        final value = jsonDecode(body) as Map<String, dynamic>;
-        if (value['checksumAlgorithm'] != 'md5-size') {
-          throw const FormatException('unsupported checksum algorithm');
-        }
+        value = jsonDecode(body) as Map<String, dynamic>;
       } catch (_) {
         throw StateError('Server does not support MD5+size uploads. Upgrade photo-classifier before syncing.');
       }
+      if (value['checksumAlgorithm'] != 'md5-size') {
+        throw StateError('Server does not support MD5+size uploads. Upgrade photo-classifier before syncing.');
+      }
+      final advertisedChunkBytes = value['resumableUploadChunkBytes'];
+      if (advertisedChunkBytes != null &&
+          (advertisedChunkBytes is! int ||
+              advertisedChunkBytes < minResumableChunkBytes ||
+              advertisedChunkBytes > maxResumableChunkBytes)) {
+        throw StateError(
+          'Server returned invalid resumableUploadChunkBytes; expected $minResumableChunkBytes..$maxResumableChunkBytes',
+        );
+      }
+      _serverResumableChunkBytes[endpoint] = advertisedChunkBytes as int? ?? defaultResumableChunkBytes;
     }();
     _serverCapabilityChecks[endpoint] = check;
     try {
@@ -378,6 +392,7 @@ class UploadRepository {
     } catch (_) {
       if (identical(_serverCapabilityChecks[endpoint], check)) {
         _serverCapabilityChecks.remove(endpoint)?.ignore();
+        _serverResumableChunkBytes.remove(endpoint);
       }
       rethrow;
     }
@@ -517,6 +532,7 @@ class UploadRepository {
     await cleanupStalePMLiveArtifacts();
     final endpoint =
         _endpointOverride ?? Store.get(StoreKey.serverEndpoint) ?? (throw StateError('Server endpoint is missing'));
+    final chunkBytes = _serverResumableChunkBytes[endpoint] ?? defaultResumableChunkBytes;
     final logicalUploadId = _deriveResumableUploadId(endpoint, localAssetId, checksum);
     final isPMLive = p.extension(originalFileName).toLowerCase() == '.pmlive';
     var attempt = await _readResumableAttempt(logicalUploadId, checksum);
@@ -596,7 +612,7 @@ class UploadRepository {
             return UploadResult.error(errorMessage: 'Invalid resumable upload status');
           }
           await handle.setPosition(offset);
-          final length = minInt(resumableChunkBytes, size - offset);
+          final length = minInt(chunkBytes, size - offset);
           final chunk = await handle.read(length);
           if (chunk.length != length) {
             return UploadResult.error(errorMessage: 'Upload source changed while reading');
