@@ -75,7 +75,8 @@ class AppLifeCycleNotifier extends StateNotifier<AppLifeCycleEnum> {
     // Needs to be logged in
     if (isAuthenticated) {
       // switch endpoint if needed
-      final endpoint = await _ref.read(authProvider.notifier).setOpenApiServiceEndpoint();
+      final switchedEndpoint = await _ref.read(authProvider.notifier).setOpenApiServiceEndpoint();
+      final endpoint = switchedEndpoint ?? Store.tryGet(StoreKey.serverEndpoint);
       _log.info("Using server URL: $endpoint");
 
       await _ref.read(serverInfoProvider.notifier).getServerVersion();

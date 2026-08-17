@@ -73,15 +73,117 @@ void main() {
 
   Future<void> streamChanges(
     Future<void> Function(List<SyncEvent>, Function() abort, Function() reset) onDataCallback,
-    SemVer serverVersion,
-  ) {
+    SemVer serverVersion, {
+    int initialBatchSize = testBatchSize,
+    int batchSize = testBatchSize,
+  }) {
     return sut.streamChanges(
       onDataCallback,
-      batchSize: testBatchSize,
+      initialBatchSize: initialBatchSize,
+      batchSize: batchSize,
       httpClient: mockHttpClient,
       serverVersion: serverVersion,
     );
   }
+
+  test('streamChanges processes a small initial batch before using the regular batch size', () async {
+    const initialBatchSize = 2;
+    const batchSize = 4;
+    final receivedBatchSizes = <int>[];
+    final firstBatchReceived = Completer<void>();
+    final secondBatchReceived = Completer<void>();
+
+    Future<void> onDataCallback(List<SyncEvent> events, Function() _, Function() __) async {
+      receivedBatchSizes.add(events.length);
+      if (receivedBatchSizes.length == 1) {
+        firstBatchReceived.complete();
+      } else if (receivedBatchSizes.length == 2) {
+        secondBatchReceived.complete();
+      }
+    }
+
+    final streamChangesFuture = streamChanges(
+      onDataCallback,
+      const SemVer(major: 2, minor: 5, patch: 0),
+      initialBatchSize: initialBatchSize,
+      batchSize: batchSize,
+    );
+
+    await Future.delayed(const Duration(milliseconds: 50));
+
+    responseStreamController.add(
+      utf8.encode(
+        List.generate(
+          initialBatchSize + batchSize,
+          (i) => _createJsonLine(
+            SyncEntityType.userDeleteV1.toString(),
+            SyncUserDeleteV1(userId: "user$i").toJson(),
+            'ack$i',
+          ),
+        ).join(),
+      ),
+    );
+
+    await firstBatchReceived.future.timeout(
+      const Duration(seconds: 5),
+      onTimeout: () => fail('Initial batch was not processed within timeout'),
+    );
+    expect(receivedBatchSizes, [initialBatchSize]);
+
+    await secondBatchReceived.future.timeout(
+      const Duration(seconds: 5),
+      onTimeout: () => fail('Regular batch was not processed within timeout'),
+    );
+    await responseStreamController.close();
+    await expectLater(streamChangesFuture, completes);
+
+    expect(receivedBatchSizes, [initialBatchSize, batchSize]);
+  });
+
+  test('streamChanges preserves event order across multiple batches and a tail in one chunk', () async {
+    const initialBatchSize = 2;
+    const batchSize = 4;
+    const eventCount = initialBatchSize + batchSize * 2 + 1;
+    final receivedAcks = <List<String>>[];
+
+    final streamChangesFuture = streamChanges(
+      (events, _, __) async => receivedAcks.add(events.map((event) => event.ack).toList()),
+      const SemVer(major: 2, minor: 5, patch: 0),
+      initialBatchSize: initialBatchSize,
+      batchSize: batchSize,
+    );
+
+    await Future.delayed(const Duration(milliseconds: 50));
+    responseStreamController.add(
+      utf8.encode(
+        List.generate(
+          eventCount,
+          (i) => _createJsonLine(
+            SyncEntityType.userDeleteV1.toString(),
+            SyncUserDeleteV1(userId: 'user$i').toJson(),
+            'ack$i',
+          ),
+        ).join(),
+      ),
+    );
+    await responseStreamController.close();
+    await expectLater(streamChangesFuture, completes);
+
+    expect(receivedAcks.map((batch) => batch.length), [2, 4, 4, 1]);
+    expect(receivedAcks.expand((batch) => batch), List.generate(eventCount, (i) => 'ack$i'));
+  });
+
+  test('streamChanges rejects non-positive batch sizes', () async {
+    await responseStreamController.close();
+
+    final future = streamChanges(
+      (_, __, ___) async {},
+      const SemVer(major: 2, minor: 5, patch: 0),
+      initialBatchSize: 0,
+    );
+
+    await expectLater(future, throwsArgumentError);
+  });
 
   test('streamChanges stops processing stream when abort is called', () async {
     int onDataCallCount = 0;

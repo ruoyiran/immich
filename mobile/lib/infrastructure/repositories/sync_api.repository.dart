@@ -27,10 +27,18 @@ class SyncApiRepository {
     Future<void> Function(List<SyncEvent>, Function() abort, Function() reset) onData, {
     required SemVer serverVersion,
     Function()? onReset,
+    int initialBatchSize = kSyncEventInitialBatchSize,
     int batchSize = kSyncEventBatchSize,
     http.Client? httpClient,
     Future<void>? abortSignal,
   }) async {
+    if (initialBatchSize <= 0) {
+      throw ArgumentError.value(initialBatchSize, 'initialBatchSize', 'must be greater than zero');
+    }
+    if (batchSize <= 0) {
+      throw ArgumentError.value(batchSize, 'batchSize', 'must be greater than zero');
+    }
+
     final stopwatch = Stopwatch()..start();
     final client = httpClient ?? NetworkRepository.client;
     final endpoint = "${_api.apiClient.basePath}/sync/stream";
@@ -81,6 +89,10 @@ class SyncApiRepository {
 
     String previousChunk = '';
     final List<String> lines = [];
+    int nextBatchSize = initialBatchSize;
+    int processedBatchCount = 0;
+    int processedEventCount = 0;
+    bool receivedFirstByte = false;
 
     bool shouldAbort = false;
 
@@ -91,8 +103,22 @@ class SyncApiRepository {
 
     final reset = onReset ?? () {};
 
+    Future<void> processBatch(List<String> batchLines) async {
+      final events = _parseLines(batchLines);
+      await onData(events, abort, reset);
+      processedBatchCount++;
+      processedEventCount += events.length;
+
+      if (processedBatchCount == 1) {
+        _logger.info(
+          "Remote sync first batch processed in ${stopwatch.elapsedMilliseconds}ms (${events.length} events)",
+        );
+      }
+    }
+
     try {
       final response = await client.send(request);
+      _logger.info("Remote sync connected in ${stopwatch.elapsedMilliseconds}ms");
 
       if (response.statusCode != 200) {
         final errorBody = await response.stream.bytesToString();
@@ -100,6 +126,11 @@ class SyncApiRepository {
       }
 
       await for (final chunk in response.stream.transform(utf8.decoder)) {
+        if (!receivedFirstByte) {
+          receivedFirstByte = true;
+          _logger.info("Remote sync first byte received in ${stopwatch.elapsedMilliseconds}ms");
+        }
+
         if (shouldAbort) {
           break;
         }
@@ -109,22 +140,35 @@ class SyncApiRepository {
         previousChunk = parts.removeLast();
         lines.addAll(parts);
 
-        if (lines.length < batchSize) {
-          continue;
-        }
+        int processedLineCount = 0;
+        while (lines.length - processedLineCount >= nextBatchSize) {
+          final batchEnd = processedLineCount + nextBatchSize;
+          final batch = lines.sublist(processedLineCount, batchEnd);
+          processedLineCount = batchEnd;
+          await processBatch(batch);
+          nextBatchSize = batchSize;
 
-        await onData(_parseLines(lines), abort, reset);
-        lines.clear();
+          if (shouldAbort) {
+            break;
+          }
+        }
+        if (processedLineCount > 0) {
+          lines.removeRange(0, processedLineCount);
+        }
       }
 
       if (lines.isNotEmpty && !shouldAbort) {
-        await onData(_parseLines(lines), abort, reset);
+        await processBatch(lines);
       }
     } catch (error, stack) {
+      _logger.warning("Remote sync failed after ${stopwatch.elapsedMilliseconds}ms", error, stack);
       return Future.error(error, stack);
     }
     stopwatch.stop();
-    _logger.info("Remote Sync completed in ${stopwatch.elapsed.inMilliseconds}ms");
+    _logger.info(
+      "Remote sync completed in ${stopwatch.elapsedMilliseconds}ms "
+      "($processedEventCount events in $processedBatchCount batches)",
+    );
   }
 
   List<SyncEvent> _parseLines(List<String> lines) {

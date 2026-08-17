@@ -6,6 +6,7 @@ const String kMobileMetadataKey = "mobile-app";
 const int kLogTruncateLimit = 2000;
 
 // Sync
+const int kSyncEventInitialBatchSize = 256;
 const int kSyncEventBatchSize = 5000;
 const int kFetchLocalAssetsBatchSize = 40000;
 
