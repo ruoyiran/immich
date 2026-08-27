@@ -1,4 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:immich_mobile/domain/models/asset/base_asset.model.dart';
+import 'package:immich_mobile/infrastructure/repositories/local_asset.repository.dart';
 import 'package:immich_mobile/infrastructure/repositories/remote_asset.repository.dart';
 
 import '../repository_context.dart';
@@ -63,5 +65,21 @@ void main() {
       expect(result.length, 1);
       expect(result[0].id, remote.id);
     });
+  });
+
+  test('upsertUploadedAsset immediately links the local asset by checksum', () async {
+    const checksum = 'fresh-upload-checksum';
+    const remoteId = 'fresh-upload-remote-id';
+    final user = await ctx.newUser();
+    await ctx.newAuthUser(id: user.id);
+    final local = await ctx.newLocalAsset(checksum: checksum);
+    final localRepository = DriftLocalAssetRepository(ctx.db);
+    final source = await localRepository.getById(local.id);
+
+    await sut.upsertUploadedAsset(remoteId: remoteId, ownerId: user.id, source: source!);
+
+    final linked = await localRepository.get(local.id);
+    expect(linked?.remoteId, remoteId);
+    expect(linked?.storage, AssetState.merged);
   });
 }

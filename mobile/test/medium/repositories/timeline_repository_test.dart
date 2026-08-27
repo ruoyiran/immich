@@ -1,4 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:immich_mobile/domain/models/album/local_album.model.dart';
 import 'package:immich_mobile/domain/models/asset/base_asset.model.dart';
 import 'package:immich_mobile/infrastructure/repositories/timeline.repository.dart';
 import 'package:intl/date_symbol_data_local.dart';
@@ -20,6 +21,26 @@ void main() {
 
   tearDown(() async {
     await ctx.dispose();
+  });
+
+  group('main assets', () {
+    test('only includes assets synced from the server', () async {
+      final user = await ctx.newUser();
+      final remote = await ctx.newRemoteAsset(ownerId: user.id, checksum: 'remote-checksum');
+      final album = await ctx.newLocalAlbum(backupSelection: BackupSelection.selected);
+      final local = await ctx.newLocalAsset(checksum: 'local-only-checksum', createdAt: remote.createdAt);
+      await ctx.newLocalAlbumAsset(albumId: album.id, assetId: local.id);
+
+      final query = sut.main([user.id], .day);
+
+      final buckets = await query.bucketSource().first;
+      expect(buckets.fold<int>(0, (total, bucket) => total + bucket.assetCount), 1);
+
+      final assets = await query.assetSource(0, 10);
+      expect(assets, hasLength(1));
+      expect(assets.single, isA<RemoteAsset>());
+      expect((assets.single as RemoteAsset).id, remote.id);
+    });
   });
 
   group('remoteAlbum assets', () {

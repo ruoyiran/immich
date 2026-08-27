@@ -7,10 +7,17 @@ import 'package:immich_mobile/domain/models/asset/base_asset.model.dart';
 import 'package:immich_mobile/generated/translations.g.dart';
 import 'package:immich_mobile/presentation/actions/action.dart';
 import 'package:immich_mobile/providers/backup/asset_upload_progress.provider.dart';
+import 'package:immich_mobile/providers/infrastructure/asset.provider.dart';
+import 'package:immich_mobile/providers/infrastructure/timeline.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/toast.provider.dart';
+import 'package:immich_mobile/providers/timeline/multiselect.provider.dart';
+import 'package:immich_mobile/providers/user.provider.dart';
 import 'package:immich_mobile/services/foreground_upload.service.dart';
 import 'package:immich_mobile/utils/error_handler.dart';
 import 'package:immich_ui/immich_ui.dart';
+import 'package:logging/logging.dart';
+
+final _logger = Logger('UploadAction');
 
 final _stateProvider = Provider.family.autoDispose<List<LocalAsset>?, ActionSource>((ref, source) {
   final assets = ref.watch(assetsActionProvider(source));
@@ -34,6 +41,7 @@ class UploadAction extends AssetActionBuilder {
   }
 
   Future<void> _upload(BuildContext context, WidgetRef ref, List<LocalAsset> assets) async {
+    var isDialogOpen = false;
     try {
       if (!showProgress) {
         await uploadAssets(context, ref, assets);
@@ -42,7 +50,7 @@ class UploadAction extends AssetActionBuilder {
 
       // The dialog is not awaited: it stays up while the upload runs and is
       // dismissed below, unless the user cancelled it themselves first
-      var isDialogOpen = true;
+      isDialogOpen = true;
       unawaited(
         showDialog<void>(
           context: context,
@@ -52,12 +60,12 @@ class UploadAction extends AssetActionBuilder {
       );
 
       await uploadAssets(context, ref, assets);
-
+    } catch (error, stack) {
+      handleError(error, stack: stack, description: "Failed to upload the assets");
+    } finally {
       if (isDialogOpen && context.mounted) {
         Navigator.of(context, rootNavigator: true).pop();
       }
-    } catch (error, stack) {
-      handleError(error, stack: stack, description: "Failed to upload the assets");
     }
   }
 }
@@ -72,8 +80,27 @@ Future<void> uploadAssets(BuildContext context, WidgetRef ref, List<LocalAsset> 
   final cancelToken = Completer<void>();
   ref.read(manualUploadCancelTokenProvider.notifier).state = cancelToken;
 
-  final uploaded = <String>{};
+  final uploaded = <String, String>{};
   final failed = <String>{};
+  final assetById = {for (final asset in assets) asset.id: asset};
+  final ownerId = ref.read(authUserProvider).id;
+  final localRepository = ref.read(localAssetRepository);
+  final remoteRepository = ref.read(remoteAssetRepositoryProvider);
+  final timeline = ref.read(timelineServiceProvider);
+
+  Future<void> persistUploadedAsset(String id, String remoteId) async {
+    try {
+      final source = await localRepository.get(id) ?? assetById[id];
+      if (source?.checksum == null) {
+        _logger.warning('Uploaded asset $id has no persisted checksum; waiting for sync to link it');
+        return;
+      }
+      await remoteRepository.upsertUploadedAsset(remoteId: remoteId, ownerId: ownerId, source: source!);
+    } catch (error, stack) {
+      _logger.warning('Failed to persist uploaded asset $id locally', error, stack);
+    }
+  }
+
   for (final asset in assets) {
     progress.setProgress(asset.id, 0.0);
   }
@@ -84,9 +111,17 @@ Future<void> uploadAssets(BuildContext context, WidgetRef ref, List<LocalAsset> 
       cancelToken: cancelToken,
       callbacks: UploadCallbacks(
         onProgress: (id, _, bytes, total) => progress.setProgress(id, total > 0 ? bytes / total : 0.0),
-        onSuccess: (id, _) {
-          uploaded.add(id);
+        onProcessing: progress.setProcessing,
+        onSuccess: (id, remoteId) {
+          uploaded[id] = remoteId;
+          failed.remove(id);
           progress.remove(id);
+          timeline.markUploaded(id, remoteId);
+          final asset = assetById[id];
+          if (asset != null) {
+            ref.read(multiSelectProvider.notifier).deselectAsset(asset);
+          }
+          unawaited(persistUploadedAsset(id, remoteId));
         },
         onError: (id, _) {
           failed.add(id);
@@ -96,14 +131,18 @@ Future<void> uploadAssets(BuildContext context, WidgetRef ref, List<LocalAsset> 
     );
   } finally {
     ref.read(manualUploadCancelTokenProvider.notifier).state = null;
+    if (failed.isEmpty) {
+      progress.clear();
+    } else {
+      unawaited(Future.delayed(const Duration(seconds: 2), progress.clear));
+    }
   }
 
-  final uploadedCount = uploaded.difference(failed).length;
+  final succeeded = uploaded.keys.toSet().difference(failed);
+  final uploadedCount = succeeded.length;
   if (!cancelToken.isCompleted && (uploadedCount != assets.length || failed.isNotEmpty)) {
     toastService.error(errorMessage);
   }
-
-  unawaited(Future.delayed(const Duration(seconds: 2), progress.clear));
 }
 
 class _UploadProgressDialog extends ConsumerWidget {
@@ -113,9 +152,13 @@ class _UploadProgressDialog extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final progressMap = ref.watch(assetUploadProgressProvider);
 
-    final values = progressMap.values.where((value) => value >= 0).toList(growable: false);
-    final progress = values.isEmpty ? 0.0 : values.reduce((a, b) => a + b) / values.length;
-    final hasError = progressMap.values.any((value) => value < 0);
+    final values = progressMap.values
+        .where((value) => value.phase == AssetUploadPhase.uploading)
+        .toList(growable: false);
+    final progress = values.isEmpty ? 0.0 : values.map((value) => value.value).reduce((a, b) => a + b) / values.length;
+    final hasError = progressMap.values.any((value) => value.phase == AssetUploadPhase.error);
+    final isProcessing =
+        values.isEmpty && progressMap.values.any((value) => value.phase == AssetUploadPhase.processing);
 
     return AlertDialog(
       title: Text(context.t.uploading),
@@ -125,9 +168,15 @@ class _UploadProgressDialog extends ConsumerWidget {
           if (hasError)
             const Icon(Icons.error_outline, color: Colors.red, size: 48)
           else
-            CircularProgressIndicator(value: progress > 0 ? progress : null),
+            CircularProgressIndicator(value: isProcessing || progress <= 0 ? null : progress),
           const SizedBox(height: 16),
-          Text(hasError ? context.t.scaffold_body_error_occurred : '${(progress * 100).toInt()}%'),
+          Text(
+            hasError
+                ? context.t.scaffold_body_error_occurred
+                : isProcessing
+                ? context.t.waiting
+                : '${(progress * 100).toInt()}%',
+          ),
         ],
       ),
       actions: [

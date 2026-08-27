@@ -2,20 +2,32 @@ import 'dart:async';
 
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
-/// Tracks per-asset upload progress.
-/// Key: local asset ID, Value: upload progress 0.0 to 1.0, or -1.0 for error
-class AssetUploadProgressNotifier extends Notifier<Map<String, double>> {
-  static const double errorValue = -1.0;
+enum AssetUploadPhase { uploading, processing, error }
 
+class AssetUploadProgress {
+  final double value;
+  final AssetUploadPhase phase;
+
+  const AssetUploadProgress.uploading(this.value) : phase = AssetUploadPhase.uploading;
+  const AssetUploadProgress.processing() : value = 1.0, phase = AssetUploadPhase.processing;
+  const AssetUploadProgress.error() : value = 0.0, phase = AssetUploadPhase.error;
+}
+
+/// Tracks per-asset upload transfer and server-processing state.
+class AssetUploadProgressNotifier extends Notifier<Map<String, AssetUploadProgress>> {
   @override
-  Map<String, double> build() => {};
+  Map<String, AssetUploadProgress> build() => {};
 
   void setProgress(String localAssetId, double progress) {
-    state = {...state, localAssetId: progress};
+    state = {...state, localAssetId: AssetUploadProgress.uploading(progress)};
+  }
+
+  void setProcessing(String localAssetId) {
+    state = {...state, localAssetId: const AssetUploadProgress.processing()};
   }
 
   void setError(String localAssetId) {
-    state = {...state, localAssetId: errorValue};
+    state = {...state, localAssetId: const AssetUploadProgress.error()};
   }
 
   void remove(String localAssetId) {
@@ -27,7 +39,7 @@ class AssetUploadProgressNotifier extends Notifier<Map<String, double>> {
   }
 }
 
-final assetUploadProgressProvider = NotifierProvider<AssetUploadProgressNotifier, Map<String, double>>(
+final assetUploadProgressProvider = NotifierProvider<AssetUploadProgressNotifier, Map<String, AssetUploadProgress>>(
   AssetUploadProgressNotifier.new,
 );
 

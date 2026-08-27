@@ -161,7 +161,7 @@ ImageProvider getFullImageProvider(
   final ImageProvider provider;
   if (localFilePath != null) {
     provider = FileImage(File(localFilePath));
-  } else if (_shouldUseLocalAsset(asset)) {
+  } else if (_shouldUseLocalFullAsset(asset)) {
     final id = asset is LocalAsset ? asset.id : (asset as RemoteAsset).localId!;
     provider = LocalFullImageProvider(
       id: id,
@@ -221,3 +221,5 @@ bool _shouldUseLocalAsset(BaseAsset asset) =>
     asset.hasLocal &&
     (!asset.hasRemote || !SettingsRepository.instance.appConfig.image.preferRemote) &&
     !asset.isEdited;
+
+bool _shouldUseLocalFullAsset(BaseAsset asset) => asset.hasLocal && !asset.isEdited;

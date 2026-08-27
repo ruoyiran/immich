@@ -69,48 +69,27 @@ class DriftTimelineRepository extends DriftDatabaseRepository {
 
   Future<List<BaseAsset>> _getMainBucketAssets(List<String> userIds, {required int offset, required int count}) {
     return _db.mergedAssetDrift
-        .mergedAsset(userIds: userIds, limit: (_) => Limit(count, offset))
+        .mergedAsset(userIds: userIds, limit: (_, _) => Limit(count, offset))
         .map(
-          (row) => row.remoteId != null && row.ownerId != null
-              ? RemoteAsset(
-                  id: row.remoteId!,
-                  localId: row.localId,
-                  name: row.name,
-                  ownerId: row.ownerId!,
-                  checksum: row.checksum,
-                  type: row.type,
-                  createdAt: row.createdAt,
-                  updatedAt: row.updatedAt,
-                  uploadedAt: row.uploadedAt,
-                  thumbHash: row.thumbHash,
-                  width: row.width,
-                  height: row.height,
-                  isFavorite: row.isFavorite,
-                  durationMs: row.durationMs,
-                  livePhotoVideoId: row.livePhotoVideoId,
-                  stackId: row.stackId,
-                  isEdited: row.isEdited,
-                )
-              : LocalAsset(
-                  id: row.localId!,
-                  remoteId: row.remoteId,
-                  name: row.name,
-                  checksum: row.checksum,
-                  type: row.type,
-                  createdAt: row.createdAt,
-                  updatedAt: row.updatedAt,
-                  width: row.width,
-                  height: row.height,
-                  isFavorite: row.isFavorite,
-                  durationMs: row.durationMs,
-                  orientation: row.orientation,
-                  playbackStyle: AssetPlaybackStyle.values[row.playbackStyle],
-                  cloudId: row.iCloudId,
-                  latitude: row.latitude,
-                  longitude: row.longitude,
-                  adjustmentTime: row.adjustmentTime,
-                  isEdited: row.isEdited,
-                ),
+          (row) => RemoteAsset(
+            id: row.remoteId,
+            localId: row.localId,
+            name: row.name,
+            ownerId: row.ownerId,
+            checksum: row.checksum,
+            type: row.type,
+            createdAt: row.createdAt,
+            updatedAt: row.updatedAt,
+            uploadedAt: row.uploadedAt,
+            thumbHash: row.thumbHash,
+            width: row.width,
+            height: row.height,
+            isFavorite: row.isFavorite,
+            durationMs: row.durationMs,
+            livePhotoVideoId: row.livePhotoVideoId,
+            stackId: row.stackId,
+            isEdited: row.isEdited,
+          ),
         )
         .get();
   }

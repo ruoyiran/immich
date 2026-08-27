@@ -78,6 +78,36 @@ class RemoteAssetRepository extends DriftDatabaseRepository {
     return query.map((row) => row.toDto()).get();
   }
 
+  /// Inserts a placeholder row for a freshly uploaded local asset so checksum
+  /// based local/remote merging updates immediately. The sync stream will
+  /// replace it with authoritative server data.
+  Future<void> upsertUploadedAsset({
+    required String remoteId,
+    required String ownerId,
+    required LocalAsset source,
+  }) async {
+    await _db
+        .into(_db.remoteAssetEntity)
+        .insert(
+          RemoteAssetEntityCompanion(
+            id: Value(remoteId),
+            ownerId: Value(ownerId),
+            checksum: Value(source.checksum ?? remoteId),
+            name: Value(source.name),
+            type: Value(source.type),
+            createdAt: Value(source.createdAt),
+            updatedAt: Value(source.updatedAt),
+            width: Value(source.width),
+            height: Value(source.height),
+            durationMs: Value(source.durationMs),
+            isFavorite: Value(source.isFavorite),
+            visibility: const Value(AssetVisibility.timeline),
+            isEdited: Value(source.isEdited),
+          ),
+          mode: InsertMode.insertOrIgnore,
+        );
+  }
+
   Future<ExifInfo?> getExif(String id) {
     return _db.managers.remoteExifEntity
         .filter((row) => row.assetId.id.equals(id))

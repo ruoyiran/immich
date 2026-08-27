@@ -79,6 +79,45 @@ void main() {
     expect(receivedBuckets, [buckets]);
   });
 
+  test('reload refreshes the buffered assets without a bucket change', () async {
+    final bucketController = StreamController<List<Bucket>>.broadcast(sync: true);
+    var currentAsset = LocalAssetStub.image1;
+    final service = TimelineService((
+      assetSource: (_, __) async => [currentAsset],
+      bucketSource: () => bucketController.stream,
+      origin: TimelineOrigin.localAlbum,
+    ));
+    addTearDown(bucketController.close);
+    addTearDown(service.dispose);
+
+    bucketController.add(const [Bucket(assetCount: 1)]);
+    await Future<void>.delayed(Duration.zero);
+    expect(service.getAsset(0).id, LocalAssetStub.image1.id);
+
+    currentAsset = LocalAssetStub.image2;
+    await service.reload();
+
+    expect(service.getAsset(0).id, LocalAssetStub.image2.id);
+  });
+
+  test('markUploaded immediately links a buffered local asset', () async {
+    final bucketController = StreamController<List<Bucket>>.broadcast(sync: true);
+    final service = TimelineService((
+      assetSource: (_, __) async => [LocalAssetStub.image1],
+      bucketSource: () => bucketController.stream,
+      origin: TimelineOrigin.localAlbum,
+    ));
+    addTearDown(bucketController.close);
+    addTearDown(service.dispose);
+
+    bucketController.add(const [Bucket(assetCount: 1)]);
+    await Future<void>.delayed(Duration.zero);
+
+    expect(service.markUploaded(LocalAssetStub.image1.id, 'remote-id'), isTrue);
+    expect(service.getAsset(0).remoteId, 'remote-id');
+    expect(service.markUploaded(LocalAssetStub.image1.id, 'remote-id'), isFalse);
+  });
+
   test('dispose prevents an in-flight bucket refresh from repopulating the timeline', () async {
     final bucketController = StreamController<List<Bucket>>.broadcast(sync: true);
     final assetLoadStarted = Completer<void>();

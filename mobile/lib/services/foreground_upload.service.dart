@@ -27,11 +27,12 @@ import 'package:photo_manager/photo_manager.dart' show PMProgressHandler;
 /// Callbacks for upload progress and status updates
 class UploadCallbacks {
   final void Function(String id, String filename, int bytes, int totalBytes)? onProgress;
+  final void Function(String localId)? onProcessing;
   final void Function(String localId, String remoteId)? onSuccess;
   final void Function(String id, String errorMessage)? onError;
   final void Function(String id, double progress)? onICloudProgress;
 
-  const UploadCallbacks({this.onProgress, this.onSuccess, this.onError, this.onICloudProgress});
+  const UploadCallbacks({this.onProgress, this.onProcessing, this.onSuccess, this.onError, this.onICloudProgress});
 }
 
 final foregroundUploadServiceProvider = Provider((ref) {
@@ -418,6 +419,7 @@ class ForegroundUploadService {
           onProgress: callbacks.onProgress != null
               ? (bytes, totalBytes) => callbacks.onProgress!(asset.localId!, motionName, bytes, totalBytes)
               : null,
+          onProcessing: callbacks.onProcessing != null ? () => callbacks.onProcessing!(asset.localId!) : null,
           logContext: 'livePhotoMotion[${asset.localId}]',
           checksum: motionChecksum,
           uploadId: '${asset.id}:motion',
@@ -454,6 +456,7 @@ class ForegroundUploadService {
         onProgress: onProgress != null
             ? (bytes, totalBytes) => onProgress(asset.localId!, originalFileName, bytes, totalBytes)
             : null,
+        onProcessing: callbacks.onProcessing != null ? () => callbacks.onProcessing!(asset.localId!) : null,
         logContext: 'asset[${asset.localId}]',
         checksum: uploadChecksum,
         uploadId: asset.id,

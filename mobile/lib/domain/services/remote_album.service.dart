@@ -6,6 +6,7 @@ import 'package:immich_mobile/domain/models/album/album.model.dart';
 import 'package:immich_mobile/domain/models/asset/base_asset.model.dart';
 import 'package:immich_mobile/domain/models/user.model.dart';
 import 'package:immich_mobile/infrastructure/repositories/remote_album.repository.dart';
+import 'package:immich_mobile/infrastructure/repositories/remote_asset.repository.dart';
 import 'package:immich_mobile/models/albums/album_search.model.dart';
 import 'package:immich_mobile/providers/album/album_sort_by_options.provider.dart';
 import 'package:immich_mobile/repositories/drift_album_api_repository.dart';
@@ -26,10 +27,11 @@ class RemoteAlbumService {
   static final _logger = Logger('RemoteAlbumService');
 
   final DriftRemoteAlbumRepository _repository;
+  final RemoteAssetRepository _assetRepository;
   final DriftAlbumApiRepository _albumApiRepository;
   final ForegroundUploadService _uploadService;
 
-  const RemoteAlbumService(this._repository, this._albumApiRepository, this._uploadService);
+  const RemoteAlbumService(this._repository, this._assetRepository, this._albumApiRepository, this._uploadService);
 
   /// Categorizes a heterogeneous asset selection into already-on-server IDs
   /// and local assets that still need to be uploaded.
@@ -224,6 +226,10 @@ class RemoteAlbumService {
         'Upload progress callback failed for $localId',
         () => userCallbacks.onProgress?.call(localId, filename, bytes, totalBytes),
       ),
+      onProcessing: (localId) => _runUploadCallback(
+        'Upload processing callback failed for $localId',
+        () => userCallbacks.onProcessing?.call(localId),
+      ),
       onICloudProgress: (localId, progress) => _runUploadCallback(
         'iCloud progress callback failed for $localId',
         () => userCallbacks.onICloudProgress?.call(localId, progress),
@@ -279,7 +285,7 @@ class RemoteAlbumService {
       return 0;
     }
 
-    await _repository.upsertRemoteAssetStub(remoteId: remoteId, ownerId: uploader.id, source: source);
+    await _assetRepository.upsertUploadedAsset(remoteId: remoteId, ownerId: uploader.id, source: source);
     await _repository.addAssets(albumId, result.added);
     return result.added.length;
   }

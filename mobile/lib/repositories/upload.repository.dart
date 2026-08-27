@@ -3,6 +3,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:background_downloader/background_downloader.dart' hide Request;
 import 'package:crypto/crypto.dart';
@@ -30,6 +31,9 @@ class UploadRepository {
   static const int defaultResumableChunkBytes = 8 * 1024 * 1024;
   static const int minResumableChunkBytes = 256 * 1024;
   static const int maxResumableChunkBytes = 16 * 1024 * 1024;
+  static const Duration defaultResumableStatusPollInterval = Duration(milliseconds: 500);
+  static const String queuedFinalizationHeader = 'X-Upload-Finalization';
+  static const String queuedFinalizationV1 = 'queued-v1';
   static const Duration pmliveArtifactMaxAge = Duration(days: 1);
   static final RegExp _pmliveBundleName = RegExp(r'^pc-[0-9a-f]{64}\.pmlive$');
   static final RegExp _pmlivePartName = RegExp(
@@ -43,8 +47,10 @@ class UploadRepository {
   final Directory? _stateDirectoryOverride;
   final String? _endpointOverride;
   final Map<String, String>? _headersOverride;
+  final Duration _resumableStatusPollInterval;
   final Map<String, Future<void>> _serverCapabilityChecks = {};
   final Map<String, int> _serverResumableChunkBytes = {};
+  Future<void> _nativeHashQueue = Future.value();
   void Function(TaskStatusUpdate)? onUploadStatus;
   void Function(TaskProgressUpdate)? onTaskProgress;
 
@@ -55,13 +61,15 @@ class UploadRepository {
     Directory? stateDirectory,
     String? endpoint,
     Map<String, String>? headers,
+    Duration resumableStatusPollInterval = defaultResumableStatusPollInterval,
     bool registerDownloaderCallbacks = true,
   }) : _nativeSyncApi = nativeSyncApi ?? NativeSyncApi(),
        _localAssetRepository = localAssetRepository,
        _clientOverride = client,
        _stateDirectoryOverride = stateDirectory,
        _endpointOverride = endpoint,
-       _headersOverride = headers {
+       _headersOverride = headers,
+       _resumableStatusPollInterval = resumableStatusPollInterval {
     if (registerDownloaderCallbacks) {
       FileDownloader().registerCallbacks(
         group: kBackupGroup,
@@ -142,6 +150,7 @@ class UploadRepository {
     required Map<String, String> fields,
     required Completer<void>? cancelToken,
     void Function(int bytes, int totalBytes)? onProgress,
+    void Function()? onProcessing,
     required String logContext,
     required String checksum,
     required String uploadId,
@@ -181,6 +190,7 @@ class UploadRepository {
         localAssetId: uploadId,
         cancelToken: cancelToken,
         onProgress: onProgress,
+        onProcessing: onProcessing,
       );
     } on _UploadHTTPException catch (error) {
       return UploadResult.error(statusCode: error.statusCode, errorMessage: error.message);
@@ -204,6 +214,9 @@ class UploadRepository {
       final status = await _sendResumableJSON(Uri.parse('$endpoint/uploads/resumable'), 'POST', attempt.startBody);
       await _persistResumableState(attempt, status);
       if (!status.complete) {
+        return null;
+      }
+      if (status.processing) {
         return null;
       }
       if (status.assetId == null || (status.assetStatus != 'created' && status.assetStatus != 'duplicate')) {
@@ -239,7 +252,7 @@ class UploadRepository {
     if (cachedHashIsCurrent && _isBase64MD5(checksum) && _md5Hex(checksum!) == contentMd5) {
       return checksum;
     }
-    final results = await _nativeSyncApi.hashAssets([assetId]);
+    final results = await _withNativeHashLock(() => _nativeSyncApi.hashAssets([assetId]));
     if (results.length != 1 ||
         results.first.hash == null ||
         results.first.algorithm != 'md5' ||
@@ -258,6 +271,18 @@ class UploadRepository {
       assetId: (checksum: value, md5: _md5Hex(value), size: result.size!, modifiedAt: modifiedAt),
     });
     return value;
+  }
+
+  Future<T> _withNativeHashLock<T>(Future<T> Function() action) async {
+    final previous = _nativeHashQueue;
+    final release = Completer<void>();
+    _nativeHashQueue = release.future;
+    await previous;
+    try {
+      return await action();
+    } finally {
+      release.complete();
+    }
   }
 
   /// Share-intent files are not [LocalAsset] records and therefore have no
@@ -528,6 +553,7 @@ class UploadRepository {
     required String localAssetId,
     required Completer<void>? cancelToken,
     void Function(int bytes, int totalBytes)? onProgress,
+    void Function()? onProcessing,
   }) async {
     await cleanupStalePMLiveArtifacts();
     final endpoint =
@@ -583,6 +609,7 @@ class UploadRepository {
     final size = attempt.size;
     var status = await _sendResumableJSON(uri, 'POST', attempt.startBody);
     await _persistResumableState(attempt, status);
+    _reportResumableProgress(status, onProgress, onProcessing);
     if (!status.complete) {
       var source = File(attempt.sourcePath);
       if (attempt.isPMLive) {
@@ -617,13 +644,22 @@ class UploadRepository {
           if (chunk.length != length) {
             return UploadResult.error(errorMessage: 'Upload source changed while reading');
           }
-          final request = Request('PUT', uri.replace(path: '${uri.path}/$uploadId'))
-            ..headers.addAll(_requestHeaders)
-            ..headers['Content-Type'] = 'application/octet-stream'
-            ..headers['Content-Range'] = 'bytes $offset-${offset + length - 1}/$size'
-            ..headers['Content-MD5'] = base64Encode(md5.convert(chunk).bytes)
-            ..headers['X-Upload-Generation'] = status.generation
-            ..bodyBytes = chunk;
+          final request =
+              _ProgressBytesRequest(
+                  'PUT',
+                  uri.replace(path: '${uri.path}/$uploadId'),
+                  chunk,
+                  uploadedOffset: offset,
+                  totalBytes: size,
+                  onProgress: onProgress,
+                  onBodyComplete: offset + length >= size ? onProcessing : null,
+                )
+                ..headers.addAll(_requestHeaders)
+                ..headers['Content-Type'] = 'application/octet-stream'
+                ..headers['Content-Range'] = 'bytes $offset-${offset + length - 1}/$size'
+                ..headers['Content-MD5'] = base64Encode(md5.convert(chunk).bytes)
+                ..headers[queuedFinalizationHeader] = queuedFinalizationV1
+                ..headers['X-Upload-Generation'] = status.generation;
           final response = await _client.send(request);
           final responseBody = await response.stream.bytesToString();
           if (response.statusCode == 409) {
@@ -634,6 +670,7 @@ class UploadRepository {
             }
             status = conflict;
             await _persistResumableState(attempt, status);
+            _reportResumableProgress(status, onProgress, onProcessing);
             continue;
           }
           if (response.statusCode != 200) {
@@ -642,15 +679,37 @@ class UploadRepository {
           }
           status = _ResumableStatus.fromJSON(responseBody, fallbackSize: size);
           await _persistResumableState(attempt, status);
-          onProgress?.call(status.offset, size);
+          _reportResumableProgress(status, onProgress, onProcessing);
         }
       } finally {
         await handle.close();
       }
     }
+    while (status.processing && status.assetId == null) {
+      if (cancelToken?.isCompleted ?? false) {
+        await _persistResumableState(attempt, status);
+        await _deleteOwnedPMLiveArtifact(attempt.sourcePath, attempt.uploadId);
+        return UploadResult.cancelled();
+      }
+      if (_resumableStatusPollInterval > Duration.zero) {
+        await Future.any([
+          Future<void>.delayed(_resumableStatusPollInterval),
+          if (cancelToken != null) cancelToken.future,
+        ]);
+      }
+      if (cancelToken?.isCompleted ?? false) {
+        await _persistResumableState(attempt, status);
+        await _deleteOwnedPMLiveArtifact(attempt.sourcePath, attempt.uploadId);
+        return UploadResult.cancelled();
+      }
+      status = await _sendResumableJSON(uri.replace(path: '${uri.path}/$uploadId'), 'GET', '');
+      await _persistResumableState(attempt, status);
+      _reportResumableProgress(status, onProgress, onProcessing);
+    }
     if (status.assetId == null || (status.assetStatus != 'created' && status.assetStatus != 'duplicate')) {
       return UploadResult.error(errorMessage: 'Server completed upload without a stable asset result');
     }
+    onProgress?.call(size, size);
     await _deleteResumableState(logicalUploadId);
     await _deleteOwnedPMLiveArtifact(attempt.sourcePath, attempt.uploadId);
     return UploadResult.success(remoteAssetId: status.assetId!, assetStatus: status.assetStatus);
@@ -717,6 +776,7 @@ class UploadRepository {
     final request = Request(method, uri)
       ..headers.addAll(_requestHeaders)
       ..headers['Content-Type'] = 'application/json'
+      ..headers[queuedFinalizationHeader] = queuedFinalizationV1
       ..body = body;
     final response = await _client.send(request);
     final responseBody = await response.stream.bytesToString();
@@ -724,6 +784,24 @@ class UploadRepository {
       throw _UploadHTTPException(response.statusCode, _errorMessage(response.statusCode, responseBody));
     }
     return _ResumableStatus.fromJSON(responseBody);
+  }
+
+  void _reportResumableProgress(
+    _ResumableStatus status,
+    void Function(int bytes, int totalBytes)? onProgress,
+    void Function()? onProcessing,
+  ) {
+    if (status.processing && status.assetId == null) {
+      onProcessing?.call();
+      return;
+    }
+    if (onProgress == null || status.size <= 0) {
+      return;
+    }
+    final terminal = status.assetId != null && (status.assetStatus == 'created' || status.assetStatus == 'duplicate');
+    if (!terminal) {
+      onProgress(minInt(status.offset, status.size - 1), status.size);
+    }
   }
 
   Future<File> _resumableStateFile(String uploadId) async {
@@ -943,6 +1021,44 @@ class UploadRepository {
   }
 }
 
+class _ProgressBytesRequest extends BaseRequest {
+  static const int _progressChunkBytes = 64 * 1024;
+
+  final Uint8List _body;
+  final int uploadedOffset;
+  final int totalBytes;
+  final void Function(int bytes, int totalBytes)? onProgress;
+  final void Function()? onBodyComplete;
+
+  _ProgressBytesRequest(
+    super.method,
+    super.url,
+    List<int> body, {
+    required this.uploadedOffset,
+    required this.totalBytes,
+    required this.onProgress,
+    required this.onBodyComplete,
+  }) : _body = body is Uint8List ? body : Uint8List.fromList(body) {
+    contentLength = _body.length;
+  }
+
+  @override
+  ByteStream finalize() {
+    super.finalize();
+    return ByteStream(_streamBody());
+  }
+
+  Stream<List<int>> _streamBody() async* {
+    for (var start = 0; start < _body.length; start += _progressChunkBytes) {
+      final end = minInt(start + _progressChunkBytes, _body.length);
+      yield Uint8List.sublistView(_body, start, end);
+      final uploaded = uploadedOffset + end;
+      onProgress?.call(totalBytes > 0 && uploaded >= totalBytes ? totalBytes - 1 : uploaded, totalBytes);
+    }
+    onBodyComplete?.call();
+  }
+}
+
 int minInt(int left, int right) => left < right ? left : right;
 
 class _ResumableAttempt {
@@ -1068,6 +1184,7 @@ class _ResumableStatus {
   final int offset;
   final int size;
   final bool complete;
+  final bool processing;
   final String? assetId;
   final String? assetStatus;
 
@@ -1076,6 +1193,7 @@ class _ResumableStatus {
     required this.offset,
     required this.size,
     required this.complete,
+    this.processing = false,
     this.assetId,
     this.assetStatus,
   });
@@ -1087,6 +1205,7 @@ class _ResumableStatus {
       offset: (value['offset'] as num?)?.toInt() ?? 0,
       size: (value['size'] as num?)?.toInt() ?? fallbackSize,
       complete: value['complete'] as bool? ?? false,
+      processing: value['processing'] as bool? ?? false,
       assetId: value['asset_id'] as String?,
       assetStatus: value['asset_status'] as String?,
     );

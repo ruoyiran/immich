@@ -191,6 +191,40 @@ class TimelineService {
 
   Future<List<BaseAsset>> loadAssets(int index, int count) => _mutex.run(() => _loadAssets(index, count));
 
+  Future<void> reload() => _mutex.run(() async {
+    if (_isDisposed || _totalAssets == 0) {
+      return;
+    }
+
+    final offset = _bufferOffset >= _totalAssets || _buffer.isEmpty ? 0 : _bufferOffset;
+    final count = _buffer.isEmpty ? kTimelineAssetLoadBatchSize : math.min(_buffer.length, _totalAssets - offset);
+    final buffer = await _assetSource(offset, count);
+    if (_isDisposed) {
+      return;
+    }
+
+    _buffer = buffer;
+    _bufferOffset = offset;
+    EventStream.shared.emit(const TimelineReloadEvent());
+  });
+
+  bool markUploaded(String localId, String remoteId) {
+    if (_isDisposed) {
+      return false;
+    }
+    final index = _buffer.indexWhere((asset) => asset is LocalAsset && asset.id == localId);
+    if (index < 0) {
+      return false;
+    }
+    final asset = _buffer[index] as LocalAsset;
+    if (asset.remoteId == remoteId) {
+      return false;
+    }
+    _buffer[index] = asset.copyWith(remoteId: remoteId);
+    EventStream.shared.emit(const TimelineReloadEvent());
+    return true;
+  }
+
   Future<List<BaseAsset>> _loadAssets(int index, int count) async {
     if (hasRange(index, count)) {
       return getAssets(index, count);

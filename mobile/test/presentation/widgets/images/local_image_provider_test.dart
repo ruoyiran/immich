@@ -1,10 +1,14 @@
 import 'package:flutter/painting.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:immich_mobile/domain/models/asset/base_asset.model.dart';
+import 'package:immich_mobile/domain/models/settings_key.dart';
+import 'package:immich_mobile/infrastructure/repositories/settings.repository.dart';
 import 'package:immich_mobile/presentation/widgets/images/image_provider.dart';
 import 'package:immich_mobile/presentation/widgets/images/local_image_provider.dart';
 
+import '../../../medium/repository_context.dart';
 import '../../../unit/factories/local_asset_factory.dart';
+import '../../../unit/factories/remote_asset_factory.dart';
 
 class _StubCompleter extends ImageStreamCompleter {}
 
@@ -136,6 +140,31 @@ void main() {
       );
 
       expect(loads, 2);
+    });
+  });
+
+  group('full image source selection', () {
+    late MediumRepositoryContext ctx;
+    late SettingsRepository settings;
+
+    setUp(() async {
+      ctx = MediumRepositoryContext();
+      settings = await SettingsRepository.ensureInitialized(ctx.db);
+      await settings.write(SettingsKey.imagePreferRemote, true);
+    });
+
+    tearDown(() async {
+      await SettingsRepository.reset();
+      await ctx.dispose();
+    });
+
+    test('uses the local full image for a remote asset with local original available', () {
+      final asset = RemoteAssetFactory.create(localId: 'local-asset-1');
+
+      final provider = getFullImageProvider(asset, size: const Size(100, 100));
+
+      expect(provider, isA<LocalFullImageProvider>());
+      expect((provider as LocalFullImageProvider).id, 'local-asset-1');
     });
   });
 }

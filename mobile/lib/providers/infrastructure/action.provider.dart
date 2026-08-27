@@ -212,6 +212,7 @@ class ActionNotifier extends Notifier<void> {
             final progress = totalBytes > 0 ? bytes / totalBytes : 0.0;
             progressNotifier.setProgress(localAssetId, progress);
           },
+          onProcessing: progressNotifier.setProcessing,
           onSuccess: (localAssetId, remoteAssetId) {
             remoteAssetIds.add(remoteAssetId);
             progressNotifier.remove(localAssetId);

@@ -14,7 +14,7 @@ void main() {
   });
 
   setUp(() {
-    sut = RemoteAlbumService(mocks.remoteAlbum, mocks.albumApi, MockForegroundUploadService());
+    sut = RemoteAlbumService(mocks.remoteAlbum, mocks.remoteAsset.repo, mocks.albumApi, MockForegroundUploadService());
   });
 
   tearDown(() {

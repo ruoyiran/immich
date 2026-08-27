@@ -179,6 +179,150 @@ void main() {
     expect(chunks, [8 * 1024 * 1024, 1024 * 1024]);
   });
 
+  test('resumable upload reports progress while a chunk is being sent', () async {
+    final root = await Directory.systemTemp.createTemp('resumable-stream-progress-test-');
+    addTearDown(() => root.delete(recursive: true));
+    final bytes = List<int>.filled(1024 * 1024, 0x43);
+    final source = File('${root.path}/asset.jpg');
+    await source.writeAsBytes(bytes);
+    final progress = <int>[];
+    final client = _RecordingClient((request, body) async {
+      if (request.method == 'POST') {
+        return _json(200, {
+          'upload_id': 'asset-stream-progress',
+          'generation': 'gen-a',
+          'offset': 0,
+          'size': bytes.length,
+          'complete': false,
+        });
+      }
+      return _json(200, {
+        'upload_id': 'asset-stream-progress',
+        'generation': 'gen-a',
+        'offset': bytes.length,
+        'size': bytes.length,
+        'complete': true,
+        'asset_id': '99999999-9999-4999-8999-999999999999',
+        'asset_status': 'created',
+      });
+    }, serverConfig: const {'checksumAlgorithm': 'md5-size', 'resumableUploadChunkBytes': 1024 * 1024});
+    final repository = UploadRepository(
+      client: client,
+      stateDirectory: root,
+      endpoint: 'http://server/api',
+      headers: const {},
+      registerDownloaderCallbacks: false,
+    );
+
+    final result = await repository.uploadFile(
+      file: source,
+      originalFileName: 'asset.jpg',
+      fields: const {'fileCreatedAt': '2026-08-12T01:02:03Z', 'fileModifiedAt': '2026-08-12T01:02:03Z'},
+      cancelToken: null,
+      onProgress: (bytes, _) => progress.add(bytes),
+      logContext: 'stream progress test',
+      checksum: base64Encode(md5.convert(bytes).bytes),
+      uploadId: 'asset-stream-progress',
+    );
+
+    expect(result.isSuccess, isTrue);
+    expect(progress, contains(predicate<int>((value) => value > 0 && value < bytes.length)));
+    expect(progress.last, bytes.length);
+  });
+
+  test('resumable upload polls queued finalization without reporting 100 percent early', () async {
+    final root = await Directory.systemTemp.createTemp('resumable-processing-test-');
+    addTearDown(() => root.delete(recursive: true));
+    final bytes = utf8.encode('queued');
+    final source = File('${root.path}/asset.jpg');
+    await source.writeAsBytes(bytes);
+    var getRequests = 0;
+    var putResponseSent = false;
+    var terminalResponseSent = false;
+    final fullProgressAfterTerminal = <bool>[];
+    final processingBeforeTerminal = <bool>[];
+    final processingBeforePutResponse = <bool>[];
+    final client = _RecordingClient((request, body) async {
+      expect(request.headers['x-upload-finalization'], 'queued-v1');
+      if (request.method == 'POST') {
+        return _json(200, {
+          'upload_id': 'asset-processing',
+          'generation': 'gen-a',
+          'offset': 0,
+          'size': bytes.length,
+          'complete': false,
+        });
+      }
+      if (request.method == 'PUT') {
+        putResponseSent = true;
+        return _json(200, {
+          'upload_id': 'asset-processing',
+          'generation': 'gen-a',
+          'offset': bytes.length,
+          'size': bytes.length,
+          'complete': true,
+          'processing': true,
+        });
+      }
+      expect(request.method, 'GET');
+      getRequests++;
+      if (getRequests == 1) {
+        return _json(200, {
+          'upload_id': 'asset-processing',
+          'generation': 'gen-a',
+          'offset': bytes.length,
+          'size': bytes.length,
+          'complete': true,
+          'processing': true,
+        });
+      }
+      terminalResponseSent = true;
+      return _json(200, {
+        'upload_id': 'asset-processing',
+        'generation': 'gen-a',
+        'offset': bytes.length,
+        'size': bytes.length,
+        'complete': true,
+        'asset_id': 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+        'asset_status': 'created',
+      });
+    });
+    final repository = UploadRepository(
+      client: client,
+      stateDirectory: root,
+      endpoint: 'http://server/api',
+      headers: const {},
+      resumableStatusPollInterval: Duration.zero,
+      registerDownloaderCallbacks: false,
+    );
+
+    final result = await repository.uploadFile(
+      file: source,
+      originalFileName: 'asset.jpg',
+      fields: const {'fileCreatedAt': '2026-08-12T01:02:03Z', 'fileModifiedAt': '2026-08-12T01:02:03Z'},
+      cancelToken: null,
+      onProgress: (uploaded, total) {
+        if (uploaded == total) {
+          fullProgressAfterTerminal.add(terminalResponseSent);
+        }
+      },
+      onProcessing: () {
+        processingBeforeTerminal.add(!terminalResponseSent);
+        processingBeforePutResponse.add(!putResponseSent);
+      },
+      logContext: 'queued finalization test',
+      checksum: base64Encode(md5.convert(bytes).bytes),
+      uploadId: 'asset-processing',
+    );
+
+    expect(result.remoteAssetId, 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa');
+    expect(getRequests, 2);
+    expect(fullProgressAfterTerminal, [isTrue]);
+    expect(processingBeforeTerminal, isNotEmpty);
+    expect(processingBeforeTerminal, everyElement(isTrue));
+    expect(processingBeforePutResponse.first, isTrue);
+  });
+
   test('resumable upload rejects an unsafe server chunk recommendation', () async {
     final root = await Directory.systemTemp.createTemp('resumable-invalid-chunk-test-');
     addTearDown(() => root.delete(recursive: true));
@@ -1553,6 +1697,20 @@ void main() {
     expect(native.assetIds, ['UUID/L0/001', 'UUID/L0/002']);
   });
 
+  test('native asset hashing is serialized for concurrent uploads', () async {
+    final native = _ConcurrentTrackingNativeSyncApi();
+    final repository = UploadRepository(nativeSyncApi: native, registerDownloaderCallbacks: false);
+    final modifiedAt = DateTime.utc(2026, 8, 17);
+
+    await Future.wait([
+      repository.ensureAssetChecksum('UUID/L0/001', null, modifiedAt: modifiedAt),
+      repository.ensureAssetChecksum('UUID/L0/002', null, modifiedAt: modifiedAt),
+      repository.ensureAssetChecksum('UUID/L0/003', null, modifiedAt: modifiedAt),
+    ]);
+
+    expect(native.maxConcurrentCalls, 1);
+  });
+
   test('extracted Motion Photo still reuses cache only when its size matches', () async {
     final root = await Directory.systemTemp.createTemp('motion-still-md5-test-');
     addTearDown(() => root.delete(recursive: true));
@@ -1846,6 +2004,23 @@ class _FakeNativeSyncApi extends NativeSyncApi {
       input.outputPath,
     ).writeAsBytes([...await File(input.stillPath).readAsBytes(), ...await File(input.motionPath).readAsBytes()]);
     return input.outputPath;
+  }
+}
+
+class _ConcurrentTrackingNativeSyncApi extends NativeSyncApi {
+  int _concurrentCalls = 0;
+  int maxConcurrentCalls = 0;
+
+  @override
+  Future<List<HashResult>> hashAssets(List<String> assetIds, {bool allowNetworkAccess = false}) async {
+    _concurrentCalls++;
+    maxConcurrentCalls = maxConcurrentCalls < _concurrentCalls ? _concurrentCalls : maxConcurrentCalls;
+    await Future<void>.delayed(Duration.zero);
+    _concurrentCalls--;
+    return [
+      for (final assetId in assetIds)
+        HashResult(assetId: assetId, hash: _FakeNativeSyncApi.nativeMD5, size: 6, algorithm: 'md5'),
+    ];
   }
 }
 

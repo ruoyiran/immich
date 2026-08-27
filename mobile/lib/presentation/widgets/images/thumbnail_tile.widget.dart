@@ -5,6 +5,7 @@ import 'package:immich_mobile/domain/models/asset/base_asset.model.dart';
 import 'package:immich_mobile/extensions/build_context_extensions.dart';
 import 'package:immich_mobile/extensions/duration_extensions.dart';
 import 'package:immich_mobile/extensions/theme_extensions.dart';
+import 'package:immich_mobile/generated/translations.g.dart';
 import 'package:immich_mobile/presentation/widgets/images/thumbnail.widget.dart';
 import 'package:immich_mobile/presentation/widgets/timeline/constants.dart';
 import 'package:immich_mobile/providers/asset_viewer/asset_viewer.provider.dart';
@@ -340,14 +341,15 @@ class _StackIndicator extends StatelessWidget {
 }
 
 class _UploadProgressOverlay extends StatelessWidget {
-  final double progress;
+  final AssetUploadProgress progress;
 
   const _UploadProgressOverlay({required this.progress});
 
   @override
   Widget build(BuildContext context) {
-    final isError = progress < 0;
-    final percentage = isError ? 0 : (progress * 100).toInt();
+    final isError = progress.phase == AssetUploadPhase.error;
+    final isProcessing = progress.phase == AssetUploadPhase.processing;
+    final percentage = (progress.value * 100).toInt();
 
     return Positioned.fill(
       child: ColoredBox(
@@ -363,7 +365,7 @@ class _UploadProgressOverlay extends StatelessWidget {
                   width: 36,
                   height: 36,
                   child: CircularProgressIndicator(
-                    value: progress,
+                    value: isProcessing ? null : progress.value,
                     strokeWidth: 3,
                     backgroundColor: Colors.white24,
                     valueColor: const AlwaysStoppedAnimation<Color>(Colors.white),
@@ -371,7 +373,11 @@ class _UploadProgressOverlay extends StatelessWidget {
                 ),
               const SizedBox(height: 4),
               Text(
-                isError ? 'Error' : '$percentage%',
+                isError
+                    ? 'Error'
+                    : isProcessing
+                    ? context.t.waiting
+                    : '$percentage%',
                 style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold),
               ),
             ],
