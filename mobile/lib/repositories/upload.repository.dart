@@ -40,6 +40,7 @@ class UploadRepository {
     r'^\.pc-[0-9a-f]{64}\.pmlive\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.part$',
     caseSensitive: false,
   );
+  static final Map<String, Future<void>> _resumableStateFileOperations = {};
   final Logger logger = Logger('UploadRepository');
   final NativeSyncApi _nativeSyncApi;
   final DriftLocalAssetRepository? _localAssetRepository;
@@ -931,35 +932,66 @@ class UploadRepository {
 
   Future<void> _persistResumableState(_ResumableAttempt attempt, _ResumableStatus status) async {
     final target = await _resumableStateFile(attempt.logicalUploadId);
-    final temporary = File('${target.path}.part');
-    await temporary.writeAsString(jsonEncode(attempt.toStateJSON(status)), flush: true);
-    await temporary.rename(target.path);
+    await _withResumableStateFileLock(target, () async {
+      final temporary = File('${target.path}.${const Uuid().v4()}.part');
+      try {
+        await temporary.writeAsString(jsonEncode(attempt.toStateJSON(status)), flush: true);
+        await temporary.rename(target.path);
+      } finally {
+        if (temporary.existsSync()) {
+          temporary.deleteSync();
+        }
+      }
+    });
   }
 
   Future<void> _deleteResumableState(String uploadId) async {
     final state = await _resumableStateFile(uploadId);
-    if (state.existsSync()) {
-      state.deleteSync();
-    }
+    await _withResumableStateFileLock(state, () async {
+      if (state.existsSync()) {
+        state.deleteSync();
+      }
+    });
   }
 
   Future<_ResumableAttempt?> _readResumableAttempt(String logicalUploadId, String checksum) async {
     final state = await _resumableStateFile(logicalUploadId);
-    if (!state.existsSync()) {
+    return _withResumableStateFileLock(state, () async {
+      if (!state.existsSync()) {
+        return null;
+      }
+      try {
+        final value = jsonDecode(await state.readAsString()) as Map<String, dynamic>;
+        final attempt = _ResumableAttempt.fromStateJSON(value);
+        if (attempt.logicalUploadId == logicalUploadId && attempt.checksum == checksum) {
+          return attempt;
+        }
+      } catch (_) {
+        // Corrupt process-local metadata is discarded. The server query remains
+        // the authority for generation and acknowledged offset.
+      }
+      state.deleteSync();
       return null;
+    });
+  }
+
+  Future<T> _withResumableStateFileLock<T>(File state, Future<T> Function() operation) async {
+    final key = p.normalize(p.absolute(state.path));
+    final previous = _resumableStateFileOperations[key];
+    final completer = Completer<void>();
+    final current = completer.future;
+    _resumableStateFileOperations[key] = current;
+    if (previous != null) {
+      await previous;
     }
     try {
-      final value = jsonDecode(await state.readAsString()) as Map<String, dynamic>;
-      final attempt = _ResumableAttempt.fromStateJSON(value);
-      if (attempt.logicalUploadId == logicalUploadId && attempt.checksum == checksum) {
-        return attempt;
+      return await operation();
+    } finally {
+      completer.complete();
+      if (identical(_resumableStateFileOperations[key], current)) {
+        unawaited(_resumableStateFileOperations.remove(key));
       }
-    } catch (_) {
-      // Corrupt process-local metadata is discarded. The server query remains
-      // the authority for generation and acknowledged offset.
     }
-    state.deleteSync();
-    return null;
   }
 
   UploadResult _uploadError(int statusCode, String body) =>

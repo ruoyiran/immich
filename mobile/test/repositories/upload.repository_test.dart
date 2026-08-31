@@ -11,6 +11,69 @@ import 'package:immich_mobile/repositories/upload.repository.dart';
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
+  test('concurrent resumable attempts for one asset do not race checkpoint replacement', () async {
+    final root = await Directory.systemTemp.createTemp('resumable-checkpoint-race-test-');
+    addTearDown(() => root.delete(recursive: true));
+    final source = File('${root.path}/asset.jpg')..writeAsBytesSync(const [1]);
+    final checksum = base64Encode(md5.convert(const [1]).bytes);
+    const parallel = 16;
+    final releaseBulkChecks = Completer<void>();
+    var bulkChecks = 0;
+    final client = _RecordingClient((request, body) async {
+      if (request.url.path.endsWith('/assets/bulk-upload-check')) {
+        bulkChecks++;
+        if (bulkChecks == parallel) {
+          releaseBulkChecks.complete();
+        }
+        await releaseBulkChecks.future;
+        final payload = jsonDecode(utf8.decode(body)) as Map<String, dynamic>;
+        final assets = payload['assets'] as List<dynamic>;
+        return _json(200, {
+          'results': [
+            for (final asset in assets) {'id': (asset as Map<String, dynamic>)['id'], 'action': 'accept'},
+          ],
+        });
+      }
+      final start = jsonDecode(utf8.decode(body)) as Map<String, dynamic>;
+      return _json(200, {
+        'upload_id': start['upload_id'],
+        'generation': 'gen-a',
+        'offset': 1,
+        'size': 1,
+        'complete': true,
+        'asset_id': '11111111-1111-4111-8111-111111111111',
+        'asset_status': 'created',
+      });
+    }, interceptBulkUploadCheck: false);
+    final repository = UploadRepository(
+      client: client,
+      stateDirectory: root,
+      endpoint: 'http://server/api',
+      headers: const {},
+      registerDownloaderCallbacks: false,
+    );
+    final fields = {
+      'fileCreatedAt': '2026-08-12T01:02:03Z',
+      'fileModifiedAt': '2026-08-12T01:02:03Z',
+      'sourceMetadata': jsonEncode({'padding': List.filled(60000, 'x').join()}),
+    };
+
+    final results = await Future.wait([
+      for (var index = 0; index < parallel; index++)
+        repository.uploadFile(
+          file: source,
+          originalFileName: 'asset.jpg',
+          fields: fields,
+          cancelToken: null,
+          logContext: 'checkpoint race $index',
+          checksum: checksum,
+          uploadId: 'same-asset',
+        ),
+    ]);
+
+    expect(results, everyElement(predicate<UploadResult>((result) => result.isSuccess)));
+  });
+
   test('resumable upload adopts conflict generation and never resends acknowledged bytes', () async {
     final root = await Directory.systemTemp.createTemp('resumable-upload-test-');
     addTearDown(() => root.delete(recursive: true));
