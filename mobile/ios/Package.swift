@@ -10,7 +10,7 @@ let package = Package(
       name: "PMLiveWriterCore",
       path: "Runner/Sync",
       exclude: ["Messages.g.swift", "MessagesImpl.swift", "PHAssetExtensions.swift", "PHAssetResourceExtensions.swift"],
-      sources: ["PMLiveWriter.swift"]
+      sources: ["PMLiveWriter.swift", "AppleLivePhotoWriter.swift"]
     ),
     .testTarget(
       name: "PMLiveWriterCoreTests",

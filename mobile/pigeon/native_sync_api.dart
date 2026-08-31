@@ -174,4 +174,7 @@ abstract class NativeSyncApi {
 
   @async
   String createPMLive(PMLiveInput input);
+
+  @async
+  String saveAppleLivePhoto(String stillPath, String motionPath, String title);
 }

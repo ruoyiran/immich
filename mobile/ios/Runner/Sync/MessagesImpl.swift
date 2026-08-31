@@ -505,4 +505,34 @@ class NativeSyncApiImpl: ImmichPlugin, NativeSyncApi, FlutterPlugin {
       }
     }
   }
+
+  func saveAppleLivePhoto(
+    stillPath: String,
+    motionPath: String,
+    title: String,
+    completion: @escaping (Result<String, Error>) -> Void
+  ) {
+    Task(priority: .utility) {
+      let outputDirectory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("immich-live-photo-\(UUID().uuidString)", isDirectory: true)
+      defer { try? FileManager.default.removeItem(at: outputDirectory) }
+      do {
+        let output = try await AppleLivePhotoWriter.write(
+          AppleLivePhotoWriterInput(
+            stillURL: URL(fileURLWithPath: stillPath),
+            motionURL: URL(fileURLWithPath: motionPath),
+            outputDirectory: outputDirectory,
+            assetIdentifier: UUID().uuidString
+          )
+        )
+        let localIdentifier = try await AppleLivePhotoWriter.saveToPhotoLibrary(
+          output,
+          title: title
+        )
+        completion(.success(localIdentifier))
+      } catch {
+        completion(.failure(error))
+      }
+    }
+  }
 }

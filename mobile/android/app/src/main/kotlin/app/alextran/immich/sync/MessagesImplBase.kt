@@ -113,6 +113,15 @@ open class NativeSyncApiImplBase(context: Context) : ImmichPlugin(), ActivityAwa
     callback(Result.failure(UnsupportedOperationException("PMLive is only supported for iOS Live Photos")))
   }
 
+  fun saveAppleLivePhoto(
+    stillPath: String,
+    motionPath: String,
+    title: String,
+    callback: (Result<String>) -> Unit
+  ) {
+    callback(Result.failure(UnsupportedOperationException("Apple Live Photos are only supported on iOS")))
+  }
+
   protected fun getCursor(
     volume: String,
     selection: String,

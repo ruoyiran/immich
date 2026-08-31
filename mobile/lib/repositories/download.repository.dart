@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:background_downloader/background_downloader.dart';
 import 'package:collection/collection.dart';
+import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:immich_mobile/constants/constants.dart';
 import 'package:immich_mobile/domain/models/asset/base_asset.model.dart';
@@ -14,6 +15,8 @@ import 'package:immich_mobile/utils/image_url_builder.dart';
 final downloadRepositoryProvider = Provider((ref) => DownloadRepository());
 
 class DownloadRepository {
+  static const livePhotoFormatHeader = 'X-Immich-Live-Photo-Format';
+  static const androidMotionHeicFormat = 'android-motion-heic';
   static final _downloader = FileDownloader();
   static final _dummyTask = DownloadTask(
     taskId: 'dummy',
@@ -96,16 +99,13 @@ class DownloadRepository {
       final isVideo = asset.isVideo;
       final url = getOriginalUrlForRemoteId(id);
 
-      // on iOS it cannot link the image, check if the filename has .MP extension
-      // to avoid downloading the video part
-      final isAndroidMotionPhoto = asset.name.contains(".MP");
-
-      if (Platform.isAndroid || livePhotoVideoId == null || isVideo || isAndroidMotionPhoto) {
+      if (Platform.isAndroid || livePhotoVideoId == null || isVideo) {
+        final isAndroidLivePhoto = Platform.isAndroid && livePhotoVideoId != null && !isVideo;
         tasks[taskIndex++] = DownloadTask(
           taskId: id,
           url: url,
-          headers: headers,
-          filename: asset.name,
+          headers: downloadHeaders(headers, isAndroidLivePhoto: isAndroidLivePhoto),
+          filename: downloadFilename(asset.name, isAndroidLivePhoto: isAndroidLivePhoto),
           updates: Updates.statusAndProgress,
           group: isVideo ? kDownloadGroupVideo : kDownloadGroupImage,
         );
@@ -139,5 +139,22 @@ class DownloadRepository {
       return Future.value(const []);
     }
     return _downloader.enqueueAll(tasks.slice(0, taskIndex));
+  }
+
+  @visibleForTesting
+  static Map<String, String> downloadHeaders(Map<String, String> base, {required bool isAndroidLivePhoto}) {
+    if (!isAndroidLivePhoto) {
+      return base;
+    }
+    return {...base, livePhotoFormatHeader: androidMotionHeicFormat};
+  }
+
+  @visibleForTesting
+  static String downloadFilename(String original, {required bool isAndroidLivePhoto}) {
+    if (!isAndroidLivePhoto || original.toLowerCase().endsWith('.heic')) {
+      return original;
+    }
+    final extension = RegExp(r'\.[^.]+$');
+    return '${original.replaceFirst(extension, '')}.heic';
   }
 }
