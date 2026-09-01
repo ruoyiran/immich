@@ -323,10 +323,20 @@ class _SliverTimelineState extends ConsumerState<_SliverTimeline> with WidgetsBi
   // Drag selection methods
   void _setDragStartIndex(TimelineAssetIndex index) {
     setState(() {
-      _scrollPhysics = const ClampingScrollPhysics();
       _dragAnchorIndex = index;
       _dragging = true;
     });
+    // Immediately select the long-pressed asset so a plain long-press selects
+    // exactly that one photo; dragging expands the selection from this anchor.
+    final timelineService = ref.read(timelineServiceProvider);
+    if (timelineService.hasRange(index.assetIndex, 1)) {
+      final anchor = timelineService.getAssets(index.assetIndex, 1);
+      if (anchor.isNotEmpty) {
+        final asset = anchor.first;
+        ref.read(multiSelectProvider.notifier).selectAsset(asset);
+        _draggedAssets.add(asset);
+      }
+    }
   }
 
   void _stopDrag() {
