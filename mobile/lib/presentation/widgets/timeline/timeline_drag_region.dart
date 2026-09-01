@@ -34,6 +34,13 @@ class TimelineDragRegion extends StatefulWidget {
 class _TimelineDragRegionState extends State<TimelineDragRegion> {
   late TimelineAssetIndex? assetUnderPointer;
   late TimelineAssetIndex? anchorAsset;
+  Offset? _dragStartPosition;
+
+  // Minimum pointer travel before a long-press drag starts edge-scrolling or
+  // expanding the selection. Filters out the natural finger drift of a plain
+  // long-press (which otherwise starts the edge auto-scroll and selects a
+  // spurious range), while still allowing a deliberate drag to select.
+  static const double kDragSelectionThreshold = 24.0;
 
   // Scroll related state
   static const double scrollOffset = 0.10;
@@ -108,6 +115,7 @@ class _TimelineDragRegionState extends State<TimelineDragRegion> {
       bottomScrollOffset = height - topScrollOffset!;
     }
 
+    _dragStartPosition = event.globalPosition;
     final initialHit = _getValueKeyAtPosition(event.globalPosition);
     anchorAsset = initialHit;
     if (initialHit == null) {
@@ -130,6 +138,17 @@ class _TimelineDragRegionState extends State<TimelineDragRegion> {
       return;
     }
     if (topScrollOffset == null || bottomScrollOffset == null) {
+      return;
+    }
+
+    // Ignore micro-movements (see kDragSelectionThreshold). A plain long-press
+    // usually lands in the bottom/top 10% edge scroll zone; without a threshold
+    // the first bit of natural finger drift starts the edge auto-scroll, which
+    // jumps the grid ~175px ("UI shifts up") and changes the tile under the
+    // finger, selecting a spurious range. Requiring deliberate travel before
+    // any scroll/selection handling keeps a plain long-press to one photo.
+    final start = _dragStartPosition;
+    if (start != null && (event.globalPosition - start).distance < kDragSelectionThreshold) {
       return;
     }
 
