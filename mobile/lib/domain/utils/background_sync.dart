@@ -14,6 +14,10 @@ class BackgroundSyncManager {
   final SyncCallback? onRemoteSyncStart;
   final SyncCallbackWithResult<bool?>? onRemoteSyncComplete;
   final SyncErrorCallback? onRemoteSyncError;
+  // Fired when an in-flight remote sync is cancelled (CanceledError). A cancel
+  // is neither success nor failure, but the status notifier must still leave
+  // "syncing" — see syncRemote's catchError.
+  final SyncCallback? onRemoteSyncCancel;
 
   final SyncCallback? onLocalSyncStart;
   final SyncCallback? onLocalSyncComplete;
@@ -34,6 +38,7 @@ class BackgroundSyncManager {
     this.onRemoteSyncStart,
     this.onRemoteSyncComplete,
     this.onRemoteSyncError,
+    this.onRemoteSyncCancel,
     this.onLocalSyncStart,
     this.onLocalSyncComplete,
     this.onLocalSyncError,
@@ -141,7 +146,13 @@ class BackgroundSyncManager {
           return success;
         })
         .catchError((error) {
-          if (error is! CanceledError) {
+          if (error is CanceledError) {
+            // A cancelled remote sync is neither success nor failure, but it
+            // must still transition the status out of "syncing": the notifier
+            // only heard onRemoteSyncStart, so without this it stays stuck on
+            // "syncing" forever (the "always syncing" symptom).
+            onRemoteSyncCancel?.call();
+          } else {
             onRemoteSyncError?.call(error.toString());
           }
           _syncQueued = false;

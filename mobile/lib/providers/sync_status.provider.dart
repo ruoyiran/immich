@@ -66,6 +66,9 @@ class SyncStatusNotifier extends Notifier<SyncStatusState> {
   void startRemoteSync() => setRemoteSyncStatus(SyncStatus.syncing);
   void completeRemoteSync() => setRemoteSyncStatus(SyncStatus.success);
   void errorRemoteSync(String error) => setRemoteSyncStatus(SyncStatus.error, error);
+  // A cancelled sync is neither success nor error; reset to idle so the UI does
+  // not stay stuck on "syncing" (see background_sync.dart syncRemote catchError).
+  void cancelRemoteSync() => setRemoteSyncStatus(SyncStatus.idle);
 
   ///
   /// Local Sync
