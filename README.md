@@ -1,3 +1,6 @@
+> [!IMPORTANT]
+> This repository contains the Immich Web and Mobile clients plus their committed API contract. The server implementation has moved to the sibling repository [`../photo-classifier`](../photo-classifier); follow that repository's README for backend setup, configuration, and deployment. For local Web development, `IMMICH_SERVER_URL` defaults to `http://127.0.0.1:8080`.
+
 <p align="center"> 
   <br/>
   <a href="https://opensource.org/license/agpl-v3"><img src="https://img.shields.io/badge/License-AGPL_v3-blue.svg?color=3F51B5&style=for-the-badge&label=License&logoColor=000000&labelColor=ececec" alt="License: AGPLv3"></a>
@@ -41,11 +44,8 @@
   <a href="readme_i18n/README_ml_IN.md">മലയാളം</a>
 </p>
 
-
 > [!WARNING]
 > ⚠️ Always follow [3-2-1](https://www.backblaze.com/blog/the-3-2-1-backup-strategy/) backup plan for your precious photos and videos!
-> 
- 
 
 > [!NOTE]
 > You can find the main documentation, including installation guides, at https://immich.app/.

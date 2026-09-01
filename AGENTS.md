@@ -19,7 +19,6 @@
 - 准备上游工作前阅读 [CONTRIBUTING.md](CONTRIBUTING.md)。
 - 完整 how-to 请查阅公开的[开发环境配置](docs/docs/developer/setup.md)、[测试指南](docs/docs/developer/testing.md)和 [PR checklist](docs/docs/developer/pr-checklist.md)。
 - 修改 subtree 时还需阅读：
-  - [Server 指南](server/AGENTS.md)
   - [Web 指南](web/AGENTS.md)
   - [Mobile 指南](mobile/AGENTS.md)
   - [Machine Learning 指南](machine-learning/AGENTS.md)
@@ -27,13 +26,13 @@
 
 ## 仓库地图
 
-- `server/`：NestJS API、workers、持久化、queues 与 runtime orchestration。
+- `../photo-classifier/`：同级独立仓库，负责 Go API、持久化、上传、任务编排与部署；不是本仓库 subtree。
 - `web/`：构建为 CSR SPA 的 SvelteKit client。
 - `mobile/`：Flutter 应用及 Android/iOS native integrations。
 - `machine-learning/`：通过 HTTP 使用的 Python inference service。
 - `packages/`：生成的 SDK、CLI、plugin packages 与共享 scripts。
 - `open-api/`：OpenAPI generation 与 compatibility tooling。
-- `e2e/`：API 与 browser end-to-end tests。
+- `e2e/`：使用 mocked API 的 Playwright browser tests。
 - `docs/`：公开的 English Docusaurus 文档。
 - `engineering/`：内部、中文为主的工程知识。
 
@@ -42,7 +41,7 @@
 ## 权威来源规则
 
 - 贡献政策：`CONTRIBUTING.md` 与 PR templates。
-- Runtime 行为与架构：当前源码和测试。
+- 客户端行为与架构：当前源码和测试；服务器行为以同级 `../photo-classifier/` 的源码和测试为准。
 - 工具版本与 task 名称：`mise.toml`、package manifests、lockfiles 与 generation scripts。
 - CI 要求：`.github/workflows/` 及其调用的 scripts。
 - 公开 setup/how-to：`docs/docs/developer/`，并用其调用的 scripts 复核。
@@ -62,8 +61,7 @@
 ## 生成文件与联动变更
 
 - 不要手工编辑生成的 OpenAPI clients 或 API outputs。
-- API/controller/DTO 变更可能需要重新生成 OpenAPI，并验证 SDK、Web、Mobile 与 E2E。
-- Database schema 变更需要经过审阅的 migration 和 migration-focused tests。
+- 服务器 API 变更必须先在 `../photo-classifier/` 实施，再更新本仓库提交的 OpenAPI snapshot，并重新生成 SDK、Web、Mobile 与 E2E consumers。
 - Mobile Drift、Pigeon、localization、icon 与 splash artifacts 必须通过对应 generator 修改。
 - Translation key 变更可能影响 typed Web resources 与生成的 Mobile resources。
 - 修改 contract 或 generator input 前查阅[开发指南](engineering/development-guide.md)。

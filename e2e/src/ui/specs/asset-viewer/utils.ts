@@ -13,7 +13,7 @@ import {
 } from 'src/ui/generators/timeline';
 import { setupBaseMockApiRoutes } from 'src/ui/mock-network/base-network';
 import { setupTimelineMockApiRoutes, TimelineTestContext } from 'src/ui/mock-network/timeline-network';
-import { utils } from 'src/utils';
+import { initializeSdk } from 'src/ui/sdk';
 
 export type AssetViewerTestFixture = {
   adminUserId: string;
@@ -49,7 +49,7 @@ export function setupAssetViewerFixture(seed: number): AssetViewerTestFixture {
       process.env.PW_EXPERIMENTAL_SERVICE_WORKER_NETWORK_EVENTS !== '1',
       'This test requires env var: PW_EXPERIMENTAL_SERVICE_WORKER_NETWORK_EVENTS=1',
     );
-    utils.initSdk();
+    initializeSdk();
     fixture.adminUserId = faker.string.uuid();
     testContext.adminId = fixture.adminUserId;
     fixture.timelineRestData = generateTimelineData({

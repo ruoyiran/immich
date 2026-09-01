@@ -14,6 +14,7 @@
 ## 架构规则
 
 - 新代码优先采用目标 Page/Widget → Riverpod Provider → Service → Repository 流程。
+- 将仓库同级的 `../../photo-classifier/` 视为 runtime backend；本仓库只保留客户端与提交的 API contract。
 - 将 codebase 视为 migration state：新的 `domain/infrastructure/presentation` 分层与 legacy 目录并存。
 - 如果周边代码已经支持该边界，应将 domain intent 与 Drift、OpenAPI 和 platform mechanics 分离。
 - 使用 Provider composition 管理依赖；不要创建隐藏的 global singleton。
@@ -27,7 +28,7 @@
 - Pigeon API 变更需要运行 `mise //mobile:codegen:pigeon`，并同步更新 Android 和 iOS 实现。
 - Translation 变更从根目录 `i18n/` 开始，需要执行 Mobile generation 和受影响的 Web 检查。
 - 保持与 Pigeon/native code 共享的 enum 顺序和值，包括 `AssetType`。
-- Server sync/OpenAPI 变更必须与本地 Drift mapping 及 reset/recovery 行为保持兼容。
+- 外部服务器的 sync/OpenAPI 变更必须先同步 contract，再验证本地 Drift mapping 及 reset/recovery 行为。
 
 ## 验证
 

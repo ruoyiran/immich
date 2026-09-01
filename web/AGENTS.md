@@ -14,6 +14,7 @@
 ## 架构规则
 
 - 将 Web 视为 SvelteKit CSR SPA；`ssr=false` 是有意设计。
+- 将仓库同级的 `../../photo-classifier/` 视为 runtime backend；本仓库不包含服务器实现。
 - Route loading/orchestration 放在 `src/routes/`，domain UI 放在 `src/lib/components/`，long-lived state 放在现有 managers/stores，mutations 放在 services。
 - 遵循相邻 domain 的 state ownership 模式。局部变更不要引入新的 global state abstraction。
 - 在 root initialization 保证 manager state 就绪前，不要读取该 state。
@@ -22,9 +23,9 @@
 ## 生成文件与联动变更
 
 - 绝不手工编辑 `../packages/sdk/src/fetch-client.ts`。
-- 修改 Web consumer 前，API type 变更必须通过根级 `mise //:open-api` generation path 传递。
+- 修改 Web consumer 前，服务器 contract 必须先在 `../../photo-classifier/` 落地并同步到 `../open-api/immich-openapi-specs.json`，再通过根级 `mise //:open-api` generation path 传递。
 - Shared-link API 调用必须传递 `authManager.params` 的 key/slug context。
-- WebSocket/event 变更必须确保 Server producer、typed event、manager consumer 与 reconnect recovery 保持一致。
+- WebSocket/event 变更必须确保外部服务器 producer、typed event、manager consumer 与 reconnect recovery 保持一致。
 - Translation key 变更必须更新根 `i18n/` sources 以及生成或 typed consumers。
 - 将 service worker 视为 media request coordination，不要将其视为 offline media cache。
 
@@ -38,7 +39,7 @@
 - 完整模块 gate：`mise //web:checklist`
 - 需要时运行 coverage：`pnpm --dir web test:cov`
 
-当面向用户的 route、shared-link、auth、modal、asset-viewer 或 maintenance flow 发生变化时，在 `e2e/` 中增加 Playwright coverage。
+当面向用户的 route、shared-link、auth、modal、asset-viewer 或 maintenance flow 发生变化时，在 `e2e/` 中增加 mocked-API Playwright coverage；真实服务器兼容性由 `../../photo-classifier/` 验证。
 
 ## 高风险检查
 

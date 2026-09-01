@@ -1,23 +1,19 @@
 [tasks.install]
 run = "pnpm install --filter immich-e2e... --frozen-lockfile"
 
-[tasks.build]
-dir = "{{ config_root }}"
-run = "docker compose build"
-
 [tasks.test]
-depends = ["//e2e:build", "//e2e:ci-setup"]
+depends = ["//e2e:ci-setup", "//e2e:playwright-install"]
 env._.path = "./node_modules/.bin"
-run = "vitest --run"
+run = "playwright test --project=ui"
 
 [tasks.playwright-install]
 env._.path = "./node_modules/.bin"
-run = "playwright install"
+run = "playwright install chromium --only-shell"
 
 [tasks."test-web"]
-depends = ["//e2e:build", "//e2e:ci-setup", "//e2e:playwright-install"]
+depends = ["//e2e:ci-setup", "//e2e:playwright-install"]
 env._.path = "./node_modules/.bin"
-run = "playwright test"
+run = "playwright test --project=ui"
 
 [tasks.format]
 env._.path = "./node_modules/.bin"
@@ -43,8 +39,7 @@ run = "tsc --noEmit"
 run = [
   { task = "//:sdk:install" },
   { task = "//:sdk:build" },
-  { task = "//packages/cli:install" },
-  { task = "//packages/cli:build" },
+  { task = "//web:install" },
   { task = ":install" },
 ]
 

@@ -22,12 +22,6 @@ documentation:
           - mobile/lib/**
           - mobile/test/**
 
-🗄️server:
-  - changed-files:
-      - any-glob-to-any-file:
-          - server/src/**
-          - server/test/**
-
 🧠machine-learning:
   - changed-files:
       - any-glob-to-any-file:

@@ -4,9 +4,9 @@ import { cpus } from 'node:os';
 import { resolve } from 'node:path';
 
 dotenv.config({ quiet: true, path: resolve(import.meta.dirname, '.env') });
+process.env.TZ = 'UTC';
 
 export const playwrightHost = process.env.PLAYWRIGHT_HOST ?? '127.0.0.1';
-export const playwrightDbHost = process.env.PLAYWRIGHT_DB_HOST ?? '127.0.0.1';
 export const playwriteBaseUrl = process.env.PLAYWRIGHT_BASE_URL ?? `http://${playwrightHost}:2285`;
 export const playwriteSlowMo = Number.parseInt(process.env.PLAYWRIGHT_SLOW_MO ?? '0');
 export const playwrightDisableWebserver = process.env.PLAYWRIGHT_DISABLE_WEBSERVER;
@@ -14,7 +14,7 @@ export const playwrightDisableWebserver = process.env.PLAYWRIGHT_DISABLE_WEBSERV
 process.env.PW_EXPERIMENTAL_SERVICE_WORKER_NETWORK_EVENTS = '1';
 
 const config: PlaywrightTestConfig = {
-  testDir: './src/specs/server',
+  testDir: './src/ui/specs',
   testMatch: /.*\.e2e-spec\.ts/,
   fullyParallel: false,
   forbidOnly: !!process.env.CI,
@@ -33,29 +33,15 @@ const config: PlaywrightTestConfig = {
 
   projects: [
     {
-      name: 'web',
-      use: { ...devices['Desktop Chrome'] },
-      testDir: './src/specs/web',
-      workers: 1,
-    },
-    {
       name: 'ui',
       use: { ...devices['Desktop Chrome'] },
-      testDir: './src/ui/specs',
       fullyParallel: true,
       workers: process.env.CI ? 3 : Math.max(1, Math.round(cpus().length * 0.75) - 1),
     },
-    {
-      name: 'maintenance',
-      use: { ...devices['Desktop Chrome'] },
-      testDir: './src/specs/maintenance/web',
-      workers: 1,
-    },
   ],
 
-  /* Run your local dev server before starting the tests */
   webServer: {
-    command: 'docker compose up --build --renew-anon-volumes --force-recreate --remove-orphans',
+    command: 'pnpm --dir ../web exec vite dev --host 127.0.0.1 --port 2285',
     url: 'http://127.0.0.1:2285',
     stdout: 'pipe',
     stderr: 'pipe',

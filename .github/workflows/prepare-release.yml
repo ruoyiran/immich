@@ -161,10 +161,4 @@ jobs:
           generate_release_notes: true
           body_path: misc/release/notes.tmpl
           files: |
-            docker/docker-compose.yml
-            docker/docker-compose.rootless.yml
-            docker/example.env
-            docker/hwaccel.ml.yml
-            docker/hwaccel.transcoding.yml
-            docker/prometheus.yml
             *.apk

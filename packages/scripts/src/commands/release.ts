@@ -18,14 +18,11 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '../../../');
 const Files = {
   PackageJson: {
     Root: join(root, 'package.json'),
-    Rest: ['web', 'packages/cli', 'packages/sdk', 'e2e', 'server'].map(
-      (folder) => join(root, folder, `package.json`),
+    Rest: ['web', 'packages/cli', 'packages/sdk', 'e2e'].map((folder) =>
+      join(root, folder, `package.json`),
     ),
   },
-  ExampleEnv: join(root, 'docker/example.env'),
   Docs: {
-    Env: join(root, 'docs/docs/install/environment-variables.md'),
-    Upgrading: join(root, 'docs/docs/install/upgrading.md'),
     ArchivedVersions: join(root, 'docs/static/archived-versions.json'),
   },
   Mobile: {
@@ -82,16 +79,6 @@ export const handleRelease = ({ type, mobile }: ReleaseOptions) => {
     /(<key>CFBundleShortVersionString<\/key>\s*<string>).*?(<\/string>)/s,
     `$1${newVersionNoRc}$2`,
   );
-
-  if (type === 'release') {
-    // docker tag references (v2, :v2, etc) in docs
-    const major = `v${newVersion.major}`;
-
-    // sync major tag references in docs and example env file
-    pump(Files.ExampleEnv, /^IMMICH_VERSION=v\d+$/m, `IMMICH_VERSION=${major}`);
-    pump(Files.Docs.Env, /(`IMMICH_VERSION`.*?)`v\d+`/, `$1\`${major}\``);
-    pump(Files.Docs.Upgrading, /:v\d+/, `:${major}`);
-  }
 
   // update archived versions list
   const archivedFile = new JsonFile<ArchivedVersion[]>(

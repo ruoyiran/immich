@@ -4,12 +4,12 @@
 A great option to get assistance with troubleshooting is to join our [Discord](https://discord.immich.app) server, where we have a dedicated channel for `#contributing`.
 :::
 
-## Known Issues
+## Client development
 
-### Running on Windows
+This repository no longer contains the application server or its Docker Compose development environment. Run the sibling `photo-classifier` repository separately and follow its README for backend, database, storage, and deployment troubleshooting.
 
-Running Immich on Windows can be frustrating and there are lots of ways it can go wrong. Where possible we recommend using Docker on Linux. However, several people have had success running Immich on Windows using Docker via WSL2.
+The Web development proxy uses `http://127.0.0.1:8080` by default. Set `IMMICH_SERVER_URL` when the external server is listening elsewhere, and confirm that its `/api/server/config` endpoint is reachable before debugging client behavior.
 
-### NTFS Mounted Volumes
+## Running on Windows
 
-The docker-compose.dev.yml and docker-compose.prod.yml use volume mounts for the postgres database. On start-up, postgres will try to `chown` the data directory, but fail. See [this post](https://forums.docker.com/t/data-directory-var-lib-postgresql-data-pgdata-has-wrong-ownership/17963/24) for more information about this issue and possible solutions.
+Use the setup supported by the component you are running. For the external backend, consult `photo-classifier`; for Web and Mobile client tooling, follow this repository's [development setup](./setup.md).

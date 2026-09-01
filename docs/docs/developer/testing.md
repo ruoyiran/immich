@@ -1,36 +1,38 @@
 # Testing
 
-## Server
-
-### Unit tests
-
-Unit tests are run with `mise //server:test`.
-You need to run `mise //server:install` before _once_.
-
-### End to end tests
-
-The e2e tests can be run by first starting up a test production environment via:
+## Web
 
 ```bash
-mise e2e
+mise //web:test --run
+mise //web:check
 ```
 
-Before you can run the tests, you need to run the following commands _once_:
+Use `mise //web:checklist` for the complete module gate.
 
-- `mise //e2e:ci-setup` (installs e2e, SDK, and CLI dependencies)
-- `mise //:open-api`
+## Browser E2E
 
-Once the test environment is running, the e2e tests can be run via:
+The Playwright suite starts the Web Vite server and mocks API responses. It does not start a database, Docker Compose stack, or real backend.
 
 ```bash
+mise //e2e:ci-unit
 mise //e2e:test
 ```
 
-The tests check various things including:
+Real API, upload, database, pipeline, and compatibility tests belong in the sibling `photo-classifier` repository.
 
-- Authentication and authorization
-- Query param, body, and url validation
-- Response codes
-- Thumbnail generation
-- Metadata extraction
-- Library scanning
+## Mobile
+
+```bash
+mise //mobile:test
+mise //mobile:analyze
+```
+
+Use `mise //mobile:checklist` for the complete module gate. Run focused migration and integration tests for Drift, sync, upload, background, or native changes.
+
+## Machine Learning
+
+```bash
+mise //machine-learning:checklist
+```
+
+This validates the standalone service, not the current server runtime.

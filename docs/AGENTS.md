@@ -9,6 +9,7 @@
 - `docs/docs/` 是公开的 Docusaurus 内容目录。这些页面面向 Immich 用户、管理员和上游贡献者，必须使用 English。
 - 内部、中文为主的工程知识放在 [`../engineering/`](../engineering/)，不要放入 `docs/docs/`。
 - 完整的公开 setup 与 how-to 归[开发者文档](docs/developer/)所有。内部工程页面应链接这些文档，只补充架构、变更影响或维护背景。
+- 涉及 backend setup、database migration、runtime environment 或 deployment 时，以仓库同级的 `../../photo-classifier/` 为实现来源；本仓库公开页面只说明客户端侧流程和跨仓库边界。
 - 不要为了让两套文档表面对称，就把内部工程总结复制到公开页面。
 
 ## 语言与风格

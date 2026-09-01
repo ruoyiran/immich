@@ -1,7 +1,7 @@
 import type { ProxyOptions } from 'vite';
 
 const upstream = {
-  target: process.env.IMMICH_SERVER_URL || 'http://immich-server:2283/',
+  target: process.env.IMMICH_SERVER_URL || 'http://127.0.0.1:8080/',
   secure: true,
   changeOrigin: true,
   rewriteWsOrigin: true,

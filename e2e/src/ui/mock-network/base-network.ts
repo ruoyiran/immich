@@ -2,6 +2,25 @@ import { BrowserContext } from '@playwright/test';
 import { playwrightHost } from 'src/../playwright.config';
 
 export const setupBaseMockApiRoutes = async (context: BrowserContext, adminUserId: string) => {
+  await context.routeWebSocket('**/api/socket.io/**', (webSocket) => {
+    webSocket.send(
+      `0${JSON.stringify({ sid: 'e2e', upgrades: [], pingInterval: 1_000_000_000, pingTimeout: 1_000_000_000 })}`,
+    );
+    webSocket.onMessage((message) => {
+      if (message !== '40') {
+        return;
+      }
+
+      webSocket.send(`40${JSON.stringify({ sid: 'e2e' })}`);
+      webSocket.send(`42${JSON.stringify(['on_server_version', { major: 3, minor: 1, patch: 0, prerelease: null }])}`);
+    });
+  });
+  await context.route('**/custom.css', async (route) => {
+    return route.fulfill({ status: 200, contentType: 'text/css', body: '' });
+  });
+  await context.route('**/api/faces?*', async (route) => {
+    return route.fulfill({ status: 200, contentType: 'application/json', json: [] });
+  });
   await context.addCookies([
     {
       name: 'immich_is_authenticated',

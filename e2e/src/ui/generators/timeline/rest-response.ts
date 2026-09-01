@@ -15,7 +15,7 @@ import {
   type UserResponseDto,
 } from '@immich/sdk';
 import { DateTime } from 'luxon';
-import { signupDto } from 'src/fixtures';
+import { owner } from 'src/ui/fixtures';
 import { parseTimeBucketKey } from 'src/ui/generators/timeline/utils';
 import type { MockTimelineAsset, MockTimelineData } from './timeline-config';
 
@@ -269,8 +269,8 @@ export function getTimeBuckets(
 const createDefaultOwner = (ownerId: string) => {
   const defaultOwner: UserResponseDto = {
     id: ownerId,
-    email: signupDto.admin.email,
-    name: signupDto.admin.name,
+    email: owner.email,
+    name: owner.name,
     profileImagePath: '',
     profileChangedAt: new Date().toISOString(),
     avatarColor: UserAvatarColor.Blue,

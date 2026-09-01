@@ -19,7 +19,7 @@ import {
   setupTimelineMockApiRoutes,
   TimelineTestContext,
 } from 'src/ui/mock-network/timeline-network';
-import { utils } from 'src/utils';
+import { initializeSdk } from 'src/ui/sdk';
 import { assetViewerUtils, padYearMonth, pageUtils, poll, thumbnailUtils, timelineUtils } from './utils';
 
 test.describe.configure({ mode: 'parallel' });
@@ -41,7 +41,7 @@ test.describe('Timeline', () => {
       process.env.PW_EXPERIMENTAL_SERVICE_WORKER_NETWORK_EVENTS !== '1',
       'This test requires env var: PW_EXPERIMENTAL_SERVICE_WORKER_NETWORK_EVENTS=1',
     );
-    utils.initSdk();
+    initializeSdk();
     adminUserId = faker.string.uuid();
     testContext.adminId = adminUserId;
     timelineRestData = generateTimelineData({ ...createDefaultTimelineConfig(), ownerId: adminUserId });

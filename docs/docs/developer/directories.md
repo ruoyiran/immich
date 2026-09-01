@@ -4,19 +4,20 @@ title: Directories
 
 # Repository Folder Structure
 
-Our [GitHub Repository](https://github.com/immich-app/immich) is a [monorepo](https://en.wikipedia.org/wiki/Monorepo) and includes the following folders:
+| Folder              | Description                                                                     |
+| :------------------ | :------------------------------------------------------------------------------ |
+| `.github/`          | Client, ML, documentation, and release workflows                                |
+| `design/`           | Logos, screenshots, and static design assets                                    |
+| `docs/`             | Docusaurus documentation source                                                 |
+| `e2e/`              | Playwright browser tests using mocked API responses                             |
+| `engineering/`      | Internal engineering notes and architecture decisions                           |
+| `i18n/`             | Shared localization sources                                                     |
+| `machine-learning/` | Standalone legacy-compatible inference service; not used by the current runtime |
+| `mobile/`           | Flutter app and Android/iOS integrations                                        |
+| `open-api/`         | Committed OpenAPI snapshot and client generators                                |
+| `packages/cli/`     | Command-line API client                                                         |
+| `packages/sdk/`     | Generated TypeScript API client                                                 |
+| `packages/plugin-*` | Plugin contracts and SDKs                                                       |
+| `web/`              | SvelteKit Web client                                                            |
 
-| Folder              | Description                                                          |
-| :------------------ | :------------------------------------------------------------------- |
-| `.github/`          | Github templates and action workflows                                |
-| `.vscode/`          | VSCode debug launch profiles                                         |
-| `packages/cli`      | Source code for the CLI                                              |
-| `packages/sdk`      | Source code for the generated OpenAPI SDK                            |
-| `packages/scripts`  | Scripts for version bumps and draft releases                         |
-| `docker/`           | Docker compose resources for dev, test, production                   |
-| `design/`           | Screenshots and logos for the README                                 |
-| `docs/`             | Source code for the [https://immich.app](https://immich.app) website |
-| `machine-learning/` | Source code for the `immich-machine-learning` docker image           |
-| `mobile/`           | Source code for the mobile app, both Android and iOS                 |
-| `server/`           | Source code for the `immich-server` docker image                     |
-| `web/`              | Source code for the `web`                                            |
+The server is not part of this repository. It lives in the sibling `photo-classifier` repository.

@@ -11,7 +11,7 @@ import {
 } from 'src/ui/generators/timeline';
 import { setupBaseMockApiRoutes } from 'src/ui/mock-network/base-network';
 import { setupTimelineMockApiRoutes, TimelineTestContext } from 'src/ui/mock-network/timeline-network';
-import { utils } from 'src/utils';
+import { initializeSdk } from 'src/ui/sdk';
 import { assetViewerUtils } from '../timeline/utils';
 
 test.describe.configure({ mode: 'parallel' });
@@ -30,7 +30,7 @@ test.describe('asset-viewer', () => {
   };
 
   test.beforeAll(async () => {
-    utils.initSdk();
+    initializeSdk();
     adminUserId = faker.string.uuid();
     testContext.adminId = adminUserId;
     timelineRestData = generateTimelineData({ ...createDefaultTimelineConfig(), ownerId: adminUserId });
