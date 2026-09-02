@@ -43,6 +43,11 @@ const _batchAssetPrefix = String.fromEnvironment(
 );
 const _batchAssetCount = int.fromEnvironment('IMMICH_E2E_BATCH_ASSET_COUNT', defaultValue: 20);
 const _videoAssetName = String.fromEnvironment('IMMICH_E2E_VIDEO_ASSET_NAME', defaultValue: 'immich-e2e-video-010.mp4');
+const _duplicateAssetPrefix = String.fromEnvironment(
+  'IMMICH_E2E_DUPLICATE_ASSET_PREFIX',
+  defaultValue: 'immich-e2e-duplicate-011-',
+);
+const _duplicateAssetCount = int.fromEnvironment('IMMICH_E2E_DUPLICATE_ASSET_COUNT', defaultValue: 2);
 
 var _registeredSelectedCase = false;
 
@@ -270,6 +275,24 @@ void main() async {
       expect(playback.bodyBytes, isNotEmpty);
     });
 
+    _realStackSessionTest('MOB-REAL-011-$_caseSuffix', 'deduplicates repeated backups by MD5 and size', (tester) async {
+      await _loadAuthenticatedApp(tester);
+
+      final container = _containerOfApp(tester);
+      final assets = await _waitForLocalAssetsByPrefix(container, _duplicateAssetPrefix, _duplicateAssetCount, tester);
+      expect(assets.every((asset) => asset.isImage), isTrue);
+      expect(assets.map((asset) => asset.name).toSet().length, _duplicateAssetCount);
+
+      final firstRemoteId = await _uploadSingleAssetToServer(container, assets[0]);
+      final secondRemoteId = await _uploadSingleAssetToServer(container, assets[1]);
+
+      expect(secondRemoteId, firstRemoteId);
+
+      final downloaded = await container.read(assetApiRepositoryProvider).downloadAsset(firstRemoteId, edited: false);
+      expect(downloaded.statusCode, 200);
+      expect(downloaded.bodyBytes, isNotEmpty);
+    });
+
     if (_selectedCaseId.isNotEmpty && !_registeredSelectedCase) {
       test(_selectedCaseId, () => fail('No real stack auth test registered for $_selectedCaseId'));
     }
@@ -467,6 +490,25 @@ Future<http.Response> _waitForSuccessfulResponse(
     fail('Expected HTTP ${acceptedStatusCodes.join('/')} with body, got ${lastResponse.statusCode}');
   }
   fail('Expected HTTP ${acceptedStatusCodes.join('/')} with body, last error: $lastError');
+}
+
+Future<String> _uploadSingleAssetToServer(ProviderContainer container, LocalAsset asset) async {
+  String? remoteAssetId;
+  String? uploadError;
+  await container
+      .read(foregroundUploadServiceProvider)
+      .uploadSingleAsset(
+        asset,
+        Completer<void>(),
+        callbacks: UploadCallbacks(
+          onSuccess: (_, remoteId) => remoteAssetId = remoteId,
+          onError: (_, errorMessage) => uploadError = errorMessage,
+        ),
+      );
+
+  expect(uploadError, isNull);
+  expect(remoteAssetId, isNotNull);
+  return remoteAssetId!;
 }
 
 Future<void> _waitForLoginScreen(WidgetTester tester) async {
