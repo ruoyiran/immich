@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
 
 import 'package:easy_localization/easy_localization.dart';
 import 'package:flutter/material.dart';
@@ -22,6 +24,7 @@ import 'package:immich_mobile/services/api.service.dart';
 import 'package:immich_mobile/services/foreground_upload.service.dart';
 import 'package:immich_mobile/utils/bootstrap.dart';
 import 'package:openapi/api.dart' as api;
+import 'package:path_provider/path_provider.dart';
 import 'package:photo_manager/photo_manager.dart';
 
 import 'test_utils/general_helper.dart';
@@ -48,6 +51,14 @@ const _duplicateAssetPrefix = String.fromEnvironment(
   defaultValue: 'immich-e2e-duplicate-011-',
 );
 const _duplicateAssetCount = int.fromEnvironment('IMMICH_E2E_DUPLICATE_ASSET_COUNT', defaultValue: 2);
+const _resumableAssetName = String.fromEnvironment(
+  'IMMICH_E2E_RESUMABLE_ASSET_NAME',
+  defaultValue: 'immich-e2e-resumable-012.mp4',
+);
+const _resumableCancelAfterBytes = int.fromEnvironment(
+  'IMMICH_E2E_RESUMABLE_CANCEL_AFTER_BYTES',
+  defaultValue: 512 * 1024,
+);
 
 var _registeredSelectedCase = false;
 
@@ -293,6 +304,75 @@ void main() async {
       expect(downloaded.bodyBytes, isNotEmpty);
     });
 
+    _realStackSessionTest('MOB-REAL-012-$_caseSuffix', 'resumes interrupted upload from server offset', (tester) async {
+      await _loadAuthenticatedApp(tester);
+
+      final container = _containerOfApp(tester);
+      final asset = await _waitForLocalAssetByName(container, _resumableAssetName, tester);
+      final contentSize = asset.contentSize;
+      if (contentSize == null) {
+        fail('Resumable upload asset $_resumableAssetName has no known content size');
+      }
+      expect(contentSize, greaterThan(_resumableCancelAfterBytes));
+      await _clearResumableStateFiles();
+
+      final cancel = Completer<void>();
+      final firstProgress = <int>[];
+      String? interruptedRemoteId;
+      String? interruptedError;
+      await container
+          .read(foregroundUploadServiceProvider)
+          .uploadSingleAsset(
+            asset,
+            cancel,
+            callbacks: UploadCallbacks(
+              onProgress: (_, _, bytes, totalBytes) {
+                expect(bytes, inInclusiveRange(0, totalBytes));
+                firstProgress.add(bytes);
+                if (!cancel.isCompleted && bytes >= _resumableCancelAfterBytes) {
+                  cancel.complete();
+                }
+              },
+              onSuccess: (_, remoteId) => interruptedRemoteId = remoteId,
+              onError: (_, errorMessage) => interruptedError = errorMessage,
+            ),
+          );
+
+      expect(interruptedRemoteId, isNull);
+      expect(interruptedError, isNull);
+      expect(firstProgress.any((bytes) => bytes >= _resumableCancelAfterBytes), isTrue);
+
+      final stateAfterCancel = await _readSingleResumableState();
+      final cancelledOffset = stateAfterCancel['offset'] as int;
+      final cancelledSize = stateAfterCancel['size'] as int;
+      expect(cancelledOffset, greaterThan(0));
+      expect(cancelledOffset, lessThan(cancelledSize));
+
+      final retryProgress = <int>[];
+      String? remoteAssetId;
+      String? retryError;
+      await container
+          .read(foregroundUploadServiceProvider)
+          .uploadSingleAsset(
+            asset,
+            null,
+            callbacks: UploadCallbacks(
+              onProgress: (_, _, bytes, totalBytes) {
+                expect(bytes, inInclusiveRange(0, totalBytes));
+                retryProgress.add(bytes);
+              },
+              onSuccess: (_, remoteId) => remoteAssetId = remoteId,
+              onError: (_, errorMessage) => retryError = errorMessage,
+            ),
+          );
+
+      expect(retryError, isNull);
+      expect(remoteAssetId, isNotNull);
+      expect(retryProgress.firstWhere((bytes) => bytes > 0), greaterThanOrEqualTo(cancelledOffset));
+      expect(retryProgress.last, cancelledSize);
+      expect(await _resumableStateFiles(), isEmpty);
+    });
+
     if (_selectedCaseId.isNotEmpty && !_registeredSelectedCase) {
       test(_selectedCaseId, () => fail('No real stack auth test registered for $_selectedCaseId'));
     }
@@ -509,6 +589,34 @@ Future<String> _uploadSingleAssetToServer(ProviderContainer container, LocalAsse
   expect(uploadError, isNull);
   expect(remoteAssetId, isNotNull);
   return remoteAssetId!;
+}
+
+Future<List<File>> _resumableStateFiles() async {
+  final support = await getApplicationSupportDirectory();
+  final directory = Directory('${support.path}/resumable-uploads');
+  if (!directory.existsSync()) {
+    return [];
+  }
+
+  final files = directory
+      .listSync(followLinks: false)
+      .where((entity) => entity is File && entity.path.endsWith('.json'))
+      .cast<File>()
+      .toList();
+  files.sort((a, b) => a.path.compareTo(b.path));
+  return files;
+}
+
+Future<void> _clearResumableStateFiles() async {
+  for (final file in await _resumableStateFiles()) {
+    file.deleteSync();
+  }
+}
+
+Future<Map<String, dynamic>> _readSingleResumableState() async {
+  final files = await _resumableStateFiles();
+  expect(files, hasLength(1));
+  return jsonDecode(files.single.readAsStringSync()) as Map<String, dynamic>;
 }
 
 Future<void> _waitForLoginScreen(WidgetTester tester) async {
