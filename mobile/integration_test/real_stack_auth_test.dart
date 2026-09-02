@@ -3,8 +3,16 @@ import 'dart:async';
 import 'package:easy_localization/easy_localization.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:immich_mobile/constants/enums.dart';
 import 'package:immich_mobile/domain/models/store.model.dart';
 import 'package:immich_mobile/entities/store.entity.dart';
+import 'package:immich_mobile/main.dart' as app;
+import 'package:immich_mobile/providers/background_sync.provider.dart';
+import 'package:immich_mobile/providers/gallery_permission.provider.dart';
+import 'package:immich_mobile/providers/infrastructure/album.provider.dart';
+import 'package:immich_mobile/providers/infrastructure/db.provider.dart';
+import 'package:immich_mobile/utils/bootstrap.dart';
 
 import 'test_utils/general_helper.dart';
 
@@ -64,10 +72,62 @@ void main() async {
       await _waitForCurrentUser(_email, tester);
     });
 
+    _realStackSessionTest('MOB-REAL-004-$_caseSuffix', 'resumes persisted session after app restart', (tester) async {
+      await _loadAppPreservingStore(tester);
+      await _waitForAccessToken(tester);
+      await _waitForCurrentUser(_email, tester);
+      expect(Store.tryGet(StoreKey.serverEndpoint), endsWith('/api'));
+      expect(Store.tryGet(StoreKey.serverEndpoint), contains(Uri.parse(_serverUrl).host));
+    });
+
+    _realStackSessionTest('MOB-REAL-005-$_caseSuffix', 'sees granted full gallery permission', (tester) async {
+      await _loadAppPreservingStore(tester);
+      await _waitForAccessToken(tester);
+      await _waitForCurrentUser(_email, tester);
+
+      final container = _containerOfApp(tester);
+      final status = await container.read(galleryPermissionNotifier.notifier).getGalleryPermissionStatus();
+      expect(status, DevicePermissionStatus.granted);
+    });
+
+    _realStackSessionTest('MOB-REAL-007-$_caseSuffix', 'syncs local media from the simulator gallery', (tester) async {
+      await _loadAppPreservingStore(tester);
+      await _waitForAccessToken(tester);
+      await _waitForCurrentUser(_email, tester);
+
+      final container = _containerOfApp(tester);
+      await container.read(backgroundSyncProvider).syncLocal(full: true);
+
+      final albums = await container.read(localAlbumServiceProvider).getAll();
+      expect(albums.where((album) => album.assetCount > 0), isNotEmpty);
+
+      final assetNames = <String>{};
+      for (final album in albums) {
+        final assets = await container.read(localAlbumRepository).getAssets(album.id);
+        assetNames.addAll(assets.map((asset) => asset.name));
+      }
+
+      expect(assetNames, containsAll(['immich-e2e-red.jpg', 'immich-e2e-green.jpg', 'immich-e2e-video.mp4']));
+      expect(assetNames.length, assetNames.toSet().length);
+    });
+
     if (_selectedCaseId.isNotEmpty && !_registeredSelectedCase) {
       test(_selectedCaseId, () => fail('No real stack auth test registered for $_selectedCaseId'));
     }
   });
+}
+
+void _realStackSessionTest(String caseId, String description, Future<void> Function(WidgetTester) body) {
+  if (_selectedCaseId.isNotEmpty && _selectedCaseId != caseId) {
+    return;
+  }
+
+  _registeredSelectedCase = true;
+  testWidgets('$caseId $description', (tester) async {
+    _requireRealStackConfig();
+    await body(tester);
+    await _pumpFor(tester, const Duration(milliseconds: 500));
+  }, semanticsEnabled: false);
 }
 
 void _realStackAuthTest(String caseId, String description, Future<void> Function(WidgetTester, ImmichTestHelper) body) {
@@ -101,6 +161,19 @@ Future<void> _login(
   await _waitForCredentialFields(tester);
   await _enterCredentials(tester, email: email, password: password);
   await _tapTranslatedButton(tester, 'login');
+}
+
+Future<void> _loadAppPreservingStore(WidgetTester tester) async {
+  await EasyLocalization.ensureInitialized();
+  final (drift, _) = await Bootstrap.initDomain();
+  await tester.pumpWidget(
+    ProviderScope(overrides: [driftProvider.overrideWith(driftOverride(drift))], child: const app.MainWidget()),
+  );
+  await EasyLocalization.ensureInitialized();
+}
+
+ProviderContainer _containerOfApp(WidgetTester tester) {
+  return ProviderScope.containerOf(tester.element(find.byType(app.MainWidget)), listen: false);
 }
 
 Future<void> _waitForLoginScreen(WidgetTester tester) async {

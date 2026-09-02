@@ -34,9 +34,19 @@ class ServerInfoNotifier extends StateNotifier<ServerInfo> {
   final _log = Logger("ServerInfoNotifier");
 
   Future<ServerInfo> getServerInfo() async {
+    final previousState = state;
     await getServerVersion();
+    if (!mounted) {
+      return previousState;
+    }
     await getServerFeatures();
+    if (!mounted) {
+      return previousState;
+    }
     await getServerConfig();
+    if (!mounted) {
+      return previousState;
+    }
     return state;
   }
 
@@ -46,6 +56,9 @@ class ServerInfoNotifier extends StateNotifier<ServerInfo> {
 
       // using isClientOutOfDate since that will show to users regardless of if they are an admin
       if (serverVersion == null) {
+        if (!mounted) {
+          return;
+        }
         state = state.copyWith(versionStatus: VersionStatus.error);
         return;
       }
@@ -53,18 +66,28 @@ class ServerInfoNotifier extends StateNotifier<ServerInfo> {
       await _checkServerVersionMismatch(serverVersion);
     } catch (e, stackTrace) {
       _log.severe("Failed to get server version", e, stackTrace);
+      if (!mounted) {
+        return;
+      }
       state = state.copyWith(versionStatus: VersionStatus.error);
       return;
     }
   }
 
   Future<void> _checkServerVersionMismatch(ServerVersion serverVersion, {ServerVersion? latestVersion}) async {
-    state = state.copyWith(serverVersion: serverVersion, latestVersion: latestVersion ?? state.latestVersion);
+    if (!mounted) {
+      return;
+    }
+    final effectiveLatestVersion = latestVersion ?? state.latestVersion;
+    state = state.copyWith(serverVersion: serverVersion, latestVersion: effectiveLatestVersion);
 
     final packageInfo = await PackageInfo.fromPlatform();
+    if (!mounted) {
+      return;
+    }
     final SemVer clientVersion = SemVer.fromString(packageInfo.version);
 
-    if (serverVersion < clientVersion || (latestVersion != null && serverVersion < latestVersion)) {
+    if (serverVersion < clientVersion || (effectiveLatestVersion != null && serverVersion < effectiveLatestVersion)) {
       state = state.copyWith(versionStatus: VersionStatus.serverOutOfDate);
       return;
     }
@@ -84,7 +107,7 @@ class ServerInfoNotifier extends StateNotifier<ServerInfo> {
 
   Future<void> getServerFeatures() async {
     final serverFeatures = await _serverInfoService.getServerFeatures();
-    if (serverFeatures == null) {
+    if (!mounted || serverFeatures == null) {
       return;
     }
     state = state.copyWith(serverFeatures: serverFeatures);
@@ -92,7 +115,7 @@ class ServerInfoNotifier extends StateNotifier<ServerInfo> {
 
   Future<void> getServerConfig() async {
     final serverConfig = await _serverInfoService.getServerConfig();
-    if (serverConfig == null) {
+    if (!mounted || serverConfig == null) {
       return;
     }
     state = state.copyWith(serverConfig: serverConfig);
