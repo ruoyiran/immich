@@ -5,16 +5,19 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:immich_mobile/constants/enums.dart';
+import 'package:immich_mobile/domain/models/asset/base_asset.model.dart';
 import 'package:immich_mobile/domain/models/store.model.dart';
 import 'package:immich_mobile/domain/models/user.model.dart';
 import 'package:immich_mobile/entities/store.entity.dart';
 import 'package:immich_mobile/main.dart' as app;
-import 'package:immich_mobile/providers/api.provider.dart';
 import 'package:immich_mobile/providers/background_sync.provider.dart';
 import 'package:immich_mobile/providers/gallery_permission.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/album.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/db.provider.dart';
+import 'package:immich_mobile/repositories/asset_api.repository.dart';
 import 'package:immich_mobile/repositories/auth_api.repository.dart';
+import 'package:immich_mobile/services/api.service.dart';
+import 'package:immich_mobile/services/foreground_upload.service.dart';
 import 'package:immich_mobile/utils/bootstrap.dart';
 import 'package:photo_manager/photo_manager.dart';
 
@@ -26,6 +29,11 @@ const _serverUrl = String.fromEnvironment('IMMICH_E2E_SERVER_URL');
 const _badServerUrl = String.fromEnvironment('IMMICH_E2E_BAD_SERVER_URL', defaultValue: 'http://10.0.2.2:9');
 const _email = String.fromEnvironment('IMMICH_E2E_EMAIL');
 const _password = String.fromEnvironment('IMMICH_E2E_PASSWORD');
+const _deviceId = String.fromEnvironment('IMMICH_E2E_DEVICE_ID', defaultValue: 'immich-mobile-e2e-device');
+const _uploadAssetName = String.fromEnvironment(
+  'IMMICH_E2E_UPLOAD_ASSET_NAME',
+  defaultValue: 'immich-e2e-upload-008.jpg',
+);
 
 var _registeredSelectedCase = false;
 
@@ -130,6 +138,33 @@ void main() async {
       expect(assetNames.length, assetNames.toSet().length);
     });
 
+    _realStackSessionTest('MOB-REAL-008-$_caseSuffix', 'uploads one JPEG to the real server', (tester) async {
+      await _loadAuthenticatedApp(tester);
+
+      final container = _containerOfApp(tester);
+      final asset = await _waitForLocalAssetByName(container, _uploadAssetName, tester);
+      expect(asset.isImage, isTrue);
+
+      String? remoteAssetId;
+      String? uploadError;
+      await container
+          .read(foregroundUploadServiceProvider)
+          .uploadSingleAsset(
+            asset,
+            Completer<void>(),
+            callbacks: UploadCallbacks(
+              onSuccess: (_, remoteId) => remoteAssetId = remoteId,
+              onError: (_, errorMessage) => uploadError = errorMessage,
+            ),
+          );
+
+      expect(uploadError, isNull);
+      expect(remoteAssetId, isNotNull);
+      final downloaded = await container.read(assetApiRepositoryProvider).downloadAsset(remoteAssetId!, edited: false);
+      expect(downloaded.statusCode, 200);
+      expect(downloaded.bodyBytes, isNotEmpty);
+    });
+
     if (_selectedCaseId.isNotEmpty && !_registeredSelectedCase) {
       test(_selectedCaseId, () => fail('No real stack auth test registered for $_selectedCaseId'));
     }
@@ -192,21 +227,29 @@ Future<void> _loadAppPreservingStore(WidgetTester tester) async {
 }
 
 Future<void> _loadAuthenticatedApp(WidgetTester tester) async {
-  await _loadAppPreservingStore(tester);
-  await _pumpFor(tester, const Duration(milliseconds: 500));
-
-  if ((Store.tryGet(StoreKey.accessToken) ?? '').isNotEmpty && Store.tryGet(StoreKey.currentUser)?.email == _email) {
-    return;
-  }
-
+  await EasyLocalization.ensureInitialized();
+  final (drift, _) = await Bootstrap.initDomain();
   await Store.clear();
+
+  await _seedAuthenticatedStore();
+
+  await tester.pumpWidget(
+    ProviderScope(overrides: [driftProvider.overrideWith(driftOverride(drift))], child: const app.MainWidget()),
+  );
+  await EasyLocalization.ensureInitialized();
+  await _pumpFor(tester, const Duration(milliseconds: 500));
+  await _waitForAccessToken(tester);
+  await _waitForCurrentUser(_email, tester);
+}
+
+Future<void> _seedAuthenticatedStore() async {
   final endpoint = _apiEndpoint(_serverUrl);
   await Store.put(StoreKey.serverEndpoint, endpoint);
   await Store.put(StoreKey.serverUrl, endpoint);
+  await _ensureDeviceId();
 
-  final container = _containerOfApp(tester);
-  final apiService = container.read(apiServiceProvider)..setEndpoint(endpoint);
-  final response = await container.read(authApiRepositoryProvider).login(_email, _password);
+  final apiService = ApiService()..setEndpoint(endpoint);
+  final response = await AuthApiRepository(apiService).login(_email, _password);
   expect(response.userEmail, _email);
   await Store.put(StoreKey.accessToken, response.accessToken);
   await Store.put(
@@ -221,8 +264,12 @@ Future<void> _loadAuthenticatedApp(WidgetTester tester) async {
     ),
   );
   await apiService.updateHeaders();
-  await _waitForAccessToken(tester);
-  await _waitForCurrentUser(_email, tester);
+}
+
+Future<void> _ensureDeviceId() async {
+  if ((Store.tryGet(StoreKey.deviceId) ?? '').isEmpty) {
+    await Store.put(StoreKey.deviceId, _deviceId);
+  }
 }
 
 String _apiEndpoint(String serverUrl) {
@@ -235,15 +282,37 @@ ProviderContainer _containerOfApp(WidgetTester tester) {
 }
 
 Future<Set<String>> _localAssetNames(ProviderContainer container) async {
-  final albums = await container.read(localAlbumServiceProvider).getAll();
-  expect(albums.where((album) => album.assetCount > 0), isNotEmpty);
+  final assets = await _localAssets(container);
+  expect(assets, isNotEmpty);
+  return assets.map((asset) => asset.name).toSet();
+}
 
-  final assetNames = <String>{};
+Future<List<LocalAsset>> _localAssets(ProviderContainer container) async {
+  final albums = await container.read(localAlbumServiceProvider).getAll();
+
+  final assets = <LocalAsset>[];
   for (final album in albums) {
-    final assets = await container.read(localAlbumRepository).getAssets(album.id);
-    assetNames.addAll(assets.map((asset) => asset.name));
+    assets.addAll(await container.read(localAlbumRepository).getAssets(album.id));
   }
-  return assetNames;
+  return assets;
+}
+
+Future<LocalAsset> _waitForLocalAssetByName(ProviderContainer container, String name, WidgetTester tester) async {
+  var lastSeen = const <String>{};
+  for (var attempt = 0; attempt < 12; attempt++) {
+    await container.read(backgroundSyncProvider).syncLocal(full: true);
+    final assets = await _localAssets(container);
+    for (final asset in assets) {
+      if (asset.name == name) {
+        return asset;
+      }
+    }
+    lastSeen = assets.map((asset) => asset.name).toSet();
+    await _pumpFor(tester, const Duration(seconds: 2));
+  }
+
+  final sorted = lastSeen.toList()..sort();
+  fail('Local asset $name was not discovered; saw ${sorted.join(', ')}');
 }
 
 Future<void> _waitForLoginScreen(WidgetTester tester) async {
