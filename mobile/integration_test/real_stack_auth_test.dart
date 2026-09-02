@@ -34,6 +34,11 @@ const _uploadAssetName = String.fromEnvironment(
   'IMMICH_E2E_UPLOAD_ASSET_NAME',
   defaultValue: 'immich-e2e-upload-008.jpg',
 );
+const _batchAssetPrefix = String.fromEnvironment(
+  'IMMICH_E2E_BATCH_ASSET_PREFIX',
+  defaultValue: 'immich-e2e-batch-009-',
+);
+const _batchAssetCount = int.fromEnvironment('IMMICH_E2E_BATCH_ASSET_COUNT', defaultValue: 20);
 
 var _registeredSelectedCase = false;
 
@@ -163,6 +168,54 @@ void main() async {
       final downloaded = await container.read(assetApiRepositoryProvider).downloadAsset(remoteAssetId!, edited: false);
       expect(downloaded.statusCode, 200);
       expect(downloaded.bodyBytes, isNotEmpty);
+    });
+
+    _realStackSessionTest('MOB-REAL-009-$_caseSuffix', 'uploads a batch of mixed photos with monotonic progress', (
+      tester,
+    ) async {
+      await _loadAuthenticatedApp(tester);
+
+      final container = _containerOfApp(tester);
+      final assets = await _waitForLocalAssetsByPrefix(container, _batchAssetPrefix, _batchAssetCount, tester);
+      expect(assets.every((asset) => asset.isImage), isTrue);
+
+      final uploaded = <String, String>{};
+      final failed = <String, String>{};
+      final progressById = <String, List<double>>{};
+
+      await container
+          .read(foregroundUploadServiceProvider)
+          .uploadManual(
+            assets,
+            cancelToken: Completer<void>(),
+            callbacks: UploadCallbacks(
+              onProgress: (id, _, bytes, totalBytes) {
+                final progress = totalBytes > 0 ? bytes / totalBytes : 0.0;
+                final assetProgress = progressById.putIfAbsent(id, () => []);
+                expect(progress, inInclusiveRange(0.0, 1.0));
+                if (assetProgress.isNotEmpty) {
+                  expect(progress, greaterThanOrEqualTo(assetProgress.last));
+                }
+                assetProgress.add(progress);
+              },
+              onSuccess: (id, remoteId) {
+                uploaded[id] = remoteId;
+                failed.remove(id);
+              },
+              onError: (id, errorMessage) => failed[id] = errorMessage,
+            ),
+          );
+
+      expect(failed, isEmpty);
+      expect(uploaded.length, _batchAssetCount);
+      expect(uploaded.values.toSet().length, _batchAssetCount);
+      expect(progressById.keys, containsAll(uploaded.keys));
+
+      for (final remoteId in uploaded.values.take(3)) {
+        final downloaded = await container.read(assetApiRepositoryProvider).downloadAsset(remoteId, edited: false);
+        expect(downloaded.statusCode, 200);
+        expect(downloaded.bodyBytes, isNotEmpty);
+      }
     });
 
     if (_selectedCaseId.isNotEmpty && !_registeredSelectedCase) {
@@ -313,6 +366,29 @@ Future<LocalAsset> _waitForLocalAssetByName(ProviderContainer container, String 
 
   final sorted = lastSeen.toList()..sort();
   fail('Local asset $name was not discovered; saw ${sorted.join(', ')}');
+}
+
+Future<List<LocalAsset>> _waitForLocalAssetsByPrefix(
+  ProviderContainer container,
+  String prefix,
+  int count,
+  WidgetTester tester,
+) async {
+  var lastSeen = const <String>{};
+  for (var attempt = 0; attempt < 12; attempt++) {
+    await container.read(backgroundSyncProvider).syncLocal(full: true);
+    final assets = await _localAssets(container);
+    final matches = assets.where((asset) => asset.name.startsWith(prefix)).toList();
+    if (matches.length >= count) {
+      matches.sort((a, b) => a.name.compareTo(b.name));
+      return matches.take(count).toList();
+    }
+    lastSeen = assets.map((asset) => asset.name).toSet();
+    await _pumpFor(tester, const Duration(seconds: 2));
+  }
+
+  final sorted = lastSeen.toList()..sort();
+  fail('Local assets matching $prefix did not reach $count; saw ${sorted.join(', ')}');
 }
 
 Future<void> _waitForLoginScreen(WidgetTester tester) async {
