@@ -6,13 +6,17 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:immich_mobile/constants/enums.dart';
 import 'package:immich_mobile/domain/models/store.model.dart';
+import 'package:immich_mobile/domain/models/user.model.dart';
 import 'package:immich_mobile/entities/store.entity.dart';
 import 'package:immich_mobile/main.dart' as app;
+import 'package:immich_mobile/providers/api.provider.dart';
 import 'package:immich_mobile/providers/background_sync.provider.dart';
 import 'package:immich_mobile/providers/gallery_permission.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/album.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/db.provider.dart';
+import 'package:immich_mobile/repositories/auth_api.repository.dart';
 import 'package:immich_mobile/utils/bootstrap.dart';
+import 'package:photo_manager/photo_manager.dart';
 
 import 'test_utils/general_helper.dart';
 
@@ -90,6 +94,28 @@ void main() async {
       expect(status, DevicePermissionStatus.granted);
     });
 
+    _realStackSessionTest('MOB-REAL-006-$_caseSuffix', 'honors limited gallery permission expansion', (tester) async {
+      await _loadAuthenticatedApp(tester);
+      await PhotoManager.setIgnorePermissionCheck(false);
+      addTearDown(() async => PhotoManager.setIgnorePermissionCheck(true));
+
+      final container = _containerOfApp(tester);
+      final initialStatus = await container.read(galleryPermissionNotifier.notifier).requestGalleryPermission();
+      expect(initialStatus, DevicePermissionStatus.limited);
+
+      await container.read(backgroundSyncProvider).syncLocal(full: true);
+      final initialAssetNames = await _localAssetNames(container);
+      expect(initialAssetNames, isNot(contains('immich-e2e-limited-extra.mp4')));
+
+      final expandedStatus = await container.read(galleryPermissionNotifier.notifier).requestGalleryPermission();
+      expect(expandedStatus.hasAccess, isTrue);
+
+      await container.read(backgroundSyncProvider).syncLocal(full: true);
+      final expandedAssetNames = await _localAssetNames(container);
+      expect(expandedAssetNames.length, greaterThan(initialAssetNames.length));
+      expect(expandedAssetNames, contains('immich-e2e-limited-extra.mp4'));
+    });
+
     _realStackSessionTest('MOB-REAL-007-$_caseSuffix', 'syncs local media from the simulator gallery', (tester) async {
       await _loadAppPreservingStore(tester);
       await _waitForAccessToken(tester);
@@ -98,14 +124,7 @@ void main() async {
       final container = _containerOfApp(tester);
       await container.read(backgroundSyncProvider).syncLocal(full: true);
 
-      final albums = await container.read(localAlbumServiceProvider).getAll();
-      expect(albums.where((album) => album.assetCount > 0), isNotEmpty);
-
-      final assetNames = <String>{};
-      for (final album in albums) {
-        final assets = await container.read(localAlbumRepository).getAssets(album.id);
-        assetNames.addAll(assets.map((asset) => asset.name));
-      }
+      final assetNames = await _localAssetNames(container);
 
       expect(assetNames, containsAll(['immich-e2e-red.jpg', 'immich-e2e-green.jpg', 'immich-e2e-video.mp4']));
       expect(assetNames.length, assetNames.toSet().length);
@@ -172,8 +191,59 @@ Future<void> _loadAppPreservingStore(WidgetTester tester) async {
   await EasyLocalization.ensureInitialized();
 }
 
+Future<void> _loadAuthenticatedApp(WidgetTester tester) async {
+  await _loadAppPreservingStore(tester);
+  await _pumpFor(tester, const Duration(milliseconds: 500));
+
+  if ((Store.tryGet(StoreKey.accessToken) ?? '').isNotEmpty && Store.tryGet(StoreKey.currentUser)?.email == _email) {
+    return;
+  }
+
+  await Store.clear();
+  final endpoint = _apiEndpoint(_serverUrl);
+  await Store.put(StoreKey.serverEndpoint, endpoint);
+  await Store.put(StoreKey.serverUrl, endpoint);
+
+  final container = _containerOfApp(tester);
+  final apiService = container.read(apiServiceProvider)..setEndpoint(endpoint);
+  final response = await container.read(authApiRepositoryProvider).login(_email, _password);
+  expect(response.userEmail, _email);
+  await Store.put(StoreKey.accessToken, response.accessToken);
+  await Store.put(
+    StoreKey.currentUser,
+    UserDto(
+      id: response.userId,
+      email: response.userEmail,
+      name: response.name,
+      isAdmin: response.isAdmin,
+      hasProfileImage: response.profileImagePath.isNotEmpty,
+      profileChangedAt: DateTime.fromMillisecondsSinceEpoch(0, isUtc: true),
+    ),
+  );
+  await apiService.updateHeaders();
+  await _waitForAccessToken(tester);
+  await _waitForCurrentUser(_email, tester);
+}
+
+String _apiEndpoint(String serverUrl) {
+  final trimmed = serverUrl.replaceFirst(RegExp(r'/+$'), '');
+  return trimmed.endsWith('/api') ? trimmed : '$trimmed/api';
+}
+
 ProviderContainer _containerOfApp(WidgetTester tester) {
   return ProviderScope.containerOf(tester.element(find.byType(app.MainWidget)), listen: false);
+}
+
+Future<Set<String>> _localAssetNames(ProviderContainer container) async {
+  final albums = await container.read(localAlbumServiceProvider).getAll();
+  expect(albums.where((album) => album.assetCount > 0), isNotEmpty);
+
+  final assetNames = <String>{};
+  for (final album in albums) {
+    final assets = await container.read(localAlbumRepository).getAssets(album.id);
+    assetNames.addAll(assets.map((asset) => asset.name));
+  }
+  return assetNames;
 }
 
 Future<void> _waitForLoginScreen(WidgetTester tester) async {
