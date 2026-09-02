@@ -33,35 +33,77 @@ MotionPhotoRanges? parseMotionPhotoRanges(Uint8List prefix, int totalSize) {
     return null;
   }
   final xmp = latin1.decode(prefix, allowInvalid: true);
-  int? motionLength;
   final offset = RegExp(
     r'(?:MicroVideoOffset|MotionPhotoOffset)\s*=\s*["\x27](\d+)["\x27]',
     caseSensitive: false,
   ).firstMatch(xmp);
-  if (offset != null) {
-    motionLength = int.tryParse(offset.group(1)!);
-  }
-  if (motionLength == null) {
-    for (final tag in RegExp(r'<[^>]+>', dotAll: true).allMatches(xmp)) {
-      final value = tag.group(0)!;
-      if (!RegExp(r'(?:Semantic)\s*=\s*["\x27]MotionPhoto["\x27]', caseSensitive: false).hasMatch(value)) {
-        continue;
-      }
-      final length = RegExp(r'(?:Length)\s*=\s*["\x27](\d+)["\x27]', caseSensitive: false).firstMatch(value);
-      if (length != null) {
-        motionLength = int.tryParse(length.group(1)!);
-        break;
-      }
-    }
-  }
+  final motionLength = offset == null ? _motionPhotoDirectoryLength(xmp) : int.tryParse(offset.group(1)!);
   if (motionLength == null || motionLength <= 16 || motionLength >= totalSize) {
     return null;
   }
   final motionOffset = totalSize - motionLength;
-  if (motionOffset <= 16) {
+  final stillLength = _hasMpvdHeaderBeforeMotion(prefix, motionOffset, motionLength) ? motionOffset - 8 : motionOffset;
+  if (motionOffset <= 16 || stillLength <= 16) {
     return null;
   }
-  return MotionPhotoRanges(stillLength: motionOffset, motionOffset: motionOffset, motionLength: motionLength);
+  return MotionPhotoRanges(stillLength: stillLength, motionOffset: motionOffset, motionLength: motionLength);
+}
+
+int? _motionPhotoDirectoryLength(String xmp) {
+  for (final tag in RegExp(r'<[^>]+>', dotAll: true).allMatches(xmp)) {
+    final value = tag.group(0)!;
+    if (!_hasMotionPhotoSemantic(value)) {
+      continue;
+    }
+    final length = _motionPhotoAttributeLength(value);
+    if (length != null) {
+      return length;
+    }
+  }
+  for (final item in RegExp(r'<(?:[\w-]+:)?Item\b[^>]*>.*?</(?:[\w-]+:)?Item>', dotAll: true).allMatches(xmp)) {
+    final value = item.group(0)!;
+    if (!_hasMotionPhotoSemantic(value)) {
+      continue;
+    }
+    final length = _motionPhotoAttributeLength(value) ?? _motionPhotoElementLength(value);
+    if (length != null) {
+      return length;
+    }
+  }
+  return null;
+}
+
+bool _hasMotionPhotoSemantic(String value) {
+  return RegExp(r'(?:Semantic)\s*=\s*["\x27]MotionPhoto["\x27]', caseSensitive: false).hasMatch(value) ||
+      RegExp(
+        r'<(?:[\w-]+:)?Semantic\b[^>]*>\s*MotionPhoto\s*</(?:[\w-]+:)?Semantic>',
+        caseSensitive: false,
+      ).hasMatch(value);
+}
+
+int? _motionPhotoAttributeLength(String value) {
+  final match = RegExp(r'(?:Length)\s*=\s*["\x27](\d+)["\x27]', caseSensitive: false).firstMatch(value);
+  return match == null ? null : int.tryParse(match.group(1)!);
+}
+
+int? _motionPhotoElementLength(String value) {
+  final match = RegExp(
+    r'<(?:[\w-]+:)?Length\b[^>]*>\s*(\d+)\s*</(?:[\w-]+:)?Length>',
+    caseSensitive: false,
+  ).firstMatch(value);
+  return match == null ? null : int.tryParse(match.group(1)!);
+}
+
+bool _hasMpvdHeaderBeforeMotion(Uint8List prefix, int motionOffset, int motionLength) {
+  if (motionOffset < 8 || prefix.length < motionOffset) {
+    return false;
+  }
+  final type = ascii.decode(prefix.sublist(motionOffset - 4, motionOffset), allowInvalid: true);
+  if (type != 'mpvd') {
+    return false;
+  }
+  final size = ByteData.sublistView(prefix, motionOffset - 8, motionOffset - 4).getUint32(0);
+  return size == motionLength + 8;
 }
 
 class StorageRepository {
@@ -203,6 +245,7 @@ class StorageRepository {
       try {
         await input.setPosition(0);
         await _copyOpenedRange(input, stillOutput, ranges.stillLength);
+        await input.setPosition(ranges.motionOffset);
         await _copyOpenedRange(input, motionOutput, ranges.motionLength);
         await stillOutput.flush();
         await motionOutput.flush();

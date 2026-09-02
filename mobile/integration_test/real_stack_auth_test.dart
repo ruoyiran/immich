@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:easy_localization/easy_localization.dart';
 import 'package:flutter/material.dart';
@@ -12,6 +13,7 @@ import 'package:immich_mobile/domain/models/asset/base_asset.model.dart';
 import 'package:immich_mobile/domain/models/store.model.dart';
 import 'package:immich_mobile/domain/models/user.model.dart';
 import 'package:immich_mobile/entities/store.entity.dart';
+import 'package:immich_mobile/infrastructure/repositories/storage.repository.dart';
 import 'package:immich_mobile/main.dart' as app;
 import 'package:immich_mobile/providers/api.provider.dart';
 import 'package:immich_mobile/providers/background_sync.provider.dart';
@@ -20,6 +22,7 @@ import 'package:immich_mobile/providers/infrastructure/album.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/db.provider.dart';
 import 'package:immich_mobile/repositories/asset_api.repository.dart';
 import 'package:immich_mobile/repositories/auth_api.repository.dart';
+import 'package:immich_mobile/repositories/download.repository.dart';
 import 'package:immich_mobile/services/api.service.dart';
 import 'package:immich_mobile/services/foreground_upload.service.dart';
 import 'package:immich_mobile/utils/bootstrap.dart';
@@ -62,6 +65,10 @@ const _resumableCancelAfterBytes = int.fromEnvironment(
 const _lifecycleAssetName = String.fromEnvironment(
   'IMMICH_E2E_LIFECYCLE_ASSET_NAME',
   defaultValue: 'immich-e2e-lifecycle-013.mp4',
+);
+const _motionPhotoAssetName = String.fromEnvironment(
+  'IMMICH_E2E_MOTION_PHOTO_ASSET_NAME',
+  defaultValue: 'immich-e2e-motion-014.heic',
 );
 
 var _registeredSelectedCase = false;
@@ -435,6 +442,56 @@ void main() async {
       expect(info, isNotNull);
     });
 
+    _realStackSessionTest('MOB-REAL-014-$_caseSuffix', 'uploads and replays Android Motion HEIC originals', (
+      tester,
+    ) async {
+      await _loadAuthenticatedApp(tester);
+
+      final container = _containerOfApp(tester);
+      final asset = await _waitForLocalAssetByName(container, _motionPhotoAssetName, tester);
+      expect(asset.isImage, isTrue);
+      expect(asset.isMotionPhoto, isTrue);
+
+      final files = await StorageRepository().getLivePhotoFilesForAsset(asset);
+      expect(files, isNotNull);
+      expect(files!.still.existsSync(), isTrue);
+      expect(files.motion.existsSync(), isTrue);
+      expect(files.still.lengthSync(), greaterThan(32));
+      expect(files.motion.lengthSync(), greaterThan(32));
+
+      final remoteAssetId = await _uploadSingleAssetToServer(container, asset);
+      final assetsApi = container.read(apiServiceProvider).assetsApi;
+      final info = await assetsApi.getAssetInfo(remoteAssetId);
+      expect(info, isNotNull);
+      expect(info!.type, api.AssetTypeEnum.IMAGE);
+      final livePhotoVideoId = info.livePhotoVideoId.orElse(null);
+      expect(livePhotoVideoId, isNotNull);
+      expect(livePhotoVideoId, isNot(remoteAssetId));
+
+      final original = await _waitForSuccessfulResponse(
+        tester,
+        () => http.get(
+          Uri.parse('${Store.get(StoreKey.serverEndpoint)}/assets/$remoteAssetId/original'),
+          headers: {
+            ...ApiService.getRequestHeaders(),
+            'Authorization': 'Bearer ${Store.get(StoreKey.accessToken)}',
+            DownloadRepository.livePhotoFormatHeader: DownloadRepository.androidMotionHeicFormat,
+          },
+        ),
+      );
+      _expectAndroidMotionHeic(original.bodyBytes);
+
+      final motionPlayback = await _waitForSuccessfulResponse(
+        tester,
+        () => assetsApi.playAssetVideoWithHttpInfo(livePhotoVideoId!),
+        acceptedStatusCodes: const {200, 206},
+      );
+      expect(motionPlayback.bodyBytes, isNotEmpty);
+
+      final duplicateRemoteId = await _uploadSingleAssetToServer(container, asset);
+      expect(duplicateRemoteId, remoteAssetId);
+    });
+
     if (_selectedCaseId.isNotEmpty && !_registeredSelectedCase) {
       test(_selectedCaseId, () => fail('No real stack auth test registered for $_selectedCaseId'));
     }
@@ -679,6 +736,16 @@ Future<Map<String, dynamic>> _readSingleResumableState() async {
   final files = await _resumableStateFiles();
   expect(files, hasLength(1));
   return jsonDecode(files.single.readAsStringSync()) as Map<String, dynamic>;
+}
+
+void _expectAndroidMotionHeic(List<int> bodyBytes) {
+  expect(bodyBytes.length, greaterThan(64));
+  final prefixLength = bodyBytes.length < 2 * 1024 * 1024 ? bodyBytes.length : 2 * 1024 * 1024;
+  final ranges = parseMotionPhotoRanges(Uint8List.fromList(bodyBytes.take(prefixLength).toList()), bodyBytes.length);
+  expect(ranges, isNotNull);
+  final motionOffset = ranges!.motionOffset;
+  expect(motionOffset + 12, lessThanOrEqualTo(bodyBytes.length));
+  expect(ascii.decode(bodyBytes.sublist(motionOffset + 4, motionOffset + 8), allowInvalid: true), 'ftyp');
 }
 
 Future<void> _waitForLoginScreen(WidgetTester tester) async {
