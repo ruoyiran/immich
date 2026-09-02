@@ -4,12 +4,14 @@ import 'package:easy_localization/easy_localization.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:http/http.dart' as http;
 import 'package:immich_mobile/constants/enums.dart';
 import 'package:immich_mobile/domain/models/asset/base_asset.model.dart';
 import 'package:immich_mobile/domain/models/store.model.dart';
 import 'package:immich_mobile/domain/models/user.model.dart';
 import 'package:immich_mobile/entities/store.entity.dart';
 import 'package:immich_mobile/main.dart' as app;
+import 'package:immich_mobile/providers/api.provider.dart';
 import 'package:immich_mobile/providers/background_sync.provider.dart';
 import 'package:immich_mobile/providers/gallery_permission.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/album.provider.dart';
@@ -19,6 +21,7 @@ import 'package:immich_mobile/repositories/auth_api.repository.dart';
 import 'package:immich_mobile/services/api.service.dart';
 import 'package:immich_mobile/services/foreground_upload.service.dart';
 import 'package:immich_mobile/utils/bootstrap.dart';
+import 'package:openapi/api.dart' as api;
 import 'package:photo_manager/photo_manager.dart';
 
 import 'test_utils/general_helper.dart';
@@ -39,6 +42,7 @@ const _batchAssetPrefix = String.fromEnvironment(
   defaultValue: 'immich-e2e-batch-009-',
 );
 const _batchAssetCount = int.fromEnvironment('IMMICH_E2E_BATCH_ASSET_COUNT', defaultValue: 20);
+const _videoAssetName = String.fromEnvironment('IMMICH_E2E_VIDEO_ASSET_NAME', defaultValue: 'immich-e2e-video-010.mp4');
 
 var _registeredSelectedCase = false;
 
@@ -218,6 +222,54 @@ void main() async {
       }
     });
 
+    _realStackSessionTest('MOB-REAL-010-$_caseSuffix', 'uploads an MP4 and verifies thumbnail and playback', (
+      tester,
+    ) async {
+      await _loadAuthenticatedApp(tester);
+
+      final container = _containerOfApp(tester);
+      final asset = await _waitForLocalAssetByName(container, _videoAssetName, tester);
+      expect(asset.isVideo, isTrue);
+
+      String? remoteAssetId;
+      String? uploadError;
+      await container
+          .read(foregroundUploadServiceProvider)
+          .uploadSingleAsset(
+            asset,
+            Completer<void>(),
+            callbacks: UploadCallbacks(
+              onSuccess: (_, remoteId) => remoteAssetId = remoteId,
+              onError: (_, errorMessage) => uploadError = errorMessage,
+            ),
+          );
+
+      expect(uploadError, isNull);
+      expect(remoteAssetId, isNotNull);
+
+      final assetsApi = container.read(apiServiceProvider).assetsApi;
+      final info = await assetsApi.getAssetInfo(remoteAssetId!);
+      expect(info, isNotNull);
+      expect(info!.type, api.AssetTypeEnum.VIDEO);
+
+      final original = await container.read(assetApiRepositoryProvider).downloadAsset(remoteAssetId!, edited: false);
+      expect(original.statusCode, 200);
+      expect(original.bodyBytes, isNotEmpty);
+
+      final thumbnail = await _waitForSuccessfulResponse(
+        tester,
+        () => assetsApi.viewAssetWithHttpInfo(remoteAssetId!, size: api.AssetMediaSize.thumbnail),
+      );
+      expect(thumbnail.bodyBytes, isNotEmpty);
+
+      final playback = await _waitForSuccessfulResponse(
+        tester,
+        () => assetsApi.playAssetVideoWithHttpInfo(remoteAssetId!),
+        acceptedStatusCodes: const {200, 206},
+      );
+      expect(playback.bodyBytes, isNotEmpty);
+    });
+
     if (_selectedCaseId.isNotEmpty && !_registeredSelectedCase) {
       test(_selectedCaseId, () => fail('No real stack auth test registered for $_selectedCaseId'));
     }
@@ -389,6 +441,32 @@ Future<List<LocalAsset>> _waitForLocalAssetsByPrefix(
 
   final sorted = lastSeen.toList()..sort();
   fail('Local assets matching $prefix did not reach $count; saw ${sorted.join(', ')}');
+}
+
+Future<http.Response> _waitForSuccessfulResponse(
+  WidgetTester tester,
+  Future<http.Response> Function() request, {
+  Set<int> acceptedStatusCodes = const {200},
+}) async {
+  http.Response? lastResponse;
+  Object? lastError;
+  for (var attempt = 0; attempt < 20; attempt++) {
+    try {
+      final response = await request();
+      if (acceptedStatusCodes.contains(response.statusCode) && response.bodyBytes.isNotEmpty) {
+        return response;
+      }
+      lastResponse = response;
+    } catch (error) {
+      lastError = error;
+    }
+    await _pumpFor(tester, const Duration(seconds: 2));
+  }
+
+  if (lastResponse != null) {
+    fail('Expected HTTP ${acceptedStatusCodes.join('/')} with body, got ${lastResponse.statusCode}');
+  }
+  fail('Expected HTTP ${acceptedStatusCodes.join('/')} with body, last error: $lastError');
 }
 
 Future<void> _waitForLoginScreen(WidgetTester tester) async {
