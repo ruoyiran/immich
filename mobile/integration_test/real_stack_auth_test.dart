@@ -59,6 +59,10 @@ const _resumableCancelAfterBytes = int.fromEnvironment(
   'IMMICH_E2E_RESUMABLE_CANCEL_AFTER_BYTES',
   defaultValue: 512 * 1024,
 );
+const _lifecycleAssetName = String.fromEnvironment(
+  'IMMICH_E2E_LIFECYCLE_ASSET_NAME',
+  defaultValue: 'immich-e2e-lifecycle-013.mp4',
+);
 
 var _registeredSelectedCase = false;
 
@@ -327,7 +331,6 @@ void main() async {
             cancel,
             callbacks: UploadCallbacks(
               onProgress: (_, _, bytes, totalBytes) {
-                expect(bytes, inInclusiveRange(0, totalBytes));
                 firstProgress.add(bytes);
                 if (!cancel.isCompleted && bytes >= _resumableCancelAfterBytes) {
                   cancel.complete();
@@ -340,6 +343,7 @@ void main() async {
 
       expect(interruptedRemoteId, isNull);
       expect(interruptedError, isNull);
+      expect(firstProgress.every((bytes) => bytes >= 0 && bytes <= contentSize), isTrue);
       expect(firstProgress.any((bytes) => bytes >= _resumableCancelAfterBytes), isTrue);
 
       final stateAfterCancel = await _readSingleResumableState();
@@ -358,7 +362,6 @@ void main() async {
             null,
             callbacks: UploadCallbacks(
               onProgress: (_, _, bytes, totalBytes) {
-                expect(bytes, inInclusiveRange(0, totalBytes));
                 retryProgress.add(bytes);
               },
               onSuccess: (_, remoteId) => remoteAssetId = remoteId,
@@ -368,9 +371,68 @@ void main() async {
 
       expect(retryError, isNull);
       expect(remoteAssetId, isNotNull);
+      expect(retryProgress.every((bytes) => bytes >= 0 && bytes <= cancelledSize), isTrue);
       expect(retryProgress.firstWhere((bytes) => bytes > 0), greaterThanOrEqualTo(cancelledOffset));
       expect(retryProgress.last, cancelledSize);
       expect(await _resumableStateFiles(), isEmpty);
+    });
+
+    _realStackSessionTest('MOB-REAL-013-$_caseSuffix', 'keeps upload stable across lifecycle changes', (tester) async {
+      await _loadAuthenticatedApp(tester);
+
+      final container = _containerOfApp(tester);
+      final asset = await _waitForLocalAssetByName(container, _lifecycleAssetName, tester);
+      final contentSize = asset.contentSize;
+      if (contentSize == null) {
+        fail('Lifecycle upload asset $_lifecycleAssetName has no known content size');
+      }
+      await _clearResumableStateFiles();
+
+      final progress = <int>[];
+      String? remoteAssetId;
+      String? uploadError;
+      final upload = container
+          .read(foregroundUploadServiceProvider)
+          .uploadSingleAsset(
+            asset,
+            null,
+            callbacks: UploadCallbacks(
+              onProgress: (_, _, bytes, totalBytes) {
+                progress.add(bytes);
+              },
+              onSuccess: (_, remoteId) => remoteAssetId = remoteId,
+              onError: (_, errorMessage) => uploadError = errorMessage,
+            ),
+          );
+
+      await _pumpUntil(
+        tester,
+        () => progress.any((bytes) => bytes > 0) || remoteAssetId != null || uploadError != null,
+        timeout: const Duration(seconds: 90),
+      );
+      expect(uploadError, isNull);
+      expect(remoteAssetId, isNull);
+
+      for (var i = 0; i < 2; i++) {
+        tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+        await Future<void>.delayed(const Duration(seconds: 2));
+        tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+        await tester.pump();
+        await Future<void>.delayed(const Duration(seconds: 2));
+      }
+
+      await upload.timeout(const Duration(minutes: 5));
+      expect(uploadError, isNull);
+      expect(remoteAssetId, isNotNull);
+      expect(progress, isNotEmpty);
+      expect(progress.every((bytes) => bytes >= 0 && bytes <= contentSize), isTrue);
+      for (var i = 1; i < progress.length; i++) {
+        expect(progress[i], greaterThanOrEqualTo(progress[i - 1]));
+      }
+      expect(await _resumableStateFiles(), isEmpty);
+
+      final info = await container.read(apiServiceProvider).assetsApi.getAssetInfo(remoteAssetId!);
+      expect(info, isNotNull);
     });
 
     if (_selectedCaseId.isNotEmpty && !_registeredSelectedCase) {
