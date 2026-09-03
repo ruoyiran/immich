@@ -45,6 +45,7 @@ import 'package:immich_mobile/pages/library/locked/pin_auth.page.dart';
 import 'package:immich_mobile/pages/login/login.page.dart';
 import 'package:immich_mobile/presentation/pages/dev/main_timeline.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_album.page.dart';
+import 'package:immich_mobile/presentation/pages/drift_asset_selection_timeline.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_favorite.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_library.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_locked_folder.page.dart';
@@ -53,6 +54,7 @@ import 'package:immich_mobile/presentation/widgets/asset_viewer/asset_viewer.pag
 import 'package:immich_mobile/presentation/widgets/asset_viewer/video_viewer.widget.dart';
 import 'package:immich_mobile/presentation/widgets/backup/backup_toggle_button.widget.dart';
 import 'package:immich_mobile/presentation/widgets/images/thumbnail_tile.widget.dart';
+import 'package:immich_mobile/presentation/widgets/timeline/header.widget.dart';
 import 'package:immich_mobile/presentation/widgets/timeline/timeline.widget.dart';
 import 'package:immich_mobile/providers/api.provider.dart';
 import 'package:immich_mobile/providers/asset_viewer/asset_viewer.provider.dart';
@@ -71,6 +73,7 @@ import 'package:immich_mobile/providers/infrastructure/search.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/sync.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/timeline.provider.dart';
 import 'package:immich_mobile/providers/tab.provider.dart';
+import 'package:immich_mobile/providers/timeline/multiselect.provider.dart';
 import 'package:immich_mobile/providers/websocket.provider.dart';
 import 'package:immich_mobile/repositories/asset_api.repository.dart';
 import 'package:immich_mobile/repositories/auth_api.repository.dart';
@@ -84,6 +87,7 @@ import 'package:immich_mobile/utils/option.dart';
 import 'package:immich_mobile/utils/semver.dart';
 import 'package:immich_mobile/widgets/asset_viewer/video_controls.dart';
 import 'package:immich_mobile/widgets/backup/drift_album_info_list_tile.dart';
+import 'package:immich_mobile/widgets/common/selection_sliver_app_bar.dart';
 import 'package:immich_mobile/widgets/photo_view/photo_view.dart';
 import 'package:immich_mobile/widgets/settings/setting_list_tile.dart';
 import 'package:openapi/api.dart' as api;
@@ -179,6 +183,11 @@ const _uploadQueueSuccessAssetName = String.fromEnvironment(
 const _uploadQueueRetryAssetName = String.fromEnvironment(
   'IMMICH_E2E_UPLOAD_QUEUE_RETRY_ASSET_NAME',
   defaultValue: 'immich-e2e-upload-queue-037-retry.jpg',
+);
+const _multiSelectMinimumAssetCount = int.fromEnvironment('IMMICH_E2E_MULTISELECT_MIN_ASSET_COUNT', defaultValue: 60);
+const _multiSelectRemoteSeedPrefix = String.fromEnvironment(
+  'IMMICH_E2E_MULTISELECT_REMOTE_SEED_PREFIX',
+  defaultValue: 'immich-e2e-multiselect-038-remote-',
 );
 
 var _registeredSelectedCase = false;
@@ -3660,6 +3669,161 @@ void main() async {
       },
     );
 
+    _realStackSessionTest(
+      'MOB-UI-038-$_caseSuffix',
+      'keeps multiselect state across taps, bucket selection, scrolling, and exit',
+      (tester) async {
+        tester.view.devicePixelRatio = 1.0;
+        tester.view.physicalSize = const Size(430, 932);
+        addTearDown(tester.view.reset);
+
+        await _loadAuthenticatedApp(tester, overrideCancellation: true);
+        final container = _containerOfApp(tester);
+        final router = container.read(appRouterProvider);
+        final apiService = container.read(apiServiceProvider);
+        final createdRemoteAssetIds = <String>{};
+        final user = Store.tryGet(StoreKey.currentUser);
+        expect(user, isNotNull);
+
+        addTearDown(() async {
+          try {
+            container.read(multiSelectProvider.notifier).reset();
+          } catch (_) {
+            // ProviderScope may already be disposed when earlier expectations fail.
+          }
+          for (final assetId in createdRemoteAssetIds) {
+            await _deleteTestAssetBestEffort(apiService.assetsApi, assetId);
+          }
+        });
+
+        await container.read(backgroundSyncProvider).syncLocal(full: true);
+        await container.read(backgroundSyncProvider).syncRemote();
+        await _pumpFor(tester, const Duration(seconds: 2));
+        await pumpUntilFound(tester, find.byType(Timeline), timeout: const Duration(seconds: 60));
+
+        final mainTimeline = container.read(timelineServiceProvider);
+        final buckets = await _ensureMultiSelectTimelineAssets(tester, container, mainTimeline, createdRemoteAssetIds);
+        expect(buckets.length, greaterThanOrEqualTo(2));
+        expect(mainTimeline.totalAssets, greaterThanOrEqualTo(_multiSelectMinimumAssetCount));
+
+        await _waitForVisibleTimelineAssetTiles(tester, minCount: 3);
+        expect(find.byType(NavigationBar), findsWidgets);
+        final firstTile = _timelineAssetTiles().first;
+        final firstAsset = _assetFromTimelineTile(tester, firstTile);
+
+        await tester.longPress(firstTile);
+        await _waitForMultiSelectCount(tester, container, 1);
+        expect(container.read(multiSelectProvider).selectedAssets, contains(firstAsset));
+        await _pumpUntil(
+          tester,
+          () => find.byType(NavigationBar).evaluate().isEmpty,
+          timeout: const Duration(seconds: 10),
+        );
+        expect(find.widgetWithText(ElevatedButton, '1'), findsOneWidget);
+
+        await tester.tap(_timelineAssetTiles().at(1));
+        await _waitForMultiSelectCount(tester, container, 2);
+        final secondAsset = _assetFromTimelineTile(tester, _timelineAssetTiles().at(1));
+        expect(container.read(multiSelectProvider).selectedAssets, contains(secondAsset));
+        await tester.tap(_timelineAssetTileForAsset(secondAsset));
+        await _waitForMultiSelectCount(tester, container, 1);
+        expect(container.read(multiSelectProvider).selectedAssets, isNot(contains(secondAsset)));
+
+        final mainScrollable = find.descendant(of: find.byType(Timeline), matching: find.byType(Scrollable)).first;
+        await tester.fling(mainScrollable, const Offset(0, -1400), 1600);
+        await _pumpFor(tester, const Duration(seconds: 1));
+        expect(container.read(multiSelectProvider).selectedAssets, contains(firstAsset));
+        await _waitForVisibleTimelineAssetTiles(tester, minCount: 1);
+        final scrolledAsset = _firstVisibleTimelineAssetWhere(
+          tester,
+          (asset) => !container.read(multiSelectProvider).selectedAssets.contains(asset),
+          minCenterY: 240,
+          bottomPadding: 120,
+        );
+        await tester.tap(_timelineAssetTileForAsset(scrolledAsset));
+        await _waitForMultiSelectCount(tester, container, 2);
+        expect(container.read(multiSelectProvider).selectedAssets, containsAll([firstAsset, scrolledAsset]));
+
+        await tester.binding.handlePopRoute();
+        await _waitForMultiSelectCount(tester, container, 0);
+        await _pumpUntil(
+          tester,
+          () => find.byType(NavigationBar).evaluate().isNotEmpty,
+          timeout: const Duration(seconds: 10),
+        );
+        expect(container.read(multiSelectProvider).isEnabled, isFalse);
+
+        unawaited(router.push(DriftAssetSelectionTimelineRoute()));
+        await _pumpUntil(
+          tester,
+          () => find.byType(DriftAssetSelectionTimelinePage).evaluate().isNotEmpty,
+          timeout: const Duration(seconds: 30),
+        );
+        await pumpUntilFound(tester, find.byType(SelectionSliverAppBar), timeout: const Duration(seconds: 30));
+        final selectionContainer = ProviderScope.containerOf(tester.element(find.byType(Timeline).last), listen: false);
+        expect(selectionContainer.read(multiSelectProvider).forceEnable, isTrue);
+        await _waitForVisibleTimelineAssetTiles(tester, minCount: 3);
+        expect(find.byType(NavigationBar), findsNothing);
+
+        final routeFirstAsset = _assetFromTimelineTile(tester, _timelineAssetTiles().first);
+        await tester.tap(_timelineAssetTiles().first);
+        await _waitForMultiSelectCount(tester, selectionContainer, 1);
+        expect(selectionContainer.read(multiSelectProvider).selectedAssets, contains(routeFirstAsset));
+        expect(find.textContaining('1'), findsWidgets);
+
+        final bucketSelectButton = find.descendant(of: find.byType(TimelineHeader), matching: find.byType(IconButton));
+        await pumpUntilFound(tester, bucketSelectButton, timeout: const Duration(seconds: 30));
+        final beforeBucketCount = selectionContainer.read(multiSelectProvider).selectedAssets.length;
+        await tester.tap(bucketSelectButton.first);
+        await _pumpUntil(
+          tester,
+          () => selectionContainer.read(multiSelectProvider).selectedAssets.length > beforeBucketCount,
+          timeout: const Duration(seconds: 30),
+        );
+        final afterBucketCount = selectionContainer.read(multiSelectProvider).selectedAssets.length;
+        expect(afterBucketCount, greaterThan(beforeBucketCount));
+
+        final selectionScrollable = find
+            .descendant(of: find.byType(Timeline).last, matching: find.byType(Scrollable))
+            .first;
+        await tester.fling(selectionScrollable, const Offset(0, -1800), 1800);
+        await _pumpFor(tester, const Duration(seconds: 1));
+        expect(selectionContainer.read(multiSelectProvider).selectedAssets.length, afterBucketCount);
+        await _waitForVisibleTimelineAssetTiles(tester, minCount: 1);
+        final routeScrolledAsset = _firstVisibleTimelineAssetWhere(
+          tester,
+          (asset) => !selectionContainer.read(multiSelectProvider).selectedAssets.contains(asset),
+          minCenterY: 240,
+          bottomPadding: 120,
+        );
+        await tester.tap(_timelineAssetTileForAsset(routeScrolledAsset));
+        await _waitForMultiSelectCount(tester, selectionContainer, afterBucketCount + 1);
+
+        await tester.tap(
+          find.descendant(of: find.byType(SelectionSliverAppBar), matching: find.byIcon(Icons.close_rounded)),
+        );
+        await _pumpUntil(
+          tester,
+          () => find.byType(DriftAssetSelectionTimelinePage).evaluate().isEmpty,
+          timeout: const Duration(seconds: 30),
+        );
+
+        unawaited(router.push(DriftAssetSelectionTimelineRoute()));
+        await _pumpUntil(
+          tester,
+          () => find.byType(DriftAssetSelectionTimelinePage).evaluate().isNotEmpty,
+          timeout: const Duration(seconds: 30),
+        );
+        final reenteredContainer = ProviderScope.containerOf(tester.element(find.byType(Timeline).last), listen: false);
+        await _waitForMultiSelectCount(tester, reenteredContainer, 0);
+        await tester.tap(_timelineAssetTiles().first);
+        await _waitForMultiSelectCount(tester, reenteredContainer, 1);
+        await tester.tap(
+          find.descendant(of: find.byType(SelectionSliverAppBar), matching: find.byIcon(Icons.close_rounded)),
+        );
+      },
+    );
+
     if (_selectedCaseId.isNotEmpty && !_registeredSelectedCase) {
       test(_selectedCaseId, () => fail('No real stack auth test registered for $_selectedCaseId'));
     }
@@ -4903,6 +5067,104 @@ Future<Map<String, DriftUploadStatus>> _waitForUploadItems(
   }
 
   fail('$reason; latest upload items=${latest.values.toList()}');
+}
+
+Finder _timelineAssetTiles() {
+  return find.byWidgetPredicate((widget) => widget is ThumbnailTile && widget.asset != null);
+}
+
+Finder _timelineAssetTileForAsset(BaseAsset asset) {
+  return find.byWidgetPredicate((widget) => widget is ThumbnailTile && widget.asset == asset);
+}
+
+BaseAsset _assetFromTimelineTile(WidgetTester tester, Finder tile) {
+  final widget = tester.widget<ThumbnailTile>(tile);
+  final asset = widget.asset;
+  expect(asset, isNotNull);
+  return asset!;
+}
+
+BaseAsset _firstVisibleTimelineAssetWhere(
+  WidgetTester tester,
+  bool Function(BaseAsset asset) matches, {
+  double minCenterY = 0,
+  double bottomPadding = 0,
+}) {
+  final tiles = _timelineAssetTiles().evaluate();
+  final viewSize = tester.view.physicalSize / tester.view.devicePixelRatio;
+  for (final element in tiles) {
+    final widget = element.widget;
+    final renderObject = element.renderObject;
+    if (widget is! ThumbnailTile ||
+        widget.asset == null ||
+        renderObject is! RenderBox ||
+        !renderObject.attached ||
+        !matches(widget.asset!)) {
+      continue;
+    }
+
+    final rect = renderObject.localToGlobal(Offset.zero) & renderObject.size;
+    final center = rect.center;
+    if (center.dx >= 0 &&
+        center.dx <= viewSize.width &&
+        center.dy >= minCenterY &&
+        center.dy <= viewSize.height - bottomPadding) {
+      return widget.asset!;
+    }
+  }
+  fail('Expected at least one visible timeline asset matching predicate');
+}
+
+Future<void> _waitForVisibleTimelineAssetTiles(WidgetTester tester, {required int minCount}) async {
+  await _pumpUntil(
+    tester,
+    () => _timelineAssetTiles().evaluate().length >= minCount,
+    timeout: const Duration(seconds: 60),
+  );
+}
+
+Future<void> _waitForMultiSelectCount(
+  WidgetTester tester,
+  ProviderContainer container,
+  int expected, {
+  Duration timeout = const Duration(seconds: 10),
+}) async {
+  var latest = -1;
+  final end = DateTime.now().add(timeout);
+  while (DateTime.now().isBefore(end)) {
+    latest = container.read(multiSelectProvider).selectedAssets.length;
+    if (latest == expected) {
+      return;
+    }
+    await _pumpFor(tester, const Duration(milliseconds: 200));
+  }
+
+  fail('Expected multiselect count $expected but saw $latest');
+}
+
+Future<List<TimeBucket>> _ensureMultiSelectTimelineAssets(
+  WidgetTester tester,
+  ProviderContainer container,
+  TimelineService timeline,
+  Set<String> createdRemoteAssetIds,
+) async {
+  final currentTotal = timeline.totalAssets;
+  if (currentTotal < _multiSelectMinimumAssetCount) {
+    final seedCount = _multiSelectMinimumAssetCount - currentTotal;
+    final runId = DateTime.now().toUtc().microsecondsSinceEpoch;
+    for (var i = 0; i < seedCount; i++) {
+      final createdAt = DateTime.utc(2024, 1 + (i % 12), 1 + (i % 24), 12, i % 60, i % 60);
+      final fileName = '$_multiSelectRemoteSeedPrefix$runId-${i.toString().padLeft(2, '0')}.jpg';
+      final assetId = await _uploadGeneratedJpegAsSecondClient(fileName, createdAt);
+      createdRemoteAssetIds.add(assetId);
+    }
+
+    final syncSuccess = await container.read(syncStreamServiceProvider).sync();
+    expect(syncSuccess, isTrue, reason: 'Expected 038 remote seed assets to sync into the Drift timeline');
+    await _pumpFor(tester, const Duration(seconds: 2));
+  }
+
+  return _waitForTimelineBuckets(tester, timeline, minAssets: _multiSelectMinimumAssetCount);
 }
 
 Future<void> _seedUpgradeState(WidgetTester tester) async {
