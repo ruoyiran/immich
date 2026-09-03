@@ -870,13 +870,7 @@ void main() async {
           }
           final assetId = uploadedRemoteId;
           if (assetId != null) {
-            try {
-              await assetsApi.deleteAssets(
-                api.AssetBulkDeleteDto(ids: [assetId], force: const api.Optional.present(true)),
-              );
-            } catch (_) {
-              // Best-effort cleanup for a test-created asset.
-            }
+            await _deleteTestAssetBestEffort(assetsApi, assetId);
           }
         });
 
@@ -959,6 +953,109 @@ void main() async {
           await _remoteSyncRowCounts(drift),
           recoveredRows,
           reason: 'Second sync after realtime recovery should not duplicate rows',
+        );
+      },
+    );
+
+    _realStackSessionTest(
+      'MOB-REAL-022-$_caseSuffix',
+      'keeps repeated favorite changes idempotent and cross-client consistent',
+      (tester) async {
+        await _loadAuthenticatedApp(tester, overrideCancellation: true);
+        final container = _containerOfApp(tester);
+        final drift = container.read(driftProvider);
+        final assetsApi = container.read(apiServiceProvider).assetsApi;
+        String? uploadedRemoteId;
+
+        addTearDown(() async {
+          final assetId = uploadedRemoteId;
+          if (assetId != null) {
+            await _deleteTestAssetBestEffort(assetsApi, assetId);
+          }
+        });
+
+        await container.read(syncApiRepositoryProvider).deleteSyncAck(_allReplayableSyncAckTypes);
+        await Store.delete(StoreKey.syncMigrationStatus);
+        await container.read(syncStreamRepositoryProvider).reset();
+        final baselineSyncSuccess = await container.read(syncStreamServiceProvider).sync();
+        expect(baselineSyncSuccess, isTrue);
+
+        final createdAt = DateTime.now().toUtc();
+        final fileName = 'immich-e2e-favorite-022-${createdAt.microsecondsSinceEpoch}.jpg';
+        final uploadedId = await _uploadGeneratedJpegAsSecondClient(fileName, createdAt);
+        uploadedRemoteId = uploadedId;
+
+        final initialSyncSuccess = await container.read(syncStreamServiceProvider).sync();
+        expect(initialSyncSuccess, isTrue);
+
+        await _waitForRemoteAssetState(
+          tester,
+          container,
+          uploadedId,
+          (asset) => !asset.isFavorite && !asset.isTrashed,
+          reason: 'Expected uploaded asset to sync locally before favorite toggles',
+        );
+        expect(await _remoteAssetRowCountById(drift, uploadedId), 1);
+
+        await assetsApi.updateAssets(
+          api.AssetBulkUpdateDto(ids: [uploadedId], isFavorite: const api.Optional.present(true)),
+        );
+        await assetsApi.updateAssets(
+          api.AssetBulkUpdateDto(ids: [uploadedId], isFavorite: const api.Optional.present(true)),
+        );
+
+        await _waitForAssetInfoState(
+          tester,
+          assetsApi,
+          uploadedId,
+          (info) => info.isFavorite && !info.isTrashed,
+          reason: 'Expected repeated favorite requests to converge on server favorite=true',
+        );
+        final favoriteSyncSuccess = await container.read(syncStreamServiceProvider).sync();
+        expect(favoriteSyncSuccess, isTrue);
+
+        await _waitForRemoteAssetState(
+          tester,
+          container,
+          uploadedId,
+          (asset) => asset.isFavorite && !asset.isTrashed,
+          reason: 'Expected synced client to observe favorite=true from another client',
+        );
+        expect(await _remoteAssetRowCountById(drift, uploadedId), 1);
+
+        await assetsApi.updateAssets(
+          api.AssetBulkUpdateDto(ids: [uploadedId], isFavorite: const api.Optional.present(false)),
+        );
+        await assetsApi.updateAssets(
+          api.AssetBulkUpdateDto(ids: [uploadedId], isFavorite: const api.Optional.present(false)),
+        );
+
+        await _waitForAssetInfoState(
+          tester,
+          assetsApi,
+          uploadedId,
+          (info) => !info.isFavorite && !info.isTrashed,
+          reason: 'Expected repeated unfavorite requests to converge on server favorite=false',
+        );
+        final unfavoriteSyncSuccess = await container.read(syncStreamServiceProvider).sync();
+        expect(unfavoriteSyncSuccess, isTrue);
+
+        await _waitForRemoteAssetState(
+          tester,
+          container,
+          uploadedId,
+          (asset) => !asset.isFavorite && !asset.isTrashed,
+          reason: 'Expected original client to observe favorite=false after cross-client sync',
+        );
+        final rowsAfterUnfavorite = await _remoteSyncRowCounts(drift);
+        expect(await _remoteAssetRowCountById(drift, uploadedId), 1);
+
+        final secondSyncSuccess = await container.read(syncStreamServiceProvider).sync();
+        expect(secondSyncSuccess, isTrue);
+        expect(
+          await _remoteSyncRowCounts(drift),
+          rowsAfterUnfavorite,
+          reason: 'Second sync after idempotent favorite toggles should not duplicate rows',
         );
       },
     );
@@ -1905,6 +2002,21 @@ Future<String> _uploadGeneratedJpegAsSecondClient(String fileName, DateTime crea
   return payload['id'] as String;
 }
 
+Future<void> _deleteTestAssetBestEffort(api.AssetsApi assetsApi, String remoteAssetId) async {
+  try {
+    await assetsApi.deleteAssets(
+      api.AssetBulkDeleteDto(ids: [remoteAssetId], force: const api.Optional.present(false)),
+    );
+  } catch (_) {
+    // The asset may already be trashed or deleted by the test body.
+  }
+  try {
+    await assetsApi.deleteAssets(api.AssetBulkDeleteDto(ids: [remoteAssetId], force: const api.Optional.present(true)));
+  } catch (_) {
+    // Best-effort cleanup for a test-created asset.
+  }
+}
+
 Uint8List _generatedJpegBytes(int seed) {
   const onePixelJpeg =
       '/9j/2wBDAAgEBAQEBAUFBQUFBQYGBgYGBgYGBgYGBgYHBwcICAgHBwcGBgcHCAgICAkJCQgICAgJCQoKCgwMCwsODg4RERT/xABNAAEBAAAAAAAAAAAAAAAAAAAABwEBAQEAAAAAAAAAAAAAAAAAAAIDEAEAAAAAAAAAAAAAAAAAAAAAEQEAAAAAAAAAAAAAAAAAAAAA/8AAEQgAUAB4AwEiAAIRAAMRAP/aAAwDAQACEQMRAD8AvADRIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD/2Q==';
@@ -1941,6 +2053,31 @@ Future<RemoteAsset> _waitForRemoteAssetState(
   }
 
   fail('$reason; latest local asset=$latest');
+}
+
+Future<api.AssetResponseDto> _waitForAssetInfoState(
+  WidgetTester tester,
+  api.AssetsApi assetsApi,
+  String remoteAssetId,
+  bool Function(api.AssetResponseDto info) matches, {
+  required String reason,
+}) async {
+  api.AssetResponseDto? latest;
+  Object? lastError;
+  final end = DateTime.now().add(const Duration(seconds: 60));
+  while (DateTime.now().isBefore(end)) {
+    try {
+      latest = await assetsApi.getAssetInfo(remoteAssetId);
+      if (latest != null && matches(latest)) {
+        return latest;
+      }
+    } catch (error) {
+      lastError = error;
+    }
+    await _pumpFor(tester, const Duration(milliseconds: 500));
+  }
+
+  fail('$reason; latest server asset=$latest; last error=$lastError');
 }
 
 Future<void> _waitForRemoteAssetGoneOrTrashed(
