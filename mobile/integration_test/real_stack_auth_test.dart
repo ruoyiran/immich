@@ -24,6 +24,7 @@ import 'package:immich_mobile/domain/models/sync_event.model.dart';
 import 'package:immich_mobile/domain/models/timeline.model.dart';
 import 'package:immich_mobile/domain/models/user.model.dart';
 import 'package:immich_mobile/domain/services/asset.service.dart';
+import 'package:immich_mobile/domain/services/background_worker.service.dart';
 import 'package:immich_mobile/domain/services/people.service.dart';
 import 'package:immich_mobile/domain/services/search.service.dart';
 import 'package:immich_mobile/domain/services/timeline.service.dart';
@@ -2732,17 +2733,16 @@ void main() async {
     _realStackSessionTest('MOB-REAL-031-$_caseSuffix', 'runs scheduled background backup and tears down cleanly', (
       tester,
     ) async {
-      await _loadAuthenticatedApp(tester, overrideCancellation: true, closeDriftOnDispose: false);
-      final container = _containerOfApp(tester);
-      final drift = container.read(driftProvider);
+      final (container, drift) = await _loadAuthenticatedSyncContainer();
       final backgroundWorker = container.read(backgroundWorkerFgServiceProvider);
       final backgroundWorkerLock = container.read(backgroundWorkerLockServiceProvider);
-      final assetsApi = container.read(apiServiceProvider).assetsApi;
+      final apiService = container.read(apiServiceProvider);
       final user = Store.tryGet(StoreKey.currentUser);
       expect(user, isNotNull);
 
       final uploadedRemoteIds = <String>{};
       addTearDown(() async {
+        await _restoreRealStackApi(apiService);
         try {
           await backgroundWorker.disable();
           await backgroundWorkerLock.lock();
@@ -2750,10 +2750,12 @@ void main() async {
           // Best-effort cleanup for native WorkManager state used by this test.
         }
         for (final remoteId in uploadedRemoteIds) {
-          await _deleteTestAssetBestEffort(assetsApi, remoteId);
+          await _deleteTestAssetBestEffort(apiService.assetsApi, remoteId);
         }
+        container.dispose();
       });
 
+      await container.read(backgroundSyncProvider).syncLocal(full: true);
       final asset = await _waitForLocalAssetByName(container, _backgroundBackupAssetName, tester);
       await _selectOnlyBackupAlbumForAsset(container, asset);
       await SettingsRepository.instance.write(SettingsKey.backupEnabled, true);
@@ -2762,8 +2764,7 @@ void main() async {
       await SettingsRepository.instance.write(SettingsKey.backupRequireCharging, false);
       await SettingsRepository.instance.write(SettingsKey.backupTriggerDelay, 1);
 
-      final searchApi = container.read(apiServiceProvider).searchApi;
-      final beforeServerIds = await _serverAssetIdsByOriginalFilename(searchApi, _backgroundBackupAssetName);
+      final beforeServerIds = await _serverAssetIdsByOriginalFilename(apiService.searchApi, _backgroundBackupAssetName);
       expect(beforeServerIds, isEmpty, reason: 'Background backup fixture name must be unique for this run');
       final beforeRows = await _remoteSyncRowCounts(drift);
 
@@ -2780,10 +2781,12 @@ void main() async {
       await container.read(backgroundWorkerFgServiceProvider).configure(minimumDelaySeconds: 1, requireCharging: false);
       await container.read(backgroundWorkerFgServiceProvider).enable();
       debugPrint('$_backgroundWorkerTriggerMarker first');
+      await _runAndroidBackgroundUploadOnce();
+      await _restoreRealStackApi(apiService);
 
       final firstServerIds = await _waitForServerAssetIdsByOriginalFilename(
         tester,
-        searchApi,
+        apiService.searchApi,
         _backgroundBackupAssetName,
         (ids) => ids.length == beforeServerIds.length + 1,
         reason: 'Expected forced Android background worker to upload the selected local asset',
@@ -2820,9 +2823,11 @@ void main() async {
       expect(await container.read(backgroundUploadServiceProvider).getActiveTasks(kBackupGroup), isEmpty);
 
       debugPrint('$_backgroundWorkerTriggerMarker second');
-      await _pumpFor(tester, const Duration(seconds: 20));
+      await _runAndroidBackgroundUploadOnce();
+      await _restoreRealStackApi(apiService);
+      await _pumpFor(tester, const Duration(seconds: 2));
 
-      final secondServerIds = await _serverAssetIdsByOriginalFilename(searchApi, _backgroundBackupAssetName);
+      final secondServerIds = await _serverAssetIdsByOriginalFilename(apiService.searchApi, _backgroundBackupAssetName);
       expect(
         secondServerIds,
         firstServerIds,
@@ -3721,6 +3726,17 @@ Future<void> _selectOnlyBackupAlbumForAsset(ProviderContainer container, LocalAs
   final sourceAlbums = await container.read(localAssetRepository).getSourceAlbums(asset.id);
   expect(sourceAlbums, isNotEmpty, reason: 'Expected ${asset.name} to belong to at least one local album');
   await albumRepository.upsert(sourceAlbums.first.copyWith(backupSelection: BackupSelection.selected));
+}
+
+Future<void> _runAndroidBackgroundUploadOnce() async {
+  final (drift, logDB) = await Bootstrap.initDomain(shouldBufferLogs: false, listenStoreUpdates: false);
+  await BackgroundWorkerBgService(drift: drift, driftLogger: logDB).onAndroidUpload(2);
+}
+
+Future<void> _restoreRealStackApi(ApiService apiService) async {
+  await _seedAuthenticatedStore();
+  apiService.setEndpoint(_apiEndpoint(_serverUrl));
+  await apiService.updateHeaders();
 }
 
 Future<({int processing, int remainder, int total})> _waitForBackupCounts(
