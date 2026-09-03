@@ -21,6 +21,7 @@ import 'package:immich_mobile/domain/models/asset/base_asset.model.dart';
 import 'package:immich_mobile/domain/models/asset_edit.model.dart';
 import 'package:immich_mobile/domain/models/events.model.dart';
 import 'package:immich_mobile/domain/models/exif.model.dart';
+import 'package:immich_mobile/domain/models/ocr.model.dart';
 import 'package:immich_mobile/domain/models/person.model.dart';
 import 'package:immich_mobile/domain/models/settings_key.dart';
 import 'package:immich_mobile/domain/models/store.model.dart';
@@ -63,7 +64,9 @@ import 'package:immich_mobile/presentation/pages/search/drift_search.page.dart';
 import 'package:immich_mobile/presentation/widgets/album/album_selector.widget.dart';
 import 'package:immich_mobile/presentation/widgets/asset_viewer/asset_details/date_time_details.widget.dart';
 import 'package:immich_mobile/presentation/widgets/asset_viewer/asset_details/location_details.widget.dart';
+import 'package:immich_mobile/presentation/widgets/asset_viewer/asset_details/rating_details.widget.dart';
 import 'package:immich_mobile/presentation/widgets/asset_viewer/asset_viewer.page.dart';
+import 'package:immich_mobile/presentation/widgets/asset_viewer/ocr_overlay.widget.dart';
 import 'package:immich_mobile/presentation/widgets/asset_viewer/video_viewer.widget.dart';
 import 'package:immich_mobile/presentation/widgets/backup/backup_toggle_button.widget.dart';
 import 'package:immich_mobile/presentation/widgets/bottom_sheet/archive_bottom_sheet.widget.dart';
@@ -81,15 +84,18 @@ import 'package:immich_mobile/providers/background_sync.provider.dart';
 import 'package:immich_mobile/providers/backup/backup_album.provider.dart';
 import 'package:immich_mobile/providers/backup/drift_backup.provider.dart';
 import 'package:immich_mobile/providers/gallery_permission.provider.dart';
+import 'package:immich_mobile/providers/infrastructure/action.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/album.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/asset.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/asset_viewer/asset.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/cancel.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/db.provider.dart';
+import 'package:immich_mobile/providers/infrastructure/ocr.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/people.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/platform.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/search.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/sync.provider.dart';
+import 'package:immich_mobile/providers/infrastructure/tag.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/timeline.provider.dart';
 import 'package:immich_mobile/providers/tab.provider.dart';
 import 'package:immich_mobile/providers/timeline/multiselect.provider.dart';
@@ -3916,7 +3922,12 @@ void main() async {
       final initialSyncSuccess = await container.read(syncStreamServiceProvider).sync();
       expect(initialSyncSuccess, isTrue);
       await _pumpFor(tester, const Duration(seconds: 2));
-      await pumpUntilFound(tester, find.byType(Timeline), timeout: const Duration(seconds: 60));
+      await _pumpUntilFoundWithReason(
+        tester,
+        find.byType(Timeline),
+        reason: 'Expected the 045 timeline to appear after sync',
+        timeout: const Duration(seconds: 60),
+      );
 
       await _waitForRemoteAssetState(
         tester,
@@ -4966,6 +4977,270 @@ void main() async {
       await timeline.dispose();
     });
 
+    _realStackSessionTest('MOB-UI-045-$_caseSuffix', 'shows and edits tags rating and OCR metadata', (tester) async {
+      tester.view.devicePixelRatio = 1.0;
+      tester.view.physicalSize = const Size(430, 932);
+      addTearDown(tester.view.reset);
+
+      await _loadAuthenticatedApp(tester, overrideCancellation: true, closeDriftOnDispose: false);
+      var container = _containerOfApp(tester);
+      final apiService = container.read(apiServiceProvider);
+      var assetsApi = apiService.assetsApi;
+      final searchApi = apiService.searchApi;
+      final tagsApi = apiService.tagsApi;
+      final createdRemoteAssetIds = <String>[];
+
+      addTearDown(() async {
+        for (final assetId in createdRemoteAssetIds) {
+          await _deleteTestAssetBestEffort(assetsApi, assetId);
+        }
+      });
+
+      final targetCreatedAt = DateTime.now().toUtc();
+      final controlCreatedAt = targetCreatedAt.add(const Duration(microseconds: 1));
+      final runToken = targetCreatedAt.microsecondsSinceEpoch.toString();
+      final tagValue = 'MOB-UI-045-$runToken';
+      final ocrText = 'MOB UI 045 BOARDING PASS GATE A12 $runToken';
+      final targetName = 'immich-e2e-tags-rating-ocr-045-$runToken.jpg';
+      final controlName = 'immich-e2e-tags-rating-ocr-045-control-$runToken.jpg';
+      final targetId = await _uploadGeneratedJpegAsSecondClient(
+        targetName,
+        targetCreatedAt,
+        sourceMetadata: {
+          'width': 80,
+          'height': 60,
+          'immich_rating': 2,
+          'immich_ocr_v1': [
+            {
+              'text': ocrText,
+              'x1': 0.1,
+              'y1': 0.2,
+              'x2': 0.9,
+              'y2': 0.2,
+              'x3': 0.9,
+              'y3': 0.8,
+              'x4': 0.1,
+              'y4': 0.8,
+              'boxScore': 0.99,
+              'textScore': 0.98,
+              'isVisible': true,
+            },
+          ],
+        },
+      );
+      final controlId = await _uploadGeneratedJpegAsSecondClient(
+        controlName,
+        controlCreatedAt,
+        sourceMetadata: {'width': 80, 'height': 60, 'immich_rating': 5, 'immich_ocr_text': 'MOB UI 045 CONTROL ONLY'},
+      );
+      createdRemoteAssetIds.addAll([targetId, controlId]);
+
+      final createdTags = await container.read(tagProvider.notifier).upsertTags([tagValue]);
+      expect(createdTags, hasLength(1));
+      final tagId = createdTags.single.id;
+      expect(createdTags.single.value, tagValue);
+      final taggedCount = await container.read(tagProvider.notifier).bulkTagAssets([targetId], [tagId]);
+      expect(taggedCount, 1);
+
+      var syncSuccess = await container.read(syncStreamServiceProvider).sync();
+      expect(syncSuccess, isTrue);
+      await pumpUntilFound(tester, find.byType(Timeline), timeout: const Duration(seconds: 60));
+
+      final user = Store.tryGet(StoreKey.currentUser);
+      expect(user, isNotNull);
+      final timeline = container.read(timelineFactoryProvider).main([user!.id]);
+      await _expectTimelineAssetSet(
+        tester,
+        timeline,
+        includes: {targetId, controlId},
+        excludes: const {},
+        reason: 'Expected the 045 tagged/rated/OCR fixture assets in the main timeline',
+      );
+      final remoteImage = await _waitForRemoteAssetState(
+        tester,
+        container,
+        targetId,
+        (asset) => asset.isRemoteOnly && asset.isImage,
+        reason: 'Expected the 045 target asset to sync before viewer checks',
+      );
+      await _waitForRemoteExifState(
+        tester,
+        container.read(assetServiceProvider),
+        remoteImage,
+        (exif) => exif.rating == 2,
+        reason: 'Expected the initial 045 rating to sync into local EXIF',
+      );
+      final localOcr = await _waitForLocalOcrState(
+        tester,
+        container,
+        targetId,
+        (rows) => rows.any((row) => row.text == ocrText && row.isVisible),
+        reason: 'Expected the 045 OCR text to sync into local OCR rows',
+      );
+      expect(localOcr.map((row) => row.text), contains(ocrText));
+
+      final tagSearch = await _waitForSearchServiceAssetIds(
+        tester,
+        container.read(searchServiceProvider),
+        _searchFilter().copyWith(tagIds: [tagId]),
+        (ids) => ids.contains(targetId) && !ids.contains(controlId),
+        reason: 'Expected tag search to return only the 045 tagged asset',
+      );
+      expect(tagSearch, contains(targetId));
+
+      final ocrSearch = await _waitForSearchServiceAssetIds(
+        tester,
+        container.read(searchServiceProvider),
+        _searchFilter().copyWith(ocr: 'boarding pass'),
+        (ids) => ids.contains(targetId) && !ids.contains(controlId),
+        reason: 'Expected OCR search to match the 045 target asset text',
+      );
+      expect(ocrSearch, contains(targetId));
+
+      await _openTimelineAsset(tester, remoteImage);
+      await _showViewerControls(tester, container);
+      EventStream.shared.emit(const ViewerShowDetailsEvent());
+      final ratingStars = find.descendant(of: find.byType(RatingDetails), matching: find.byIcon(Icons.star_rounded));
+      await _pumpUntilFoundWithReason(
+        tester,
+        ratingStars,
+        reason: 'Expected the 045 detail panel to show five rating stars',
+        timeout: const Duration(seconds: 30),
+      );
+      expect(ratingStars, findsNWidgets(5));
+
+      final updateResult = await container.read(actionProvider.notifier).updateRating(ActionSource.viewer, 5);
+      expect(updateResult.success, isTrue);
+      await _waitForRemoteExifState(
+        tester,
+        container.read(assetServiceProvider),
+        remoteImage,
+        (exif) => exif.rating == 5,
+        reason: 'Expected editing the 045 rating from the viewer to update local EXIF',
+      );
+
+      final combinedSearch = await _waitForServerSearchResponse(
+        tester,
+        searchApi,
+        _metadataSearchDto(rating: 5, tagIds: [tagId], ocr: 'boarding pass'),
+        (response) {
+          final ids = _serverSearchAssetIds(response);
+          return ids.contains(targetId) && !ids.contains(controlId);
+        },
+        reason: 'Expected combined tag/rating/OCR server search to match only the target asset',
+      );
+      expect(_serverSearchAssetIds(combinedSearch), contains(targetId));
+
+      await _waitForServerSearchResponse(
+        tester,
+        searchApi,
+        _metadataSearchDto(rating: 2, tagIds: [tagId], ocr: 'boarding pass'),
+        (response) => !_serverSearchAssetIds(response).contains(targetId),
+        reason: 'Expected the previous 045 rating to stop matching after edit',
+      );
+
+      final untagResponse = await tagsApi.untagAssets(tagId, api.BulkIdsDto(ids: [targetId]));
+      _expectBulkSuccess(untagResponse, {targetId}, reason: 'Expected removing the 045 tag to succeed');
+      await _waitForSearchServiceAssetIds(
+        tester,
+        container.read(searchServiceProvider),
+        _searchFilter().copyWith(tagIds: [tagId]),
+        (ids) => !ids.contains(targetId),
+        reason: 'Expected tag search to stop returning the 045 asset after tag removal',
+      );
+      final retagResponse = await tagsApi.tagAssets(tagId, api.BulkIdsDto(ids: [targetId]));
+      _expectBulkSuccess(retagResponse, {targetId}, reason: 'Expected re-adding the 045 tag to succeed');
+
+      container.read(assetViewerProvider.notifier).setShowingDetails(false);
+      await _pumpUntil(
+        tester,
+        () => !container.read(assetViewerProvider).showingDetails,
+        timeout: const Duration(seconds: 10),
+      );
+      await _showViewerControls(tester, container);
+
+      final ocrButton = find.descendant(of: find.byType(AssetViewer), matching: find.byIcon(Icons.text_fields_rounded));
+      await _pumpUntilFoundWithReason(
+        tester,
+        ocrButton,
+        reason: 'Expected the 045 viewer OCR toggle button to be visible',
+        timeout: const Duration(seconds: 30),
+      );
+      await tester.tap(ocrButton.hitTestable().last, warnIfMissed: false);
+      await _pumpFor(tester, const Duration(seconds: 1));
+      final ocrOverlay = find.byType(OcrOverlay);
+      await _pumpUntilFoundWithReason(
+        tester,
+        ocrOverlay,
+        reason: 'Expected the 045 OCR overlay to mount after tapping the OCR toggle',
+        timeout: const Duration(seconds: 30),
+      );
+      expect(remoteImage.width, isNotNull, reason: 'Expected 045 OCR overlay target asset to have synced width');
+      expect(remoteImage.height, isNotNull, reason: 'Expected 045 OCR overlay target asset to have synced height');
+      final ocrBox = find.descendant(of: ocrOverlay, matching: find.byKey(const ValueKey(0)));
+      await _pumpUntilFoundWithReason(
+        tester,
+        ocrBox,
+        reason: 'Expected the 045 OCR overlay to render a selectable OCR box',
+        timeout: const Duration(seconds: 30),
+      );
+      await tester.tap(ocrBox.hitTestable().first, warnIfMissed: false);
+      await _pumpFor(tester, const Duration(milliseconds: 500));
+      await _pumpUntilFoundWithReason(
+        tester,
+        find.text(ocrText),
+        reason: 'Expected the 045 OCR overlay to show the synced text',
+        timeout: const Duration(seconds: 30),
+      );
+
+      await timeline.dispose();
+      await tester.pumpWidget(const SizedBox.shrink());
+      await _pumpFor(tester, const Duration(milliseconds: 500));
+      await _loadAppPreservingStore(tester, overrideCancellation: true, closeDriftOnDispose: false);
+      await _waitForAccessToken(tester);
+      await _waitForCurrentUser(_email, tester);
+      container = _containerOfApp(tester);
+      assetsApi = container.read(apiServiceProvider).assetsApi;
+      await _dismissFeatureMessageIfVisible(tester);
+
+      syncSuccess = await container.read(syncStreamServiceProvider).sync();
+      expect(syncSuccess, isTrue);
+      final restartedAsset = await _waitForRemoteAssetState(
+        tester,
+        container,
+        targetId,
+        (asset) => asset.isRemoteOnly && asset.isImage,
+        reason: 'Expected the 045 asset to persist after app restart',
+      );
+      await _waitForRemoteExifState(
+        tester,
+        container.read(assetServiceProvider),
+        restartedAsset,
+        (exif) => exif.rating == 5,
+        reason: 'Expected the edited 045 rating to persist after app restart',
+      );
+      await _waitForLocalOcrState(
+        tester,
+        container,
+        targetId,
+        (rows) => rows.any((row) => row.text == ocrText && row.isVisible),
+        reason: 'Expected the 045 OCR row to persist after app restart',
+      );
+      await _waitForSearchServiceAssetIds(
+        tester,
+        container.read(searchServiceProvider),
+        _searchFilter().copyWith(
+          tagIds: [tagId],
+          ocr: 'boarding pass',
+          rating: SearchRatingFilter(rating: const .some(5)),
+        ),
+        (ids) => ids.contains(targetId) && !ids.contains(controlId),
+        reason: 'Expected combined app search to match only the persisted 045 target asset',
+      );
+
+      await timeline.dispose();
+    });
+
     if (_selectedCaseId.isNotEmpty && !_registeredSelectedCase) {
       test(_selectedCaseId, () => fail('No real stack auth test registered for $_selectedCaseId'));
     }
@@ -5440,7 +5715,12 @@ Finder _thumbnailTileForAsset(BaseAsset asset) {
 }
 
 Future<void> _openTimelineAsset(WidgetTester tester, BaseAsset asset) async {
-  await pumpUntilFound(tester, find.byType(Timeline), timeout: const Duration(seconds: 60));
+  await _pumpUntilFoundWithReason(
+    tester,
+    find.byType(Timeline),
+    reason: 'Expected timeline before opening asset ${asset.id}',
+    timeout: const Duration(seconds: 60),
+  );
   await _dismissFeatureMessageIfVisible(tester);
 
   final tile = _thumbnailTileForAsset(asset);
@@ -6600,7 +6880,12 @@ String _describeShareIntentState(List<ShareIntentAttachment> attachments) {
 }
 
 Future<void> _showViewerControls(WidgetTester tester, ProviderContainer container) async {
-  await pumpUntilFound(tester, find.byType(AssetViewer), timeout: const Duration(seconds: 30));
+  await _pumpUntilFoundWithReason(
+    tester,
+    find.byType(AssetViewer),
+    reason: 'Expected asset viewer before showing controls',
+    timeout: const Duration(seconds: 30),
+  );
   container.read(assetViewerProvider.notifier).setControls(true);
   await _pumpFor(tester, const Duration(milliseconds: 300));
 }
@@ -7492,6 +7777,9 @@ api.MetadataSearchDto _metadataSearchDto({
   api.AssetVisibility? visibility,
   String? make,
   String? model,
+  int? rating,
+  List<String>? tagIds,
+  String? ocr,
 }) {
   return api.MetadataSearchDto(
     originalFileName: filename == null ? const api.Optional.absent() : api.Optional.present(filename),
@@ -7504,6 +7792,9 @@ api.MetadataSearchDto _metadataSearchDto({
     visibility: visibility == null ? const api.Optional.absent() : api.Optional.present(visibility),
     make: make == null ? const api.Optional.absent() : api.Optional.present(make),
     model: model == null ? const api.Optional.absent() : api.Optional.present(model),
+    rating: rating == null ? const api.Optional.absent() : api.Optional.present(rating),
+    tagIds: tagIds == null ? const api.Optional.absent() : api.Optional.present(tagIds),
+    ocr: ocr == null ? const api.Optional.absent() : api.Optional.present(ocr),
   );
 }
 
@@ -7660,6 +7951,43 @@ Future<ExifInfo> _waitForRemoteExifState(
   }
 
   fail('$reason; latest local EXIF=$latest');
+}
+
+Future<List<Ocr>> _waitForLocalOcrState(
+  WidgetTester tester,
+  ProviderContainer container,
+  String remoteAssetId,
+  bool Function(List<Ocr> rows) matches, {
+  required String reason,
+}) async {
+  var latest = const <Ocr>[];
+  final end = DateTime.now().add(const Duration(seconds: 60));
+  while (DateTime.now().isBefore(end)) {
+    latest = await container.read(ocrServiceProvider).get(remoteAssetId) ?? const <Ocr>[];
+    if (matches(latest)) {
+      return latest;
+    }
+    await _pumpFor(tester, const Duration(milliseconds: 500));
+  }
+
+  fail('$reason; latest local OCR=$latest');
+}
+
+Future<void> _pumpUntilFoundWithReason(
+  WidgetTester tester,
+  Finder finder, {
+  required String reason,
+  Duration timeout = const Duration(seconds: 10),
+}) async {
+  final end = DateTime.now().add(timeout);
+  while (DateTime.now().isBefore(end)) {
+    await _pumpAllowingExpectedRemoteImage404s(tester);
+    if (tester.any(finder)) {
+      return;
+    }
+  }
+
+  fail('$reason; finder=$finder; found=${finder.evaluate().length}');
 }
 
 Future<List<DriftPerson>> _waitForLocalPeopleState(
