@@ -2163,6 +2163,226 @@ void main() async {
       );
     });
 
+    _realStackSessionTest('MOB-REAL-028-$_caseSuffix', 'converges permanent delete across server and local state', (
+      tester,
+    ) async {
+      await _loadAuthenticatedApp(tester, overrideCancellation: true);
+      final container = _containerOfApp(tester);
+      final drift = container.read(driftProvider);
+      final assetsApi = container.read(apiServiceProvider).assetsApi;
+      final assetService = container.read(assetServiceProvider);
+      final uploadedRemoteIds = <String>[];
+
+      addTearDown(() async {
+        for (final assetId in uploadedRemoteIds) {
+          await _deleteTestAssetBestEffort(assetsApi, assetId);
+        }
+      });
+
+      await container.read(syncApiRepositoryProvider).deleteSyncAck(_allReplayableSyncAckTypes);
+      await Store.delete(StoreKey.syncMigrationStatus);
+      await container.read(syncStreamRepositoryProvider).reset();
+      final baselineSyncSuccess = await container.read(syncStreamServiceProvider).sync();
+      expect(baselineSyncSuccess, isTrue);
+
+      final user = Store.tryGet(StoreKey.currentUser);
+      expect(user, isNotNull);
+
+      final runToken = DateTime.now().toUtc().microsecondsSinceEpoch.toString();
+      final baseCreatedAt = DateTime.utc(2026, 1, 28, 12);
+      final deleteId = await _uploadGeneratedJpegAsSecondClient(
+        'immich-e2e-permanent-delete-028-delete-$runToken.jpg',
+        baseCreatedAt,
+      );
+      uploadedRemoteIds.add(deleteId);
+      final controlId = await _uploadGeneratedJpegAsSecondClient(
+        'immich-e2e-permanent-delete-028-control-$runToken.jpg',
+        baseCreatedAt.add(const Duration(minutes: 1)),
+        isFavorite: true,
+      );
+      uploadedRemoteIds.add(controlId);
+
+      final initialSyncSuccess = await container.read(syncStreamServiceProvider).sync();
+      expect(initialSyncSuccess, isTrue);
+
+      for (final assetId in [deleteId, controlId]) {
+        await _waitForRemoteAssetState(
+          tester,
+          container,
+          assetId,
+          (asset) => asset.visibility == AssetVisibility.timeline && !asset.isTrashed,
+          reason: 'Expected uploaded permanent-delete candidate $assetId to sync locally',
+        );
+        expect(await _remoteAssetRowCountById(drift, assetId), 1);
+      }
+
+      final deleteInfo = await _waitForAssetInfoState(
+        tester,
+        assetsApi,
+        deleteId,
+        (asset) => !asset.isTrashed && asset.originalPath.isNotEmpty,
+        reason: 'Expected delete target to expose active server metadata before permanent delete',
+      );
+      final controlInfo = await _waitForAssetInfoState(
+        tester,
+        assetsApi,
+        controlId,
+        (asset) => asset.isFavorite && !asset.isTrashed && asset.originalPath.isNotEmpty,
+        reason: 'Expected control asset to expose active server metadata before permanent delete',
+      );
+      final deleteOriginal = await _waitForSuccessfulResponse(
+        tester,
+        () => container.read(assetApiRepositoryProvider).downloadAsset(deleteId, edited: false),
+      );
+      expect(base64Encode(md5.convert(deleteOriginal.bodyBytes).bytes), deleteInfo.checksum);
+      await _waitForSuccessfulResponse(
+        tester,
+        () => assetsApi.viewAssetWithHttpInfo(deleteId, size: api.AssetMediaSize.thumbnail),
+      );
+      final controlOriginal = await _waitForSuccessfulResponse(
+        tester,
+        () => container.read(assetApiRepositoryProvider).downloadAsset(controlId, edited: false),
+      );
+      final controlChecksum = base64Encode(md5.convert(controlOriginal.bodyBytes).bytes);
+      expect(controlChecksum, controlInfo.checksum);
+
+      final timelineFactory = container.read(timelineFactoryProvider);
+      final mainTimeline = timelineFactory.main([user!.id]);
+      final favoriteTimeline = timelineFactory.favorite(user.id);
+      final trashTimeline = timelineFactory.trash(user.id);
+      addTearDown(mainTimeline.dispose);
+      addTearDown(favoriteTimeline.dispose);
+      addTearDown(trashTimeline.dispose);
+
+      await _expectTimelineAssetSet(
+        tester,
+        mainTimeline,
+        includes: {deleteId, controlId},
+        excludes: const {},
+        reason: 'Initial main timeline should include delete target and control asset',
+      );
+      await _expectTimelineAssetSet(
+        tester,
+        favoriteTimeline,
+        includes: {controlId},
+        excludes: {deleteId},
+        reason: 'Initial favorite timeline should include only the favorite control asset',
+      );
+      await _expectTimelineAssetSet(
+        tester,
+        trashTimeline,
+        includes: const {},
+        excludes: {deleteId, controlId},
+        reason: 'Initial trash timeline should not include active permanent-delete assets',
+      );
+
+      await assetService.trash([deleteId]);
+      await _waitForAssetInfoState(
+        tester,
+        assetsApi,
+        deleteId,
+        (asset) => asset.isTrashed,
+        reason: 'Expected delete target to be logically trashed before permanent delete',
+      );
+      await _waitForRemoteAssetState(
+        tester,
+        container,
+        deleteId,
+        (asset) => asset.isTrashed,
+        reason: 'Expected mobile trash action to move delete target into local trash',
+      );
+      await _expectTimelineAssetSet(
+        tester,
+        mainTimeline,
+        includes: {controlId},
+        excludes: {deleteId},
+        reason: 'Main timeline should hide the logically trashed delete target',
+      );
+      await _expectTimelineAssetSet(
+        tester,
+        trashTimeline,
+        includes: {deleteId},
+        excludes: {controlId},
+        reason: 'Trash timeline should contain the logically trashed delete target',
+      );
+
+      await assetService.delete([deleteId]);
+      await _waitForAssetInfoUnavailable(
+        tester,
+        assetsApi,
+        deleteId,
+        reason: 'Expected hard-deleted asset info endpoint to become unavailable',
+      );
+      await _waitForRemoteAssetDeleted(
+        tester,
+        container,
+        deleteId,
+        reason: 'Expected mobile permanent delete to remove the local remote asset row',
+      );
+      expect(await _remoteAssetRowCountById(drift, deleteId), 0);
+
+      await _waitForRejectedResponse(
+        tester,
+        () => _authenticatedApiGet('/assets/$deleteId/original?edited=false'),
+        reason: 'Expected old original download URL to be unreadable after permanent delete',
+      );
+      await _waitForRejectedResponse(
+        tester,
+        () => _authenticatedApiGet('/assets/$deleteId/thumbnail?size=thumbnail&edited=false'),
+        reason: 'Expected old thumbnail URL to be unreadable after permanent delete',
+      );
+
+      await _expectTimelineAssetSet(
+        tester,
+        mainTimeline,
+        includes: {controlId},
+        excludes: {deleteId},
+        reason: 'Main timeline should keep only the unaffected control asset after permanent delete',
+      );
+      await _expectTimelineAssetSet(
+        tester,
+        favoriteTimeline,
+        includes: {controlId},
+        excludes: {deleteId},
+        reason: 'Favorite timeline should keep the unaffected control asset after permanent delete',
+      );
+      await _expectTimelineAssetSet(
+        tester,
+        trashTimeline,
+        includes: const {},
+        excludes: {deleteId, controlId},
+        reason: 'Trash timeline should no longer list the permanently deleted asset',
+      );
+
+      final deleteSyncSuccess = await container.read(syncStreamServiceProvider).sync();
+      expect(deleteSyncSuccess, isTrue);
+      expect(await _remoteAssetRowCountById(drift, deleteId), 0);
+      expect(await _remoteAssetRowCountById(drift, controlId), 1);
+
+      final controlAfterDelete = await _waitForAssetInfoState(
+        tester,
+        assetsApi,
+        controlId,
+        (asset) => asset.isFavorite && !asset.isTrashed,
+        reason: 'Expected permanent delete to leave the control asset untouched',
+      );
+      _expectAssetInfoPreserved(controlAfterDelete, controlInfo);
+      final controlDownloadAfterDelete = await _waitForSuccessfulResponse(
+        tester,
+        () => container.read(assetApiRepositoryProvider).downloadAsset(controlId, edited: false),
+      );
+      expect(base64Encode(md5.convert(controlDownloadAfterDelete.bodyBytes).bytes), controlChecksum);
+
+      final rowsAfterDelete = await _remoteSyncRowCounts(drift);
+      final secondSyncSuccess = await container.read(syncStreamServiceProvider).sync();
+      expect(secondSyncSuccess, isTrue);
+      expect(
+        await _remoteSyncRowCounts(drift),
+        rowsAfterDelete,
+        reason: 'Second sync after permanent delete should not reinsert deleted local rows',
+      );
+    });
+
     if (_selectedCaseId.isNotEmpty && !_registeredSelectedCase) {
       test(_selectedCaseId, () => fail('No real stack auth test registered for $_selectedCaseId'));
     }
@@ -3699,6 +3919,87 @@ Future<void> _waitForRemoteAssetGoneOrTrashed(
   }
 
   fail('$reason; latest local asset=$latest');
+}
+
+Future<void> _waitForRemoteAssetDeleted(
+  WidgetTester tester,
+  ProviderContainer container,
+  String remoteAssetId, {
+  required String reason,
+}) async {
+  RemoteAsset? latest;
+  final end = DateTime.now().add(const Duration(seconds: 60));
+  while (DateTime.now().isBefore(end)) {
+    latest = await container.read(remoteAssetRepositoryProvider).get(remoteAssetId);
+    if (latest == null) {
+      return;
+    }
+    await _pumpFor(tester, const Duration(milliseconds: 500));
+  }
+
+  fail('$reason; latest local asset=$latest');
+}
+
+Future<void> _waitForAssetInfoUnavailable(
+  WidgetTester tester,
+  api.AssetsApi assetsApi,
+  String remoteAssetId, {
+  required String reason,
+}) async {
+  api.AssetResponseDto? latest;
+  Object? lastError;
+  final end = DateTime.now().add(const Duration(seconds: 60));
+  while (DateTime.now().isBefore(end)) {
+    try {
+      latest = await assetsApi.getAssetInfo(remoteAssetId);
+    } catch (error) {
+      lastError = error;
+      if (_isMissingAssetError(error)) {
+        return;
+      }
+    }
+    await _pumpFor(tester, const Duration(milliseconds: 500));
+  }
+
+  fail('$reason; latest server asset=$latest; last error=$lastError');
+}
+
+Future<void> _waitForRejectedResponse(
+  WidgetTester tester,
+  Future<http.Response> Function() request, {
+  required String reason,
+  Set<int> acceptedStatusCodes = const {400, 403, 404, 410},
+}) async {
+  http.Response? latest;
+  Object? lastError;
+  final end = DateTime.now().add(const Duration(seconds: 60));
+  while (DateTime.now().isBefore(end)) {
+    try {
+      latest = await request();
+      if (acceptedStatusCodes.contains(latest.statusCode)) {
+        return;
+      }
+    } catch (error) {
+      lastError = error;
+      if (_isMissingAssetError(error)) {
+        return;
+      }
+    }
+    await _pumpFor(tester, const Duration(milliseconds: 500));
+  }
+
+  fail('$reason; latest status=${latest?.statusCode}; last error=$lastError');
+}
+
+bool _isMissingAssetError(Object error) => error is api.ApiException && (error.code == 404 || error.code == 410);
+
+Future<http.Response> _authenticatedApiGet(String path) {
+  final endpoint = Store.get(StoreKey.serverEndpoint);
+  final separator = path.startsWith('/') ? '' : '/';
+  return http.get(
+    Uri.parse('$endpoint$separator$path'),
+    headers: {...ApiService.getRequestHeaders(), 'Authorization': 'Bearer ${Store.get(StoreKey.accessToken)}'},
+  );
 }
 
 Future<int> _remoteAssetRowCountById(Drift drift, String remoteAssetId) async {
