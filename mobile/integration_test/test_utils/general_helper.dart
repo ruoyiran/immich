@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:easy_localization/easy_localization.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:immich_mobile/entities/store.entity.dart';
@@ -65,8 +66,33 @@ Future<void> pumpUntilFound(
   bool found = false;
   final timer = Timer(timeout, () => throw TimeoutException("Pump until has timed out"));
   while (found != true) {
-    await tester.pump();
+    await _pumpAllowingExpectedRemoteImage404(tester);
     found = tester.any(finder);
   }
   timer.cancel();
+}
+
+Future<void> _pumpAllowingExpectedRemoteImage404(WidgetTester tester) async {
+  try {
+    await tester.pump();
+  } catch (error) {
+    if (!_isExpectedRemoteImage404(error)) {
+      rethrow;
+    }
+  }
+  Object? exception;
+  while ((exception = tester.takeException()) != null) {
+    if (!_isExpectedRemoteImage404(exception!)) {
+      fail('Unexpected Flutter exception: $exception');
+    }
+  }
+}
+
+bool _isExpectedRemoteImage404(Object exception) {
+  if (exception is PlatformException) {
+    return exception.code == 'IOException' && exception.message?.contains('HTTP 404') == true;
+  }
+
+  final text = exception.toString();
+  return text.contains('PlatformException(IOException') && text.contains('HTTP 404');
 }

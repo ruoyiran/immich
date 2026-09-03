@@ -1,12 +1,12 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
 import 'package:drift/drift.dart' show Variable;
 import 'package:easy_localization/easy_localization.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:http/http.dart' as http;
@@ -45,6 +45,7 @@ import 'package:immich_mobile/pages/library/locked/pin_auth.page.dart';
 import 'package:immich_mobile/pages/login/login.page.dart';
 import 'package:immich_mobile/presentation/pages/dev/main_timeline.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_album.page.dart';
+import 'package:immich_mobile/presentation/pages/drift_archive.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_asset_selection_timeline.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_favorite.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_library.page.dart';
@@ -53,6 +54,9 @@ import 'package:immich_mobile/presentation/pages/search/drift_search.page.dart';
 import 'package:immich_mobile/presentation/widgets/asset_viewer/asset_viewer.page.dart';
 import 'package:immich_mobile/presentation/widgets/asset_viewer/video_viewer.widget.dart';
 import 'package:immich_mobile/presentation/widgets/backup/backup_toggle_button.widget.dart';
+import 'package:immich_mobile/presentation/widgets/bottom_sheet/archive_bottom_sheet.widget.dart';
+import 'package:immich_mobile/presentation/widgets/bottom_sheet/favorite_bottom_sheet.widget.dart';
+import 'package:immich_mobile/presentation/widgets/bottom_sheet/general_bottom_sheet.widget.dart';
 import 'package:immich_mobile/presentation/widgets/images/thumbnail_tile.widget.dart';
 import 'package:immich_mobile/presentation/widgets/timeline/header.widget.dart';
 import 'package:immich_mobile/presentation/widgets/timeline/timeline.widget.dart';
@@ -3824,6 +3828,278 @@ void main() async {
       },
     );
 
+    _realStackSessionTest('MOB-UI-039-$_caseSuffix', 'supports bulk favorite, unfavorite, archive, and archive undo', (
+      tester,
+    ) async {
+      tester.view.devicePixelRatio = 1.0;
+      tester.view.physicalSize = const Size(430, 932);
+      addTearDown(tester.view.reset);
+
+      await _loadAuthenticatedApp(tester, overrideCancellation: true);
+      final container = _containerOfApp(tester);
+      final router = container.read(appRouterProvider);
+      final apiService = container.read(apiServiceProvider);
+      final assetsApi = apiService.assetsApi;
+      final createdRemoteAssetIds = <String>{};
+      final user = Store.tryGet(StoreKey.currentUser);
+      expect(user, isNotNull);
+
+      addTearDown(() async {
+        try {
+          container.read(multiSelectProvider.notifier).reset();
+        } catch (_) {
+          // ProviderScope may already be disposed when an earlier expectation fails.
+        }
+        for (final assetId in createdRemoteAssetIds) {
+          await _deleteTestAssetBestEffort(assetsApi, assetId);
+        }
+      });
+
+      await container.read(syncApiRepositoryProvider).deleteSyncAck(_allReplayableSyncAckTypes);
+      await Store.delete(StoreKey.syncMigrationStatus);
+      await container.read(syncStreamRepositoryProvider).reset();
+      final baselineSyncSuccess = await container.read(syncStreamServiceProvider).sync();
+      expect(baselineSyncSuccess, isTrue);
+
+      final runToken = DateTime.now().toUtc().microsecondsSinceEpoch.toString();
+      final baseCreatedAt = DateTime.now().toUtc();
+      final favoriteTargetId = await _uploadGeneratedJpegAsSecondClient(
+        'immich-e2e-bulk-action-039-favorite-target-$runToken.jpg',
+        baseCreatedAt.subtract(const Duration(seconds: 1)),
+      );
+      createdRemoteAssetIds.add(favoriteTargetId);
+      final alreadyFavoriteId = await _uploadGeneratedJpegAsSecondClient(
+        'immich-e2e-bulk-action-039-already-favorite-$runToken.jpg',
+        baseCreatedAt.subtract(const Duration(seconds: 2)),
+        isFavorite: true,
+      );
+      createdRemoteAssetIds.add(alreadyFavoriteId);
+      final archiveTargetId = await _uploadGeneratedJpegAsSecondClient(
+        'immich-e2e-bulk-action-039-archive-target-$runToken.jpg',
+        baseCreatedAt.subtract(const Duration(seconds: 3)),
+      );
+      createdRemoteAssetIds.add(archiveTargetId);
+      final alreadyArchivedId = await _uploadGeneratedJpegAsSecondClient(
+        'immich-e2e-bulk-action-039-already-archived-$runToken.jpg',
+        baseCreatedAt.subtract(const Duration(seconds: 4)),
+        visibility: api.AssetVisibility.archive,
+      );
+      createdRemoteAssetIds.add(alreadyArchivedId);
+
+      for (final assetId in createdRemoteAssetIds) {
+        await _waitForSuccessfulResponse(
+          tester,
+          () => assetsApi.viewAssetWithHttpInfo(assetId, size: api.AssetMediaSize.thumbnail),
+        );
+      }
+
+      final initialSyncSuccess = await container.read(syncStreamServiceProvider).sync();
+      expect(initialSyncSuccess, isTrue);
+      await _pumpFor(tester, const Duration(seconds: 2));
+      await pumpUntilFound(tester, find.byType(Timeline), timeout: const Duration(seconds: 60));
+
+      await _waitForRemoteAssetState(
+        tester,
+        container,
+        favoriteTargetId,
+        (asset) => asset.visibility == AssetVisibility.timeline && !asset.isFavorite,
+        reason: 'Expected favorite target to sync as an unfavorited timeline asset',
+      );
+      await _waitForRemoteAssetState(
+        tester,
+        container,
+        alreadyFavoriteId,
+        (asset) => asset.visibility == AssetVisibility.timeline && asset.isFavorite,
+        reason: 'Expected favorite control to sync as an already favorited timeline asset',
+      );
+      await _waitForRemoteAssetState(
+        tester,
+        container,
+        archiveTargetId,
+        (asset) => asset.visibility == AssetVisibility.timeline && !asset.isFavorite,
+        reason: 'Expected archive target to sync as a plain timeline asset',
+      );
+      await _waitForRemoteAssetState(
+        tester,
+        container,
+        alreadyArchivedId,
+        (asset) => asset.visibility == AssetVisibility.archive,
+        reason: 'Expected archived control to sync as an archived asset',
+      );
+
+      final timelineFactory = container.read(timelineFactoryProvider);
+      final mainTimeline = timelineFactory.main([user!.id]);
+      final favoriteTimeline = timelineFactory.favorite(user.id);
+      final archiveTimeline = timelineFactory.archive(user.id);
+      addTearDown(mainTimeline.dispose);
+      addTearDown(favoriteTimeline.dispose);
+      addTearDown(archiveTimeline.dispose);
+
+      await _expectTimelineAssetSet(
+        tester,
+        mainTimeline,
+        includes: {favoriteTargetId, alreadyFavoriteId, archiveTargetId},
+        excludes: {alreadyArchivedId},
+        reason: 'Initial main timeline should include only unarchived bulk-action assets',
+      );
+      await _expectTimelineAssetSet(
+        tester,
+        favoriteTimeline,
+        includes: {alreadyFavoriteId},
+        excludes: {favoriteTargetId, archiveTargetId, alreadyArchivedId},
+        reason: 'Initial favorite timeline should include only the pre-favorited asset',
+      );
+      await _expectTimelineAssetSet(
+        tester,
+        archiveTimeline,
+        includes: {alreadyArchivedId},
+        excludes: {favoriteTargetId, alreadyFavoriteId, archiveTargetId},
+        reason: 'Initial archive timeline should include only the pre-archived asset',
+      );
+
+      await _selectTimelineAssetsById(tester, container, [favoriteTargetId, alreadyFavoriteId]);
+      expect(_bottomSheetIcon(GeneralBottomSheet, Icons.favorite_border_rounded), findsOneWidget);
+      expect(_bottomSheetIcon(GeneralBottomSheet, Icons.favorite_rounded), findsNothing);
+      await _tapBottomSheetAction(tester, GeneralBottomSheet, Icons.favorite_border_rounded);
+      await _waitForMultiSelectCount(tester, container, 0);
+      await _waitForAssetInfoState(
+        tester,
+        assetsApi,
+        favoriteTargetId,
+        (asset) => asset.isFavorite && asset.visibility == api.AssetVisibility.timeline,
+        reason: 'Expected selected unfavorited asset to become favorite on the server',
+      );
+      await _waitForAssetInfoState(
+        tester,
+        assetsApi,
+        alreadyFavoriteId,
+        (asset) => asset.isFavorite && asset.visibility == api.AssetVisibility.timeline,
+        reason: 'Expected selected already-favorited asset to remain favorite on the server',
+      );
+      await _expectTimelineAssetSet(
+        tester,
+        favoriteTimeline,
+        includes: {favoriteTargetId, alreadyFavoriteId},
+        excludes: {archiveTargetId, alreadyArchivedId},
+        reason: 'Favorite timeline should immediately include both selected favorites',
+      );
+
+      unawaited(router.push(const DriftFavoriteRoute()));
+      await pumpUntilFound(tester, find.byType(DriftFavoritePage), timeout: const Duration(seconds: 30));
+      final favoriteContainer = ProviderScope.containerOf(tester.element(find.byType(Timeline).last), listen: false);
+      await _selectTimelineAssetsById(tester, favoriteContainer, [favoriteTargetId, alreadyFavoriteId]);
+      expect(_bottomSheetIcon(FavoriteBottomSheet, Icons.favorite_rounded), findsOneWidget);
+      await _tapBottomSheetAction(tester, FavoriteBottomSheet, Icons.favorite_rounded);
+      await _waitForMultiSelectCount(tester, favoriteContainer, 0);
+      for (final assetId in [favoriteTargetId, alreadyFavoriteId]) {
+        await _waitForAssetInfoState(
+          tester,
+          assetsApi,
+          assetId,
+          (asset) => !asset.isFavorite && asset.visibility == api.AssetVisibility.timeline,
+          reason: 'Expected selected favorite asset $assetId to be removed from favorites',
+        );
+      }
+      await _expectTimelineAssetSet(
+        tester,
+        favoriteTimeline,
+        includes: const {},
+        excludes: {favoriteTargetId, alreadyFavoriteId, archiveTargetId, alreadyArchivedId},
+        reason: 'Favorite timeline should drop the bulk-unfavorited assets immediately',
+      );
+
+      await router.maybePop();
+      await _pumpUntil(
+        tester,
+        () => find.byType(DriftFavoritePage).evaluate().isEmpty,
+        timeout: const Duration(seconds: 30),
+      );
+      await pumpUntilFound(tester, find.byType(MainTimelinePage), timeout: const Duration(seconds: 30));
+
+      await _selectTimelineAssetsById(tester, container, [favoriteTargetId, archiveTargetId]);
+      expect(_bottomSheetIcon(GeneralBottomSheet, Icons.archive_outlined), findsOneWidget);
+      await _tapBottomSheetAction(tester, GeneralBottomSheet, Icons.archive_outlined);
+      await _waitForMultiSelectCount(tester, container, 0);
+      await _waitForRemoteAssetState(
+        tester,
+        container,
+        favoriteTargetId,
+        (asset) => asset.visibility == AssetVisibility.archive,
+        reason: 'Expected bulk-archived favorite target to update locally before undo',
+      );
+      await _waitForRemoteAssetState(
+        tester,
+        container,
+        archiveTargetId,
+        (asset) => asset.visibility == AssetVisibility.archive,
+        reason: 'Expected bulk-archived archive target to update locally before undo',
+      );
+      await _expectTimelineAssetSet(
+        tester,
+        archiveTimeline,
+        includes: {alreadyArchivedId, favoriteTargetId, archiveTargetId},
+        excludes: {alreadyFavoriteId},
+        reason: 'Archive timeline should include newly archived assets before undo',
+      );
+
+      await _tapSnackbarAction(tester);
+      for (final assetId in [favoriteTargetId, archiveTargetId]) {
+        await _waitForAssetInfoState(
+          tester,
+          assetsApi,
+          assetId,
+          (asset) => !asset.isFavorite && asset.visibility == api.AssetVisibility.timeline,
+          reason: 'Expected archive undo to restore asset $assetId to the server timeline',
+        );
+        await _waitForRemoteAssetState(
+          tester,
+          container,
+          assetId,
+          (asset) => !asset.isFavorite && asset.visibility == AssetVisibility.timeline,
+          reason: 'Expected archive undo to restore local asset $assetId to the timeline',
+        );
+      }
+
+      unawaited(router.push(const DriftArchiveRoute()));
+      await pumpUntilFound(tester, find.byType(DriftArchivePage), timeout: const Duration(seconds: 30));
+      await _expectTimelineAssetSet(
+        tester,
+        archiveTimeline,
+        includes: {alreadyArchivedId},
+        excludes: {favoriteTargetId, alreadyFavoriteId, archiveTargetId},
+        reason: 'Archive page should retain only the pre-archived control asset after undo',
+      );
+
+      final archiveContainer = ProviderScope.containerOf(tester.element(find.byType(Timeline).last), listen: false);
+      await _selectTimelineAssetsById(tester, archiveContainer, [alreadyArchivedId]);
+      expect(_bottomSheetIcon(ArchiveBottomSheet, Icons.unarchive_outlined), findsOneWidget);
+      await _tapBottomSheetAction(tester, ArchiveBottomSheet, Icons.unarchive_outlined);
+      await _waitForMultiSelectCount(tester, archiveContainer, 0);
+      await _waitForAssetInfoState(
+        tester,
+        assetsApi,
+        alreadyArchivedId,
+        (asset) => asset.visibility == api.AssetVisibility.timeline,
+        reason: 'Expected unarchive action to restore the archived control to the server timeline',
+      );
+      final refreshSyncSuccess = await container.read(syncStreamServiceProvider).sync();
+      expect(refreshSyncSuccess, isTrue);
+      await _expectTimelineAssetSet(
+        tester,
+        mainTimeline,
+        includes: {favoriteTargetId, alreadyFavoriteId, archiveTargetId, alreadyArchivedId},
+        excludes: const {},
+        reason: 'Bulk-action state should stay stable after a server refresh',
+      );
+      await _expectTimelineAssetSet(
+        tester,
+        archiveTimeline,
+        includes: const {},
+        excludes: {favoriteTargetId, alreadyFavoriteId, archiveTargetId, alreadyArchivedId},
+        reason: 'Archive timeline should remain empty for 039 assets after undo and unarchive',
+      );
+    });
+
     if (_selectedCaseId.isNotEmpty && !_registeredSelectedCase) {
       test(_selectedCaseId, () => fail('No real stack auth test registered for $_selectedCaseId'));
     }
@@ -5077,6 +5353,12 @@ Finder _timelineAssetTileForAsset(BaseAsset asset) {
   return find.byWidgetPredicate((widget) => widget is ThumbnailTile && widget.asset == asset);
 }
 
+Finder _timelineAssetTileForAssetId(String assetId) {
+  return find.byWidgetPredicate(
+    (widget) => widget is ThumbnailTile && widget.asset != null && _timelineAssetId(widget.asset!) == assetId,
+  );
+}
+
 BaseAsset _assetFromTimelineTile(WidgetTester tester, Finder tile) {
   final widget = tester.widget<ThumbnailTile>(tile);
   final asset = widget.asset;
@@ -5123,6 +5405,53 @@ Future<void> _waitForVisibleTimelineAssetTiles(WidgetTester tester, {required in
   );
 }
 
+Future<void> _selectTimelineAssetsById(WidgetTester tester, ProviderContainer container, List<String> assetIds) async {
+  expect(assetIds, isNotEmpty);
+  await _waitForVisibleTimelineAssetTiles(tester, minCount: assetIds.length);
+
+  final firstTile = _timelineAssetTileForAssetId(assetIds.first);
+  await pumpUntilFound(tester, firstTile, timeout: const Duration(seconds: 30));
+  await tester.longPress(firstTile);
+  await _waitForSelectedTimelineAssetIds(tester, container, {assetIds.first});
+
+  for (var index = 1; index < assetIds.length; index++) {
+    final tile = _timelineAssetTileForAssetId(assetIds[index]);
+    await pumpUntilFound(tester, tile, timeout: const Duration(seconds: 30));
+    await tester.tap(tile);
+    await _waitForSelectedTimelineAssetIds(tester, container, assetIds.take(index + 1).toSet());
+  }
+}
+
+Finder _bottomSheetIcon(Type bottomSheetType, IconData icon) {
+  return find.descendant(of: find.byType(bottomSheetType), matching: find.byIcon(icon));
+}
+
+Future<void> _tapBottomSheetAction(WidgetTester tester, Type bottomSheetType, IconData icon) async {
+  await pumpUntilFound(tester, find.byType(bottomSheetType), timeout: const Duration(seconds: 30));
+  final actionIcon = _bottomSheetIcon(bottomSheetType, icon);
+  await pumpUntilFound(tester, actionIcon, timeout: const Duration(seconds: 30));
+
+  final actionScroll = find.descendant(of: find.byType(bottomSheetType), matching: find.byType(SingleChildScrollView));
+  for (var attempt = 0; attempt < 8 && actionIcon.hitTestable().evaluate().isEmpty; attempt++) {
+    if (actionScroll.evaluate().isEmpty) {
+      break;
+    }
+    await tester.drag(actionScroll.first, const Offset(-240, 0));
+    await _pumpFor(tester, const Duration(milliseconds: 200));
+  }
+
+  expect(actionIcon.hitTestable(), findsWidgets, reason: 'Expected action icon $icon to be tappable');
+  await tester.tap(actionIcon.hitTestable().first);
+  await _pumpFor(tester, const Duration(milliseconds: 500));
+}
+
+Future<void> _tapSnackbarAction(WidgetTester tester) async {
+  await pumpUntilFound(tester, find.byType(SnackBarAction), timeout: const Duration(seconds: 10));
+  expect(find.text('undo'.tr()), findsWidgets);
+  await tester.tap(find.byType(SnackBarAction).first);
+  await _pumpFor(tester, const Duration(milliseconds: 500));
+}
+
 Future<void> _waitForMultiSelectCount(
   WidgetTester tester,
   ProviderContainer container,
@@ -5140,6 +5469,27 @@ Future<void> _waitForMultiSelectCount(
   }
 
   fail('Expected multiselect count $expected but saw $latest');
+}
+
+Future<void> _waitForSelectedTimelineAssetIds(
+  WidgetTester tester,
+  ProviderContainer container,
+  Set<String> expected, {
+  Duration timeout = const Duration(seconds: 10),
+}) async {
+  var latest = const <String>{};
+  final end = DateTime.now().add(timeout);
+  while (DateTime.now().isBefore(end)) {
+    latest = _timelineAssetIds(container.read(multiSelectProvider).selectedAssets);
+    if (latest.length == expected.length && latest.containsAll(expected)) {
+      return;
+    }
+    await _pumpFor(tester, const Duration(milliseconds: 200));
+  }
+
+  final sortedExpected = expected.toList()..sort();
+  final sortedLatest = latest.toList()..sort();
+  fail('Expected selected timeline asset ids $sortedExpected but saw $sortedLatest');
 }
 
 Future<List<TimeBucket>> _ensureMultiSelectTimelineAssets(
@@ -6599,7 +6949,7 @@ Future<void> _tapTranslatedButton(WidgetTester tester, String key) async {
 Future<void> _pumpFor(WidgetTester tester, Duration duration) async {
   final end = DateTime.now().add(duration);
   while (DateTime.now().isBefore(end)) {
-    await tester.pump(const Duration(milliseconds: 100));
+    await _pumpAllowingExpectedRemoteImage404s(tester, const Duration(milliseconds: 100));
   }
 }
 
@@ -6609,6 +6959,36 @@ Future<void> _pumpUntil(WidgetTester tester, bool Function() condition, {require
     if (DateTime.now().isAfter(end)) {
       throw TimeoutException('Timed out waiting for condition');
     }
-    await tester.pump(const Duration(milliseconds: 100));
+    await _pumpAllowingExpectedRemoteImage404s(tester, const Duration(milliseconds: 100));
   }
+}
+
+Future<void> _pumpAllowingExpectedRemoteImage404s(WidgetTester tester, [Duration? duration]) async {
+  try {
+    await tester.pump(duration);
+  } catch (error) {
+    if (!_isExpectedRemoteImage404(error)) {
+      rethrow;
+    }
+  }
+  _takeExpectedRemoteImage404s(tester);
+}
+
+void _takeExpectedRemoteImage404s(WidgetTester tester) {
+  Object? exception;
+  while ((exception = tester.takeException()) != null) {
+    if (_isExpectedRemoteImage404(exception!)) {
+      continue;
+    }
+    fail('Unexpected Flutter exception: $exception');
+  }
+}
+
+bool _isExpectedRemoteImage404(Object exception) {
+  if (exception is PlatformException) {
+    return exception.code == 'IOException' && exception.message?.contains('HTTP 404') == true;
+  }
+
+  final text = exception.toString();
+  return text.contains('PlatformException(IOException') && text.contains('HTTP 404');
 }

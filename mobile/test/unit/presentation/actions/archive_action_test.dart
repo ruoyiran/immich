@@ -2,7 +2,9 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:immich_mobile/domain/models/asset/base_asset.model.dart';
 import 'package:immich_mobile/presentation/actions/action.widget.dart';
 import 'package:immich_mobile/presentation/actions/archive.action.dart';
+import 'package:immich_mobile/providers/infrastructure/toast.provider.dart';
 import 'package:immich_mobile/providers/routes.provider.dart';
+import 'package:immich_mobile/services/toast.service.dart';
 import 'package:immich_mobile/utils/option.dart';
 import 'package:immich_ui/immich_ui.dart';
 import 'package:mocktail/mocktail.dart';
@@ -27,8 +29,11 @@ void main() {
   RemoteAsset owned({AssetVisibility visibility = .timeline}) =>
       RemoteAssetFactory.create(ownerId: context.currentUser.id, visibility: visibility);
 
-  Future<void> pumpArchive(WidgetTester tester, Set<BaseAsset> selection) =>
-      tester.pumpTestAction(context, const ArchiveAction(source: .timeline), overrides: context.selected(selection));
+  Future<void> pumpArchive(WidgetTester tester, Set<BaseAsset> selection) => tester.pumpTestAction(
+    context,
+    const ArchiveAction(source: .timeline),
+    overrides: [...context.selected(selection), toastServiceProvider.overrideWithValue(context.service.toast)],
+  );
 
   group('ArchiveAction', () {
     testWidgets('archives the eligible owned assets', (tester) async {
@@ -37,6 +42,21 @@ void main() {
       await pumpArchive(tester, {asset});
 
       verify(() => assetService.update([asset.id], visibility: const Option.some(AssetVisibility.archive))).called(1);
+    });
+
+    testWidgets('offers undo after archiving assets', (tester) async {
+      final asset = owned();
+
+      await pumpArchive(tester, {asset});
+
+      final option =
+          verify(() => context.service.toast.success(any(), toast: captureAny(named: 'toast'))).captured.single
+              as ToastOption;
+      expect(option.onUndo, isNotNull);
+
+      await option.onUndo!();
+
+      verify(() => assetService.update([asset.id], visibility: const .some(.timeline))).called(1);
     });
 
     testWidgets('unarchive the eligible owned assets', (tester) async {
