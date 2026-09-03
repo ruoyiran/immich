@@ -61,6 +61,8 @@ import 'package:immich_mobile/presentation/pages/edit/drift_edit.page.dart';
 import 'package:immich_mobile/presentation/pages/edit/editor.provider.dart';
 import 'package:immich_mobile/presentation/pages/search/drift_search.page.dart';
 import 'package:immich_mobile/presentation/widgets/album/album_selector.widget.dart';
+import 'package:immich_mobile/presentation/widgets/asset_viewer/asset_details/date_time_details.widget.dart';
+import 'package:immich_mobile/presentation/widgets/asset_viewer/asset_details/location_details.widget.dart';
 import 'package:immich_mobile/presentation/widgets/asset_viewer/asset_viewer.page.dart';
 import 'package:immich_mobile/presentation/widgets/asset_viewer/video_viewer.widget.dart';
 import 'package:immich_mobile/presentation/widgets/backup/backup_toggle_button.widget.dart';
@@ -81,6 +83,7 @@ import 'package:immich_mobile/providers/backup/drift_backup.provider.dart';
 import 'package:immich_mobile/providers/gallery_permission.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/album.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/asset.provider.dart';
+import 'package:immich_mobile/providers/infrastructure/asset_viewer/asset.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/cancel.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/db.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/people.provider.dart';
@@ -110,9 +113,10 @@ import 'package:immich_mobile/widgets/backup/drift_album_info_list_tile.dart';
 import 'package:immich_mobile/widgets/common/selection_sliver_app_bar.dart';
 import 'package:immich_mobile/widgets/photo_view/photo_view.dart';
 import 'package:immich_mobile/widgets/settings/setting_list_tile.dart';
+import 'package:maplibre_gl/maplibre_gl.dart' show LatLng;
 import 'package:openapi/api.dart' as api;
 import 'package:path_provider/path_provider.dart';
-import 'package:photo_manager/photo_manager.dart' hide AssetType;
+import 'package:photo_manager/photo_manager.dart' hide AssetType, LatLng;
 
 import 'test_utils/general_helper.dart';
 
@@ -4801,6 +4805,167 @@ void main() async {
       expect(refreshedImage.id, imageId);
     });
 
+    _realStackSessionTest('MOB-UI-044-$_caseSuffix', 'edits details date timezone location and clears location', (
+      tester,
+    ) async {
+      tester.view.devicePixelRatio = 1.0;
+      tester.view.physicalSize = const Size(430, 932);
+      addTearDown(tester.view.reset);
+
+      await _loadAuthenticatedApp(tester, overrideCancellation: true, closeDriftOnDispose: false);
+      var container = _containerOfApp(tester);
+      var assetsApi = container.read(apiServiceProvider).assetsApi;
+      final createdRemoteAssetIds = <String>[];
+      var drift = container.read(driftProvider);
+
+      addTearDown(() async {
+        for (final assetId in createdRemoteAssetIds) {
+          await _deleteTestAssetBestEffort(assetsApi, assetId);
+        }
+      });
+
+      final runToken = DateTime.now().toUtc().microsecondsSinceEpoch.toString();
+      final imageName = 'immich-e2e-metadata-edit-044-$runToken.jpg';
+      final initialCreatedAt = DateTime.utc(2026, 2, 13, 20, 0);
+      final imageId = await _uploadGeneratedJpegAsSecondClient(
+        imageName,
+        initialCreatedAt,
+        sourceMetadata: const {'latitude': 40.7128, 'longitude': -74.0060, 'timezone_offset_minutes': -300},
+      );
+      createdRemoteAssetIds.add(imageId);
+
+      var syncSuccess = await container.read(syncStreamServiceProvider).sync();
+      expect(syncSuccess, isTrue);
+      await pumpUntilFound(tester, find.byType(Timeline), timeout: const Duration(seconds: 60));
+
+      final user = Store.tryGet(StoreKey.currentUser);
+      expect(user, isNotNull);
+      var timeline = container.read(timelineFactoryProvider).main([user!.id]);
+      await _expectTimelineAssetSet(
+        tester,
+        timeline,
+        includes: {imageId},
+        excludes: const {},
+        reason: 'Expected the 044 metadata-edit asset in the main timeline before editing',
+      );
+      final remoteImage = await _waitForRemoteAssetState(
+        tester,
+        container,
+        imageId,
+        (asset) => asset.isRemoteOnly && asset.isImage,
+        reason: 'Expected the 044 asset to sync before opening details',
+      );
+      await _waitForRemoteExifState(
+        tester,
+        container.read(assetServiceProvider),
+        remoteImage,
+        (exif) => exif.hasCoordinates && (exif.latitude! - 40.7128).abs() < 0.0001,
+        reason: 'Expected initial 044 EXIF coordinates before editing',
+      );
+
+      await _openTimelineAsset(tester, remoteImage);
+      EventStream.shared.emit(const ViewerShowDetailsEvent());
+      await pumpUntilFound(tester, find.byType(DateTimeDetails), timeout: const Duration(seconds: 30));
+      await pumpUntilFound(tester, find.byType(LocationDetails), timeout: const Duration(seconds: 30));
+      final detailsContainer = ProviderScope.containerOf(
+        tester.element(find.byType(LocationDetails).first),
+        listen: false,
+      );
+      expect(find.textContaining('40.7128'), findsWidgets);
+
+      const updatedDateTime = '2026-02-14T00:30:00.000+14:00';
+      const updatedLocation = LatLng(35.6895, 139.6917);
+      await container.read(assetServiceProvider).update([imageId], dateTime: const .some(updatedDateTime));
+      await container.read(assetServiceProvider).update([
+        imageId,
+      ], location: const Option<LatLng?>.some(updatedLocation));
+      detailsContainer.invalidate(assetExifProvider);
+
+      syncSuccess = await container.read(syncStreamServiceProvider).sync();
+      expect(syncSuccess, isTrue);
+      final updatedAsset = await _waitForRemoteAssetState(
+        tester,
+        container,
+        imageId,
+        (asset) => asset.createdAt.toUtc() == DateTime.parse(updatedDateTime).toUtc(),
+        reason: 'Expected local asset timestamp to update after editing date and time',
+      );
+      final updatedExif = await _waitForRemoteExifState(
+        tester,
+        container.read(assetServiceProvider),
+        updatedAsset,
+        (exif) =>
+            exif.dateTimeOriginal?.toUtc() == DateTime.parse(updatedDateTime).toUtc() &&
+            exif.timeZone == 'UTC+14:00' &&
+            exif.latitude != null &&
+            exif.longitude != null &&
+            (exif.latitude! - updatedLocation.latitude).abs() < 0.0001 &&
+            (exif.longitude! - updatedLocation.longitude).abs() < 0.0001,
+        reason: 'Expected edited date/time, timezone, and coordinates to sync locally',
+      );
+      expect(updatedExif.hasCoordinates, isTrue);
+      await _expectRemoteAssetLocalDateTime(drift, imageId, DateTime.parse('2026-02-14T00:30:00.000'));
+
+      await pumpUntilFound(tester, find.textContaining('GMT+14:00'), timeout: const Duration(seconds: 30));
+      await pumpUntilFound(tester, find.textContaining('35.6895'), timeout: const Duration(seconds: 30));
+
+      final clearLocationButton = find.descendant(
+        of: find.byType(LocationDetails),
+        matching: find.byIcon(Icons.location_off_outlined),
+      );
+      await pumpUntilFound(tester, clearLocationButton, timeout: const Duration(seconds: 30));
+      await tester.tap(clearLocationButton.hitTestable().last, warnIfMissed: false);
+      await _pumpFor(tester, const Duration(seconds: 1));
+
+      final clearedExif = await _waitForRemoteExifState(
+        tester,
+        container.read(assetServiceProvider),
+        updatedAsset,
+        (exif) => exif.latitude == null && exif.longitude == null && exif.timeZone == 'UTC+14:00',
+        reason: 'Expected clearing the 044 location to remove local EXIF coordinates without losing timezone',
+      );
+      expect(clearedExif.hasCoordinates, isFalse);
+      expect(find.text('add_a_location'.tr()), findsWidgets);
+
+      await timeline.dispose();
+      await tester.pumpWidget(const SizedBox.shrink());
+      await _pumpFor(tester, const Duration(milliseconds: 500));
+      await _loadAppPreservingStore(tester, overrideCancellation: true, closeDriftOnDispose: false);
+      await _waitForAccessToken(tester);
+      await _waitForCurrentUser(_email, tester);
+      container = _containerOfApp(tester);
+      assetsApi = container.read(apiServiceProvider).assetsApi;
+      drift = container.read(driftProvider);
+      await _dismissFeatureMessageIfVisible(tester);
+
+      syncSuccess = await container.read(syncStreamServiceProvider).sync();
+      expect(syncSuccess, isTrue);
+      final restartedAsset = await _waitForRemoteAssetState(
+        tester,
+        container,
+        imageId,
+        (asset) => asset.createdAt.toUtc() == DateTime.parse(updatedDateTime).toUtc(),
+        reason: 'Expected edited timestamp to persist after app restart',
+      );
+      await _waitForRemoteExifState(
+        tester,
+        container.read(assetServiceProvider),
+        restartedAsset,
+        (exif) => exif.latitude == null && exif.longitude == null && exif.timeZone == 'UTC+14:00',
+        reason: 'Expected cleared location and edited timezone to persist after app restart',
+      );
+      await _expectRemoteAssetLocalDateTime(drift, imageId, DateTime.parse('2026-02-14T00:30:00.000'));
+      timeline = container.read(timelineFactoryProvider).main([user.id]);
+      await _expectTimelineAssetSet(
+        tester,
+        timeline,
+        includes: {imageId},
+        excludes: const {},
+        reason: 'Expected restarted timeline to include the metadata-edited 044 asset',
+      );
+      await timeline.dispose();
+    });
+
     if (_selectedCaseId.isNotEmpty && !_registeredSelectedCase) {
       test(_selectedCaseId, () => fail('No real stack auth test registered for $_selectedCaseId'));
     }
@@ -7958,6 +8123,16 @@ Future<int> _remoteAssetRowCountById(Drift drift, String remoteAssetId) async {
       )
       .getSingle();
   return row.read<int>('count');
+}
+
+Future<void> _expectRemoteAssetLocalDateTime(Drift drift, String remoteAssetId, DateTime expected) async {
+  final row = await drift
+      .customSelect(
+        'SELECT local_date_time FROM remote_asset_entity WHERE id = ?',
+        variables: [Variable.withString(remoteAssetId)],
+      )
+      .getSingle();
+  expect(row.read<DateTime?>('local_date_time'), expected);
 }
 
 Future<int> _remoteAlbumRowCountById(Drift drift, String albumId) async {

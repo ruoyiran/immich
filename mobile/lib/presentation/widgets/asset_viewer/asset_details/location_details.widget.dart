@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:immich_mobile/domain/models/asset/base_asset.model.dart';
 import 'package:immich_mobile/domain/models/exif.model.dart';
@@ -49,7 +50,17 @@ class _LocationDetailsState extends ConsumerState<LocationDetails> {
     if (widget.exifInfo != oldWidget.exifInfo) {
       final exif = widget.exifInfo;
       if (exif != null && exif.hasCoordinates) {
-        unawaited(_mapController?.moveCamera(CameraUpdate.newLatLng(LatLng(exif.latitude!, exif.longitude!))));
+        unawaited(
+          _mapController?.moveCamera(CameraUpdate.newLatLng(LatLng(exif.latitude!, exif.longitude!))).catchError((
+            Object error,
+            StackTrace stack,
+          ) {
+            if (error is MissingPluginException) {
+              return null;
+            }
+            throw error;
+          }),
+        );
       }
     }
   }
@@ -77,7 +88,19 @@ class _LocationDetailsState extends ConsumerState<LocationDetails> {
           SheetTile(
             title: 'location'.t(context: context),
             titleStyle: context.textTheme.labelLarge?.copyWith(color: context.colorScheme.onSurfaceSecondary),
-            trailing: hasCoordinates && editLocation != null ? const Icon(Icons.edit_location_alt, size: 20) : null,
+            trailing: hasCoordinates && editLocation != null
+                ? Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      IconButton(
+                        icon: const Icon(Icons.location_off_outlined, size: 20),
+                        tooltip: 'location'.t(context: context),
+                        onPressed: () => clearLocation(context, ref, [asset.id]),
+                      ),
+                      const Icon(Icons.edit_location_alt, size: 20),
+                    ],
+                  )
+                : null,
             onTap: editLocation?.onAction,
           ),
           if (hasCoordinates)

@@ -103,7 +103,8 @@ class AssetApiRepository extends ApiRepository {
     Option<bool> isFavorite = const .none(),
     Option<AssetVisibility> visibility = const .none(),
     Option<String> dateTimeOriginal = const .none(),
-    Option<LatLng> location = const .none(),
+    Option<String> timeZone = const .none(),
+    Option<LatLng?> location = const .none(),
   }) {
     return _api.updateAssets(
       AssetBulkUpdateDto(
@@ -111,8 +112,9 @@ class AssetApiRepository extends ApiRepository {
         isFavorite: isFavorite.toOptional(),
         visibility: visibility.map(_mapVisibility).toOptional(),
         dateTimeOriginal: dateTimeOriginal.toOptional(),
-        latitude: location.map((loc) => loc.latitude).toOptional(),
-        longitude: location.map((loc) => loc.longitude).toOptional(),
+        latitude: location.map((loc) => loc?.latitude).toOptional(),
+        longitude: location.map((loc) => loc?.longitude).toOptional(),
+        timeZone: timeZone.toOptional(),
       ),
     );
   }

@@ -119,7 +119,7 @@ class AssetService {
     List<String> remoteIds, {
     Option<bool> isFavorite = const .none(),
     Option<AssetVisibility> visibility = const .none(),
-    Option<LatLng> location = const .none(),
+    Option<LatLng?> location = const .none(),
     Option<String> dateTime = const .none(),
   }) async {
     if (remoteIds.isEmpty) {
@@ -127,7 +127,9 @@ class AssetService {
     }
 
     final parsedDateTime = dateTime.map((dt) => DateTime.parse(dt));
+    final parsedLocalDateTime = dateTime.map(_parseMetadataLocalDateTime);
     final offset = RegExp(r'[+-]\d{2}:\d{2}$').firstMatch(dateTime.unwrapOrNull ?? '')?.group(0);
+    final timeZone = Option.fromNullable(offset).map((o) => 'UTC$o');
 
     await _apiRepository.update(
       remoteIds,
@@ -135,19 +137,16 @@ class AssetService {
       visibility: visibility,
       location: location,
       dateTimeOriginal: dateTime,
+      timeZone: timeZone,
     );
     await _remoteRepository.update(
       remoteIds,
       isFavorite: isFavorite,
       visibility: visibility,
       createdAt: parsedDateTime,
+      localDateTime: parsedLocalDateTime,
     );
-    await _exifRepository.update(
-      remoteIds,
-      location: location,
-      dateTimeOriginal: parsedDateTime,
-      timeZone: .fromNullable(offset).map((o) => 'UTC$o'),
-    );
+    await _exifRepository.update(remoteIds, location: location, dateTimeOriginal: parsedDateTime, timeZone: timeZone);
   }
 
   Future<void> trash(List<String> remoteIds) async {
@@ -197,4 +196,11 @@ class AssetService {
   Future<LocalAsset?> getLocalAsset(String id) {
     return _localRepository.get(id);
   }
+}
+
+DateTime _parseMetadataLocalDateTime(String value) {
+  final trimmed = value.trim();
+  final offset = RegExp(r'(Z|[+-]\d{2}:\d{2})$').firstMatch(trimmed);
+  final localValue = offset == null ? trimmed : trimmed.substring(0, offset.start);
+  return DateTime.parse(localValue);
 }

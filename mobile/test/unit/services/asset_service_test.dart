@@ -1,5 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:immich_mobile/domain/services/asset.service.dart';
+import 'package:immich_mobile/utils/option.dart';
+import 'package:maplibre_gl/maplibre_gl.dart';
 import 'package:mocktail/mocktail.dart';
 
 import '../../infrastructure/repository.mock.dart';
@@ -36,8 +38,16 @@ void main() {
       const picked = '2026-06-10T19:15:00.000+06:00';
       await sut.update(ids, dateTime: const .some(picked));
 
-      verify(() => apiRepository.update(ids, dateTimeOriginal: const .some(picked))).called(1);
-      verify(() => remoteRepository.update(ids, createdAt: .some(DateTime.parse(picked)))).called(1);
+      verify(
+        () => apiRepository.update(ids, dateTimeOriginal: const .some(picked), timeZone: const .some('UTC+06:00')),
+      ).called(1);
+      verify(
+        () => remoteRepository.update(
+          ids,
+          createdAt: .some(DateTime.parse(picked)),
+          localDateTime: .some(DateTime.parse('2026-06-10T19:15:00.000')),
+        ),
+      ).called(1);
       verify(
         () => exifRepository.update(
           ids,
@@ -51,7 +61,13 @@ void main() {
       const picked = '2026-01-05T08:00:00.000-05:30';
       await sut.update(ids, dateTime: const .some(picked));
 
-      verify(() => remoteRepository.update(ids, createdAt: .some(DateTime.parse(picked)))).called(1);
+      verify(
+        () => remoteRepository.update(
+          ids,
+          createdAt: .some(DateTime.parse(picked)),
+          localDateTime: .some(DateTime.parse('2026-01-05T08:00:00.000')),
+        ),
+      ).called(1);
       verify(
         () => exifRepository.update(
           ids,
@@ -65,7 +81,13 @@ void main() {
       const picked = '2026-06-10T13:15:00.000Z';
       await sut.update(ids, dateTime: const .some(picked));
 
-      verify(() => remoteRepository.update(ids, createdAt: .some(DateTime.parse(picked)))).called(1);
+      verify(
+        () => remoteRepository.update(
+          ids,
+          createdAt: .some(DateTime.parse(picked)),
+          localDateTime: .some(DateTime.parse('2026-06-10T13:15:00.000')),
+        ),
+      ).called(1);
       verify(
         () => exifRepository.update(ids, dateTimeOriginal: .some(DateTime.parse(picked)), timeZone: const .none()),
       ).called(1);
@@ -76,6 +98,34 @@ void main() {
 
       verifyZeroInteractions(apiRepository);
       verifyZeroInteractions(remoteRepository);
+    });
+  });
+
+  group('AssetService.updateLocation', () {
+    const ids = ['asset_id_1'];
+
+    test('updates coordinates through the api and local exif cache', () async {
+      const location = LatLng(35.6895, 139.6917);
+
+      await sut.update(ids, location: const .some(location));
+
+      verify(() => apiRepository.update(ids, location: const Option<LatLng?>.some(location))).called(1);
+      verify(() => exifRepository.update(ids, location: const Option<LatLng?>.some(location))).called(1);
+    });
+
+    test('keeps null location present so coordinates are cleared', () async {
+      await sut.update(ids, location: const Option<LatLng?>.some(null));
+
+      final apiLocation =
+          verify(() => apiRepository.update(ids, location: captureAny(named: 'location'))).captured.single
+              as Option<LatLng?>;
+      final exifLocation =
+          verify(() => exifRepository.update(ids, location: captureAny(named: 'location'))).captured.single
+              as Option<LatLng?>;
+      expect(apiLocation, isA<Some<LatLng?>>());
+      expect(apiLocation.unwrapOrNull, isNull);
+      expect(exifLocation, isA<Some<LatLng?>>());
+      expect(exifLocation.unwrapOrNull, isNull);
     });
   });
 }

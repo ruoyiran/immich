@@ -219,7 +219,7 @@ void _registerFallbacks() {
   registerFallbackValue(<AssetEdit>[]);
   registerFallbackValue(const Option<bool>.none());
   registerFallbackValue(const Option<AssetVisibility>.none());
-  registerFallbackValue(const Option<LatLng>.none());
+  registerFallbackValue(const Option<LatLng?>.none());
   registerFallbackValue(const Option<String>.none());
   registerFallbackValue(const Option<DateTime>.none());
   registerFallbackValue(<BaseAsset>[]);
@@ -269,6 +269,7 @@ extension type const RemoteAssetRepositoryStub(MockRemoteAssetRepository repo)
         isFavorite: any(named: 'isFavorite'),
         visibility: any(named: 'visibility'),
         createdAt: any(named: 'createdAt'),
+        localDateTime: any(named: 'localDateTime'),
       );
 }
 
@@ -387,6 +388,7 @@ extension type const AssetApiRepositoryStub(MockAssetApiRepository api) implemen
         isFavorite: any(named: 'isFavorite'),
         visibility: any(named: 'visibility'),
         dateTimeOriginal: any(named: 'dateTimeOriginal'),
+        timeZone: any(named: 'timeZone'),
         location: any(named: 'location'),
       );
 }
