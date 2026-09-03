@@ -19,6 +19,14 @@ class DriftLocalAlbumRepository extends DriftDatabaseRepository {
   const DriftLocalAlbumRepository(this._db) : super(_db);
 
   Future<List<LocalAlbum>> getAll({Set<SortLocalAlbumsBy> sortBy = const {}}) {
+    return _allQuery(sortBy).get();
+  }
+
+  Stream<List<LocalAlbum>> watchAll({Set<SortLocalAlbumsBy> sortBy = const {}}) {
+    return _allQuery(sortBy).watch();
+  }
+
+  MultiSelectable<LocalAlbum> _allQuery(Set<SortLocalAlbumsBy> sortBy) {
     final assetCount = _db.localAlbumAssetEntity.assetId.count();
 
     final query = _db.localAlbumEntity.select().join([
@@ -47,7 +55,7 @@ class DriftLocalAlbumRepository extends DriftDatabaseRepository {
       query.orderBy(orderings);
     }
 
-    return query.map((row) => row.readTable(_db.localAlbumEntity).toDto(assetCount: row.read(assetCount) ?? 0)).get();
+    return query.map((row) => row.readTable(_db.localAlbumEntity).toDto(assetCount: row.read(assetCount) ?? 0));
   }
 
   Future<List<LocalAlbum>> getBackupAlbums() async {
@@ -437,6 +445,14 @@ class DriftLocalAlbumRepository extends DriftDatabaseRepository {
   }
 
   Future<LocalAsset?> getThumbnail(String albumId) async {
+    return _thumbnailQuery(albumId).getSingleOrNull();
+  }
+
+  Stream<LocalAsset?> watchThumbnail(String albumId) {
+    return _thumbnailQuery(albumId).watchSingleOrNull();
+  }
+
+  SingleOrNullSelectable<LocalAsset> _thumbnailQuery(String albumId) {
     final query =
         _db.localAlbumAssetEntity.select().join([
             innerJoin(_db.localAssetEntity, _db.localAlbumAssetEntity.assetId.equalsExp(_db.localAssetEntity.id)),
@@ -445,9 +461,7 @@ class DriftLocalAlbumRepository extends DriftDatabaseRepository {
           ..orderBy([OrderingTerm.desc(_db.localAssetEntity.createdAt)])
           ..limit(1);
 
-    final results = await query.map((row) => row.readTable(_db.localAssetEntity).toDto()).get();
-
-    return results.isNotEmpty ? results.first : null;
+    return query.map((row) => row.readTable(_db.localAssetEntity).toDto());
   }
 
   Future<int> getCount() {

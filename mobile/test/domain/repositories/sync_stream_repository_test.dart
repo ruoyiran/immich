@@ -53,6 +53,31 @@ SyncAssetV1 _createAsset({
   );
 }
 
+SyncAssetV2 _createAssetV2({required String id, required String checksum, String ownerId = 'user-1'}) {
+  return SyncAssetV2(
+    id: id,
+    checksum: checksum,
+    originalFileName: 'motion.heic',
+    type: AssetTypeEnum.IMAGE,
+    ownerId: ownerId,
+    isFavorite: false,
+    fileCreatedAt: DateTime(2024, 1, 1),
+    fileModifiedAt: DateTime(2024, 1, 1),
+    createdAt: DateTime(2024, 1, 1),
+    localDateTime: DateTime(2024, 1, 1),
+    visibility: AssetVisibility.timeline,
+    width: 1920,
+    height: 1080,
+    deletedAt: null,
+    duration: 0,
+    libraryId: null,
+    livePhotoVideoId: null,
+    stackId: null,
+    thumbhash: null,
+    isEdited: false,
+  );
+}
+
 SyncAssetExifV1 _createExif({
   required String assetId,
   required int width,
@@ -186,6 +211,32 @@ void main() {
 
       expect(result.width, equals(existingWidth), reason: 'Width should remain as originally set');
       expect(result.height, equals(existingHeight), reason: 'Height should remain as originally set');
+    });
+  });
+
+  group('SyncStreamRepository - uploaded checksum association', () {
+    test('AssetV1 sync does not overwrite an existing upload checksum', () async {
+      const assetId = 'motion-photo-v1';
+      await sut.updateUsersV1([_createUser()]);
+      await sut.updateAssetsV1([
+        _createAsset(id: assetId, checksum: 'motion-heic-container-checksum', fileName: 'motion.heic'),
+      ]);
+
+      await sut.updateAssetsV1([_createAsset(id: assetId, checksum: 'split-still-checksum', fileName: 'motion.heic')]);
+
+      final row = await (db.remoteAssetEntity.select()..where((table) => table.id.equals(assetId))).getSingle();
+      expect(row.checksum, 'motion-heic-container-checksum');
+    });
+
+    test('AssetV2 sync does not overwrite an existing upload checksum', () async {
+      const assetId = 'motion-photo-v2';
+      await sut.updateUsersV1([_createUser()]);
+      await sut.updateAssetsV2([_createAssetV2(id: assetId, checksum: 'motion-heic-container-checksum')]);
+
+      await sut.updateAssetsV2([_createAssetV2(id: assetId, checksum: 'split-still-checksum')]);
+
+      final row = await (db.remoteAssetEntity.select()..where((table) => table.id.equals(assetId))).getSingle();
+      expect(row.checksum, 'motion-heic-container-checksum');
     });
   });
 

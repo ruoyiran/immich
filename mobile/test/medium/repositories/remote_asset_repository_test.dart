@@ -82,4 +82,24 @@ void main() {
     expect(linked?.remoteId, remoteId);
     expect(linked?.storage, AssetState.merged);
   });
+
+  test('upsertUploadedAsset replaces a synced checksum with the uploaded local checksum', () async {
+    const localChecksum = 'motion-heic-container-checksum';
+    const serverChecksum = 'split-still-checksum';
+    const remoteId = 'motion-photo-remote-id';
+    final user = await ctx.newUser();
+    await ctx.newAuthUser(id: user.id);
+    await ctx.newRemoteAsset(id: remoteId, ownerId: user.id, checksum: serverChecksum);
+    final local = await ctx.newLocalAsset(checksum: localChecksum);
+    final localRepository = DriftLocalAssetRepository(ctx.db);
+    final source = await localRepository.getById(local.id);
+
+    await sut.upsertUploadedAsset(remoteId: remoteId, ownerId: user.id, source: source!);
+
+    final linked = await localRepository.get(local.id);
+    expect(linked?.remoteId, remoteId);
+    expect(linked?.storage, AssetState.merged);
+    final remote = await sut.get(remoteId);
+    expect(remote?.checksum, localChecksum);
+  });
 }
