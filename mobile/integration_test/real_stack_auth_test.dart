@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:background_downloader/background_downloader.dart';
 import 'package:crypto/crypto.dart';
 import 'package:drift/drift.dart' show Variable;
 import 'package:easy_localization/easy_localization.dart';
@@ -83,11 +84,14 @@ import 'package:immich_mobile/providers/tab.provider.dart';
 import 'package:immich_mobile/providers/timeline/multiselect.provider.dart';
 import 'package:immich_mobile/providers/websocket.provider.dart';
 import 'package:immich_mobile/repositories/asset_api.repository.dart';
+import 'package:immich_mobile/repositories/asset_media.repository.dart';
 import 'package:immich_mobile/repositories/auth_api.repository.dart';
 import 'package:immich_mobile/repositories/download.repository.dart';
+import 'package:immich_mobile/repositories/file_media.repository.dart';
 import 'package:immich_mobile/routing/router.dart';
 import 'package:immich_mobile/services/api.service.dart';
 import 'package:immich_mobile/services/background_upload.service.dart';
+import 'package:immich_mobile/services/download.service.dart';
 import 'package:immich_mobile/services/foreground_upload.service.dart';
 import 'package:immich_mobile/utils/bootstrap.dart';
 import 'package:immich_mobile/utils/option.dart';
@@ -4318,6 +4322,151 @@ void main() async {
       expect(await _remoteAlbumAssetRowCountByAlbumId(drift, newAlbumId), 1);
     });
 
+    _realStackSessionTest('MOB-UI-041-$_caseSuffix', 'supports viewer share, download, and browser actions', (
+      tester,
+    ) async {
+      tester.view.devicePixelRatio = 1.0;
+      tester.view.physicalSize = const Size(430, 932);
+      addTearDown(tester.view.reset);
+
+      await _loadAuthenticatedApp(tester, overrideCancellation: true);
+      final container = _containerOfApp(tester);
+      final apiService = container.read(apiServiceProvider);
+      final assetsApi = apiService.assetsApi;
+      final shareInvocations = <_ShareInvocation>[];
+      final launchedBrowserUrls = <String>[];
+      final downloadUpdates = <TaskStatusUpdate>[];
+      final createdRemoteAssetIds = <String>[];
+      final user = Store.tryGet(StoreKey.currentUser);
+      expect(user, isNotNull);
+
+      _recordSharePlusInvocations(shareInvocations);
+      _recordUrlLauncherInvocations(launchedBrowserUrls);
+      final downloadService = container.read(downloadServiceProvider);
+      final downloadRepository = container.read(downloadRepositoryProvider);
+      downloadService.onImageDownloadStatus = downloadUpdates.add;
+      downloadService.onVideoDownloadStatus = downloadUpdates.add;
+
+      addTearDown(() async {
+        _clearSharePlusInvocationRecorder();
+        _clearUrlLauncherInvocationRecorder();
+        downloadService.onImageDownloadStatus = null;
+        downloadService.onVideoDownloadStatus = null;
+        await downloadRepository.deleteRecordsWithIds(createdRemoteAssetIds);
+        for (final assetId in createdRemoteAssetIds) {
+          await _deleteTestAssetBestEffort(assetsApi, assetId);
+        }
+      });
+
+      final runToken = DateTime.now().toUtc().microsecondsSinceEpoch.toString();
+      final imageName = 'immich-e2e-share-download-browser-041-image-$runToken.jpg';
+      final localOnlyName = 'immich-e2e-share-download-browser-041-local-$runToken.jpg';
+      final imageId = await _uploadGeneratedJpegAsSecondClient(imageName, DateTime.now().toUtc());
+      createdRemoteAssetIds.add(imageId);
+
+      await _waitForSuccessfulResponse(
+        tester,
+        () => _authenticatedApiGet('/assets/$imageId/thumbnail?size=thumbnail&edited=false&c=$runToken'),
+        timeout: const Duration(minutes: 3),
+      );
+
+      final createdLocalOnly = await container
+          .read(fileMediaRepositoryProvider)
+          .saveLocalAsset(
+            _generatedJpegBytes(runToken.hashCode),
+            title: localOnlyName,
+            relativePath: 'Pictures/ImmichE2E041',
+          );
+      expect(createdLocalOnly, isNotNull);
+
+      await container.read(backgroundSyncProvider).syncLocal(full: true);
+      final remoteSyncSuccess = await container.read(syncStreamServiceProvider).sync();
+      expect(remoteSyncSuccess, isTrue);
+      await _pumpFor(tester, const Duration(seconds: 2));
+      await pumpUntilFound(tester, find.byType(Timeline), timeout: const Duration(seconds: 60));
+
+      final remoteImage = await _waitForRemoteAssetState(
+        tester,
+        container,
+        imageId,
+        (asset) => asset.isRemoteOnly,
+        reason: 'Expected the 041 image to sync as a remote-only asset before download',
+      );
+      final localOnly = await _waitForLocalAssetByName(container, localOnlyName, tester);
+      expect(localOnly.isLocalOnly, isTrue);
+      expect(
+        await _serverAssetIdsByOriginalFilename(apiService.searchApi, localOnlyName),
+        isEmpty,
+        reason: 'Local-only 041 fixture must not already exist on the server',
+      );
+
+      final timeline = container.read(timelineFactoryProvider).main([user!.id]);
+      addTearDown(timeline.dispose);
+      final timelineAssets = await _expectTimelineAssetSet(
+        tester,
+        timeline,
+        includes: {imageId},
+        excludes: const {},
+        reason: 'Expected the 041 remote image in the main timeline before viewer actions',
+      );
+      final remoteVideo = _firstRemoteVideo(timelineAssets);
+      expect(remoteVideo, isNotNull, reason: 'Expected at least one remote video in the real timeline for sharing');
+
+      final mixedShareCount = await container.read(assetMediaRepositoryProvider).shareAssets([
+        remoteImage,
+        remoteVideo!,
+        localOnly,
+      ], tester.element(find.byType(MainTimelinePage)));
+      expect(mixedShareCount, 3);
+      await _waitForShareInvocationCount(tester, shareInvocations, 1);
+      _expectSharedDisplayNames(shareInvocations.single, {remoteImage.name, remoteVideo.name, localOnlyName});
+
+      await _openTimelineAsset(tester, remoteImage);
+      await _showViewerControls(tester, container);
+
+      await _tapViewerActionIcon(tester, Icons.share_rounded);
+      await _waitForShareInvocationCount(tester, shareInvocations, 2);
+      _expectSharedDisplayNames(shareInvocations.last, {remoteImage.name});
+
+      await container.read(downloadRepositoryProvider).deleteRecordsWithIds([remoteImage.id]);
+      await _tapViewerMenuAction(tester, Icons.download);
+      final firstDownloadRecord = await _waitForDownloadRecordStatus(
+        tester,
+        remoteImage.id,
+        TaskStatus.complete,
+        reason: 'Expected viewer download to complete for the 041 remote image',
+      );
+      expect(firstDownloadRecord.group, kDownloadGroupImage);
+      expect(firstDownloadRecord.task.filename, remoteImage.name);
+      final downloadedLocal = await _waitForLocalAssetByName(container, remoteImage.name, tester);
+      expect(downloadedLocal.hasLocal, isTrue);
+
+      final completedDownloadUpdates = downloadUpdates
+          .where((update) => update.task.taskId == remoteImage.id && update.status == TaskStatus.complete)
+          .length;
+      final repeatedDownload = await container.read(downloadRepositoryProvider).downloadAllAssets([remoteImage]);
+      expect(repeatedDownload, equals([true]), reason: 'A repeated download should be explicitly accepted for re-save');
+      await _waitForDownloadUpdateCount(
+        tester,
+        downloadUpdates,
+        remoteImage.id,
+        TaskStatus.complete,
+        completedDownloadUpdates + 1,
+        reason: 'Expected repeated download to run to completion instead of being silently ignored',
+      );
+
+      await _tapViewerMenuAction(tester, Icons.open_in_browser);
+      await _pumpUntil(tester, () => launchedBrowserUrls.isNotEmpty, timeout: const Duration(seconds: 10));
+      final expectedBrowserUrl =
+          '${Store.get(StoreKey.serverEndpoint).replaceFirst('/api', '')}/photos/${remoteImage.id}';
+      expect(launchedBrowserUrls.single, expectedBrowserUrl);
+      final browserAssetResponse = await _waitForSuccessfulResponse(
+        tester,
+        () => _authenticatedApiGet('/assets/${remoteImage.id}/thumbnail?size=thumbnail&edited=false'),
+      );
+      expect(browserAssetResponse.bodyBytes, isNotEmpty);
+    });
+
     if (_selectedCaseId.isNotEmpty && !_registeredSelectedCase) {
       test(_selectedCaseId, () => fail('No real stack auth test registered for $_selectedCaseId'));
     }
@@ -5663,6 +5812,171 @@ Future<void> _tapBottomSheetAction(WidgetTester tester, Type bottomSheetType, Ic
   expect(actionIcon.hitTestable(), findsWidgets, reason: 'Expected action icon $icon to be tappable');
   await tester.tap(actionIcon.hitTestable().first);
   await _pumpFor(tester, const Duration(milliseconds: 500));
+}
+
+const _sharePlusChannel = MethodChannel('dev.fluttercommunity.plus/share');
+const _legacyUrlLauncherChannel = MethodChannel('plugins.flutter.io/url_launcher');
+
+BasicMessageChannel<Object?> _urlLauncherPigeonChannel(String method) => BasicMessageChannel<Object?>(
+  'dev.flutter.pigeon.url_launcher_android.UrlLauncherApi.$method',
+  const StandardMessageCodec(),
+);
+
+class _ShareInvocation {
+  final List<String> paths;
+  final List<String> mimeTypes;
+  final List<bool> existedWhenShared;
+
+  const _ShareInvocation({required this.paths, required this.mimeTypes, required this.existedWhenShared});
+}
+
+void _recordSharePlusInvocations(List<_ShareInvocation> invocations) {
+  TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(_sharePlusChannel, (
+    call,
+  ) async {
+    if (call.method != 'shareFiles') {
+      return '';
+    }
+
+    final arguments = call.arguments as Map<dynamic, dynamic>;
+    final paths = (arguments['paths'] as List<dynamic>).cast<String>();
+    final mimeTypes = (arguments['mimeTypes'] as List<dynamic>).cast<String>();
+    invocations.add(
+      _ShareInvocation(
+        paths: paths,
+        mimeTypes: mimeTypes,
+        existedWhenShared: paths.map((path) => File(path).existsSync()).toList(growable: false),
+      ),
+    );
+    return '';
+  });
+}
+
+void _clearSharePlusInvocationRecorder() {
+  TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(_sharePlusChannel, null);
+}
+
+void _recordUrlLauncherInvocations(List<String> launchedUrls) {
+  final messenger = TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+  messenger.setMockDecodedMessageHandler<Object?>(_urlLauncherPigeonChannel('canLaunchUrl'), (_) async {
+    return <Object?>[true];
+  });
+  messenger.setMockDecodedMessageHandler<Object?>(_urlLauncherPigeonChannel('launchUrl'), (message) async {
+    final arguments = message! as List<Object?>;
+    launchedUrls.add(arguments.first! as String);
+    return <Object?>[true];
+  });
+  messenger.setMockMethodCallHandler(_legacyUrlLauncherChannel, (call) async {
+    if (call.method == 'canLaunch') {
+      return true;
+    }
+    if (call.method == 'launch') {
+      final arguments = call.arguments as Map<dynamic, dynamic>;
+      launchedUrls.add(arguments['url'] as String);
+      return true;
+    }
+    return false;
+  });
+}
+
+void _clearUrlLauncherInvocationRecorder() {
+  final messenger = TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+  messenger.setMockDecodedMessageHandler<Object?>(_urlLauncherPigeonChannel('canLaunchUrl'), null);
+  messenger.setMockDecodedMessageHandler<Object?>(_urlLauncherPigeonChannel('launchUrl'), null);
+  messenger.setMockMethodCallHandler(_legacyUrlLauncherChannel, null);
+}
+
+Future<void> _waitForShareInvocationCount(WidgetTester tester, List<_ShareInvocation> invocations, int count) async {
+  await _pumpUntil(tester, () => invocations.length >= count, timeout: const Duration(seconds: 30));
+}
+
+void _expectSharedDisplayNames(_ShareInvocation invocation, Set<String> displayNames) {
+  expect(invocation.paths, hasLength(displayNames.length));
+  expect(invocation.mimeTypes, hasLength(displayNames.length));
+  expect(invocation.existedWhenShared, everyElement(isTrue));
+  for (final name in displayNames) {
+    expect(
+      invocation.paths.any((path) => path.endsWith('/$name') || path.endsWith('-$name')),
+      isTrue,
+      reason: 'Expected a shared file path for $name in ${invocation.paths.join(', ')}',
+    );
+  }
+}
+
+Future<void> _showViewerControls(WidgetTester tester, ProviderContainer container) async {
+  await pumpUntilFound(tester, find.byType(AssetViewer), timeout: const Duration(seconds: 30));
+  container.read(assetViewerProvider.notifier).setControls(true);
+  await _pumpFor(tester, const Duration(milliseconds: 300));
+}
+
+Future<void> _tapViewerActionIcon(WidgetTester tester, IconData icon) async {
+  final actionIcon = find.descendant(of: find.byType(AssetViewer), matching: find.byIcon(icon));
+  await pumpUntilFound(tester, actionIcon, timeout: const Duration(seconds: 30));
+  expect(actionIcon.hitTestable(), findsWidgets, reason: 'Expected viewer action icon $icon to be tappable');
+  await tester.tap(actionIcon.hitTestable().first, warnIfMissed: false);
+  await _pumpFor(tester, const Duration(milliseconds: 500));
+}
+
+Future<void> _tapViewerMenuAction(WidgetTester tester, IconData icon) async {
+  final menuButton = find.descendant(of: find.byType(AssetViewer), matching: find.byIcon(Icons.more_vert_rounded));
+  await pumpUntilFound(tester, menuButton, timeout: const Duration(seconds: 30));
+  expect(menuButton.hitTestable(), findsWidgets, reason: 'Expected viewer menu button to be tappable');
+  await tester.tap(menuButton.hitTestable().last, warnIfMissed: false);
+  await _pumpFor(tester, const Duration(milliseconds: 500));
+
+  final actionIcon = find.byIcon(icon);
+  await pumpUntilFound(tester, actionIcon, timeout: const Duration(seconds: 30));
+  expect(actionIcon.hitTestable(), findsWidgets, reason: 'Expected viewer menu action icon $icon to be tappable');
+  await tester.tap(actionIcon.hitTestable().last, warnIfMissed: false);
+  await _pumpFor(tester, const Duration(milliseconds: 500));
+}
+
+Future<TaskRecord> _waitForDownloadRecordStatus(
+  WidgetTester tester,
+  String taskId,
+  TaskStatus status, {
+  required String reason,
+}) async {
+  TaskRecord? latest;
+  Object? lastError;
+  final end = DateTime.now().add(const Duration(seconds: 90));
+  while (DateTime.now().isBefore(end)) {
+    try {
+      latest = await FileDownloader().database.recordForId(taskId);
+      if (latest?.status == status) {
+        return latest!;
+      }
+    } catch (error) {
+      lastError = error;
+    }
+    await _pumpFor(tester, const Duration(milliseconds: 500));
+  }
+
+  fail('$reason; latest record=$latest; last error=$lastError');
+}
+
+Future<void> _waitForDownloadUpdateCount(
+  WidgetTester tester,
+  List<TaskStatusUpdate> updates,
+  String taskId,
+  TaskStatus status,
+  int count, {
+  required String reason,
+}) async {
+  final end = DateTime.now().add(const Duration(seconds: 90));
+  while (DateTime.now().isBefore(end)) {
+    final currentCount = updates.where((update) => update.task.taskId == taskId && update.status == status).length;
+    if (currentCount >= count) {
+      return;
+    }
+    await _pumpFor(tester, const Duration(milliseconds: 500));
+  }
+
+  final seenStatuses = updates
+      .where((update) => update.task.taskId == taskId)
+      .map((update) => update.status.name)
+      .toList(growable: false);
+  fail('$reason; saw statuses=$seenStatuses');
 }
 
 Future<void> _expandBottomSheet(WidgetTester tester, Type bottomSheetType) async {
