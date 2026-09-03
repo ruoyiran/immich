@@ -77,8 +77,11 @@ Future<void> applyEdits(WidgetRef ref, String remoteId, List<AssetEdit> edits) a
 
   bool isCurrentId(dynamic data) => data is Map && (data['asset'] as Map?)?['id'] == remoteId;
   await ref.read(assetServiceProvider).applyEdits(remoteId, edits);
+  if (!ref.read(websocketProvider).isConnected) {
+    return;
+  }
   await Future.any([
     websocket.waitForEvent('AssetEditReadyV1', isCurrentId, const .new(seconds: 10)),
     websocket.waitForEvent('AssetEditReadyV2', isCurrentId, const .new(seconds: 10)),
-  ]).catchError((_) {});
+  ]).timeout(const .new(seconds: 10)).catchError((_) {});
 }

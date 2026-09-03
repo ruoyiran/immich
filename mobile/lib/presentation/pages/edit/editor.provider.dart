@@ -61,6 +61,10 @@ class EditorProvider extends Notifier<EditorState> {
     state = state.copyWith(isApplyingEdits: isApplyingEdits);
   }
 
+  void markSaved() {
+    state = state.copyWith(isApplyingEdits: false, hasUnsavedEdits: false);
+  }
+
   void setCrop(Rect crop) {
     state = state.copyWith(crop: crop, hasUnsavedEdits: true);
   }

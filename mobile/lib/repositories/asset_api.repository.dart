@@ -84,8 +84,14 @@ class AssetApiRepository extends ApiRepository {
     return _api.updateAsset(assetId, UpdateAssetDto(rating: Optional.present(rating)));
   }
 
-  Future<AssetEditsResponseDto?> editAsset(String assetId, List<AssetEdit> edits) {
-    return _api.editAsset(assetId, AssetEditsCreateDto(edits: edits.map((e) => e.toApi()).toList()));
+  Future<void> editAsset(String assetId, List<AssetEdit> edits) async {
+    final response = await _api.editAssetWithHttpInfo(
+      assetId,
+      AssetEditsCreateDto(edits: edits.map((e) => e.toApi()).toList()),
+    );
+    if (response.statusCode >= 400) {
+      throw ApiException(response.statusCode, response.body);
+    }
   }
 
   Future<void> removeEdits(String assetId) async {
