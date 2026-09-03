@@ -38,7 +38,9 @@ import 'package:immich_mobile/main.dart' as app;
 import 'package:immich_mobile/models/search/search_filter.model.dart';
 import 'package:immich_mobile/pages/backup/drift_backup.page.dart';
 import 'package:immich_mobile/pages/backup/drift_backup_album_selection.page.dart';
+import 'package:immich_mobile/pages/backup/drift_backup_asset_detail.page.dart';
 import 'package:immich_mobile/pages/backup/drift_backup_options.page.dart';
+import 'package:immich_mobile/pages/backup/drift_upload_detail.page.dart';
 import 'package:immich_mobile/pages/library/locked/pin_auth.page.dart';
 import 'package:immich_mobile/pages/login/login.page.dart';
 import 'package:immich_mobile/presentation/pages/dev/main_timeline.page.dart';
@@ -165,6 +167,18 @@ const _backupSettingsAlbumName = String.fromEnvironment(
 const _backupSettingsAssetName = String.fromEnvironment(
   'IMMICH_E2E_BACKUP_SETTINGS_ASSET_NAME',
   defaultValue: 'immich-e2e-backup-settings-036.jpg',
+);
+const _uploadQueueAlbumName = String.fromEnvironment(
+  'IMMICH_E2E_UPLOAD_QUEUE_ALBUM_NAME',
+  defaultValue: 'ImmichE2EUploadQueue037',
+);
+const _uploadQueueSuccessAssetName = String.fromEnvironment(
+  'IMMICH_E2E_UPLOAD_QUEUE_SUCCESS_ASSET_NAME',
+  defaultValue: 'immich-e2e-upload-queue-037-success.jpg',
+);
+const _uploadQueueRetryAssetName = String.fromEnvironment(
+  'IMMICH_E2E_UPLOAD_QUEUE_RETRY_ASSET_NAME',
+  defaultValue: 'immich-e2e-upload-queue-037-retry.jpg',
 );
 
 var _registeredSelectedCase = false;
@@ -3436,6 +3450,216 @@ void main() async {
       },
     );
 
+    _realStackSessionTest(
+      'MOB-UI-037-$_caseSuffix',
+      'shows upload queue progress, details, failure, retry, and cancellation',
+      (tester) async {
+        tester.view.devicePixelRatio = 1.0;
+        tester.view.physicalSize = const Size(430, 932);
+        addTearDown(tester.view.reset);
+
+        await _loadAuthenticatedApp(tester, overrideCancellation: true, closeDriftOnDispose: false);
+        final container = _containerOfApp(tester);
+        final drift = container.read(driftProvider);
+        final albumRepository = container.read(localAlbumRepository);
+        final router = container.read(appRouterProvider);
+        final apiService = container.read(apiServiceProvider);
+        final user = Store.tryGet(StoreKey.currentUser);
+        expect(user, isNotNull);
+
+        final originalEndpoint = Store.get(StoreKey.serverEndpoint);
+        final originalServerUrl = Store.get(StoreKey.serverUrl);
+        final originalSelections = await _albumBackupSelections(container);
+        final originalBackupEnabled = SettingsRepository.instance.appConfig.backup.enabled;
+        final originalCellularPhotos = SettingsRepository.instance.appConfig.backup.useCellularForPhotos;
+        final originalCellularVideos = SettingsRepository.instance.appConfig.backup.useCellularForVideos;
+        final originalRequireCharging = SettingsRepository.instance.appConfig.backup.requireCharging;
+        final originalSyncAlbums = SettingsRepository.instance.appConfig.backup.syncAlbums;
+        final beforeSuccessIds = await _serverAssetIdsByOriginalFilename(
+          apiService.searchApi,
+          _uploadQueueSuccessAssetName,
+        ).timeout(const Duration(seconds: 30));
+        final beforeRetryIds = await _serverAssetIdsByOriginalFilename(
+          apiService.searchApi,
+          _uploadQueueRetryAssetName,
+        ).timeout(const Duration(seconds: 30));
+
+        addTearDown(() async {
+          try {
+            container.read(driftBackupProvider.notifier).stopForegroundBackup(reason: 'MOB-UI-037 cleanup');
+          } catch (_) {
+            // The ProviderScope may already have disposed the notifier.
+          }
+          await Store.put(StoreKey.serverEndpoint, originalEndpoint);
+          await Store.put(StoreKey.serverUrl, originalServerUrl);
+          apiService.setEndpoint(originalEndpoint);
+          await apiService.updateHeaders();
+          await SettingsRepository.instance.write(SettingsKey.backupEnabled, originalBackupEnabled);
+          await SettingsRepository.instance.write(SettingsKey.backupUseCellularForPhotos, originalCellularPhotos);
+          await SettingsRepository.instance.write(SettingsKey.backupUseCellularForVideos, originalCellularVideos);
+          await SettingsRepository.instance.write(SettingsKey.backupRequireCharging, originalRequireCharging);
+          await SettingsRepository.instance.write(SettingsKey.backupSyncAlbums, originalSyncAlbums);
+          await _restoreAlbumBackupSelections(albumRepository, originalSelections);
+
+          final afterSuccessIds = await _serverAssetIdsByOriginalFilename(
+            apiService.searchApi,
+            _uploadQueueSuccessAssetName,
+          );
+          for (final remoteId in afterSuccessIds.difference(beforeSuccessIds)) {
+            await _deleteTestAssetBestEffort(apiService.assetsApi, remoteId);
+          }
+          final afterRetryIds = await _serverAssetIdsByOriginalFilename(
+            apiService.searchApi,
+            _uploadQueueRetryAssetName,
+          );
+          for (final remoteId in afterRetryIds.difference(beforeRetryIds)) {
+            await _deleteTestAssetBestEffort(apiService.assetsApi, remoteId);
+          }
+          await drift.close();
+        });
+
+        await SettingsRepository.instance.write(SettingsKey.backupEnabled, false);
+        await SettingsRepository.instance.write(SettingsKey.backupUseCellularForPhotos, true);
+        await SettingsRepository.instance.write(SettingsKey.backupUseCellularForVideos, true);
+        await SettingsRepository.instance.write(SettingsKey.backupRequireCharging, false);
+        await SettingsRepository.instance.write(SettingsKey.backupSyncAlbums, false);
+        await _clearAlbumBackupSelections(container);
+
+        final albums = await _waitForBackupAlbumFixtures(tester, container, requiredNames: {_uploadQueueAlbumName});
+        final uploadQueueAlbum = _singleAlbumNamed(albums, _uploadQueueAlbumName);
+        await albumRepository.upsert(uploadQueueAlbum.copyWith(backupSelection: BackupSelection.selected));
+        await container.read(backupAlbumProvider.notifier).getAll();
+
+        final successAsset = await _waitForLocalAssetByName(container, _uploadQueueSuccessAssetName, tester);
+        final retryAsset = await _waitForLocalAssetByName(container, _uploadQueueRetryAssetName, tester);
+        expect(successAsset.localId, isNotNull);
+        expect(retryAsset.localId, isNotNull);
+        final targetLocalIds = {successAsset.localId!, retryAsset.localId!};
+
+        final counts = await container.read(foregroundUploadServiceProvider).getBackupCounts(user!.id);
+        expect(counts.remainder, greaterThanOrEqualTo(2));
+
+        unawaited(router.push(const DriftBackupAssetDetailRoute()));
+        await _pumpUntil(
+          tester,
+          () => find.byType(DriftBackupAssetDetailPage).evaluate().isNotEmpty,
+          timeout: const Duration(seconds: 30),
+        );
+        await _ensureUploadQueueTextVisible(tester, _uploadQueueSuccessAssetName, pageType: DriftBackupAssetDetailPage);
+        await _ensureUploadQueueTextVisible(tester, _uploadQueueRetryAssetName, pageType: DriftBackupAssetDetailPage);
+        await _ensureUploadQueueTextVisible(tester, _uploadQueueAlbumName, pageType: DriftBackupAssetDetailPage);
+        await router.maybePop();
+        await _pumpUntil(
+          tester,
+          () => find.byType(DriftBackupAssetDetailPage).evaluate().isEmpty,
+          timeout: const Duration(seconds: 30),
+        );
+
+        unawaited(router.push(const DriftUploadDetailRoute()));
+        await _pumpUntil(
+          tester,
+          () => find.byType(DriftUploadDetailPage).evaluate().isNotEmpty,
+          timeout: const Duration(seconds: 30),
+        );
+        expect(find.text('upload_details'.tr()), findsWidgets);
+
+        final realUpload = container.read(driftBackupProvider.notifier).startForegroundBackup(user.id);
+        final progressItems = await _waitForUploadItems(
+          tester,
+          container,
+          (items) {
+            final item = items[retryAsset.localId!];
+            return item != null && item.isFailed != true && item.progress < 1.0;
+          },
+          reason: 'Expected the large retry asset to appear as an active upload item before cancellation',
+          timeout: const Duration(seconds: 60),
+        );
+        final activeRetry = progressItems[retryAsset.localId!]!;
+        expect(activeRetry.filename, _uploadQueueRetryAssetName);
+        expect(activeRetry.fileSize, greaterThan(1024 * 1024));
+        expect(activeRetry.progress, inInclusiveRange(0.0, 1.0));
+        await _ensureUploadQueueTextVisible(tester, _uploadQueueRetryAssetName);
+        await tester.tap(find.textContaining(_uploadQueueRetryAssetName).first);
+        await pumpUntilFound(tester, find.byType(FileDetailDialog), timeout: const Duration(seconds: 30));
+        await pumpUntilFound(
+          tester,
+          find.textContaining(_uploadQueueRetryAssetName),
+          timeout: const Duration(seconds: 30),
+        );
+        expect(find.textContaining(retryAsset.localId!), findsWidgets);
+        expect(find.textContaining('file_size'.tr()), findsWidgets);
+        await tester.tap(find.text('close'.tr()).last);
+        await _pumpUntil(
+          tester,
+          () => find.byType(FileDetailDialog).evaluate().isEmpty,
+          timeout: const Duration(seconds: 30),
+        );
+
+        container.read(driftBackupProvider.notifier).stopForegroundBackup(reason: 'MOB-UI-037 cancel progress probe');
+        await _waitForUploadItems(
+          tester,
+          container,
+          (items) => items.isEmpty,
+          reason: 'Expected cancelling the foreground upload to clear upload detail items',
+        );
+        await realUpload.timeout(const Duration(minutes: 2));
+
+        await Store.put(StoreKey.serverEndpoint, _apiEndpoint(_badServerUrl));
+        await Store.put(StoreKey.serverUrl, _apiEndpoint(_badServerUrl));
+        final failingUpload = container.read(driftBackupProvider.notifier).startForegroundBackup(user.id);
+        final failedItems = await _waitForUploadItems(
+          tester,
+          container,
+          (items) => targetLocalIds.any((id) => items[id]?.isFailed == true),
+          reason: 'Expected an upload failure when the server endpoint is unreachable',
+          timeout: const Duration(seconds: 60),
+        );
+        final failedStatus = targetLocalIds
+            .map((id) => failedItems[id])
+            .whereType<DriftUploadStatus>()
+            .firstWhere((item) => item.isFailed == true);
+        expect(failedStatus.error, isNotNull);
+        final failureNeedle = failedStatus.error!.length > 24
+            ? failedStatus.error!.substring(0, 24)
+            : failedStatus.error!;
+        await _ensureUploadQueueTextVisible(tester, failureNeedle);
+        expect(find.byIcon(Icons.error_rounded), findsWidgets);
+        await failingUpload.timeout(const Duration(minutes: 2));
+
+        container.read(driftBackupProvider.notifier).stopForegroundBackup(reason: 'MOB-UI-037 retry after failure');
+        await Store.put(StoreKey.serverEndpoint, originalEndpoint);
+        await Store.put(StoreKey.serverUrl, originalServerUrl);
+        apiService.setEndpoint(originalEndpoint);
+        await apiService.updateHeaders();
+
+        await container
+            .read(driftBackupProvider.notifier)
+            .startForegroundBackup(user.id)
+            .timeout(const Duration(minutes: 5));
+        final successIds = await _waitForServerAssetIdsByOriginalFilename(
+          tester,
+          apiService.searchApi,
+          _uploadQueueSuccessAssetName,
+          (ids) => ids.difference(beforeSuccessIds).length == 1,
+          reason: 'Expected the success upload asset to be created exactly once',
+          timeout: const Duration(seconds: 90),
+        );
+        final retryIds = await _waitForServerAssetIdsByOriginalFilename(
+          tester,
+          apiService.searchApi,
+          _uploadQueueRetryAssetName,
+          (ids) => ids.difference(beforeRetryIds).length == 1,
+          reason: 'Expected the retry upload asset to be created exactly once',
+          timeout: const Duration(seconds: 90),
+        );
+
+        final duplicateRemoteId = await _uploadSingleAssetToServer(container, retryAsset);
+        expect(retryIds.difference(beforeRetryIds), contains(duplicateRemoteId));
+        expect(await _serverAssetIdsByOriginalFilename(apiService.searchApi, _uploadQueueRetryAssetName), retryIds);
+        expect(successIds.difference(beforeSuccessIds), hasLength(1));
+      },
+    );
+
     if (_selectedCaseId.isNotEmpty && !_registeredSelectedCase) {
       test(_selectedCaseId, () => fail('No real stack auth test registered for $_selectedCaseId'));
     }
@@ -4637,6 +4861,48 @@ Future<void> _waitForBackupSetting<T>(WidgetTester tester, SettingsKey<T> settin
     () => SettingsRepository.instance.appConfig.read(settingKey) == expected,
     timeout: const Duration(seconds: 10),
   );
+}
+
+Future<void> _ensureUploadQueueTextVisible(
+  WidgetTester tester,
+  String text, {
+  Type pageType = DriftUploadDetailPage,
+}) async {
+  final textFinder = find.textContaining(text);
+  if (textFinder.evaluate().isNotEmpty) {
+    await tester.ensureVisible(textFinder.first);
+    await _pumpFor(tester, const Duration(milliseconds: 200));
+    return;
+  }
+
+  final scrollable = find.descendant(of: find.byType(pageType), matching: find.byType(Scrollable));
+  expect(scrollable, findsWidgets, reason: 'Expected $pageType to be scrollable before looking for "$text"');
+  try {
+    await tester.scrollUntilVisible(textFinder, 450, scrollable: scrollable.first, maxScrolls: 20);
+  } catch (_) {
+    await tester.scrollUntilVisible(textFinder, -450, scrollable: scrollable.first, maxScrolls: 20);
+  }
+  await _pumpFor(tester, const Duration(milliseconds: 200));
+}
+
+Future<Map<String, DriftUploadStatus>> _waitForUploadItems(
+  WidgetTester tester,
+  ProviderContainer container,
+  bool Function(Map<String, DriftUploadStatus> items) matches, {
+  required String reason,
+  Duration timeout = const Duration(seconds: 30),
+}) async {
+  var latest = const <String, DriftUploadStatus>{};
+  final end = DateTime.now().add(timeout);
+  while (DateTime.now().isBefore(end)) {
+    latest = Map<String, DriftUploadStatus>.from(container.read(driftBackupProvider).uploadItems);
+    if (matches(latest)) {
+      return latest;
+    }
+    await _pumpFor(tester, const Duration(milliseconds: 300));
+  }
+
+  fail('$reason; latest upload items=${latest.values.toList()}');
 }
 
 Future<void> _seedUpgradeState(WidgetTester tester) async {
