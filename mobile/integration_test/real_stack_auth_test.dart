@@ -3068,7 +3068,7 @@ void main() async {
           expectedNavigationType: NavigationBar,
         );
 
-        unawaited(router.pushPath('/missing-mobile-route-034'));
+        await router.navigatePath('/missing-mobile-route-034');
         await _pumpFor(tester, const Duration(seconds: 1));
         await _expectPrimaryNavigationState(
           tester,
