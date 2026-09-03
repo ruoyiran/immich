@@ -65,6 +65,7 @@ import 'package:immich_mobile/presentation/widgets/album/album_selector.widget.d
 import 'package:immich_mobile/presentation/widgets/asset_viewer/asset_details/date_time_details.widget.dart';
 import 'package:immich_mobile/presentation/widgets/asset_viewer/asset_details/location_details.widget.dart';
 import 'package:immich_mobile/presentation/widgets/asset_viewer/asset_details/rating_details.widget.dart';
+import 'package:immich_mobile/presentation/widgets/asset_viewer/asset_stack.widget.dart';
 import 'package:immich_mobile/presentation/widgets/asset_viewer/asset_viewer.page.dart';
 import 'package:immich_mobile/presentation/widgets/asset_viewer/ocr_overlay.widget.dart';
 import 'package:immich_mobile/presentation/widgets/asset_viewer/video_viewer.widget.dart';
@@ -5241,6 +5242,285 @@ void main() async {
       await timeline.dispose();
     });
 
+    _realStackSessionTest('MOB-UI-046-$_caseSuffix', 'creates browses promotes removes and splits stacks', (
+      tester,
+    ) async {
+      tester.view.devicePixelRatio = 1.0;
+      tester.view.physicalSize = const Size(430, 932);
+      addTearDown(tester.view.reset);
+
+      await _loadAuthenticatedApp(tester, overrideCancellation: true, closeDriftOnDispose: false);
+      var container = _containerOfApp(tester);
+      var apiService = container.read(apiServiceProvider);
+      var assetsApi = apiService.assetsApi;
+      var stacksApi = apiService.stacksApi;
+      final createdRemoteAssetIds = <String>[];
+      String? stackId;
+
+      addTearDown(() async {
+        try {
+          container.read(multiSelectProvider.notifier).reset();
+        } catch (_) {
+          // ProviderScope may already be disposed when an earlier expectation fails.
+        }
+        final id = stackId;
+        if (id != null) {
+          try {
+            await stacksApi.deleteStack(id);
+          } catch (_) {
+            // The test body may already have unstacked the temporary stack.
+          }
+        }
+        for (final assetId in createdRemoteAssetIds) {
+          await _deleteTestAssetBestEffort(assetsApi, assetId);
+        }
+      });
+
+      await container.read(syncApiRepositoryProvider).deleteSyncAck(_allReplayableSyncAckTypes);
+      await Store.delete(StoreKey.syncMigrationStatus);
+      await container.read(syncStreamRepositoryProvider).reset();
+      var syncSuccess = await container.read(syncStreamServiceProvider).sync();
+      expect(syncSuccess, isTrue);
+
+      final user = Store.tryGet(StoreKey.currentUser);
+      expect(user, isNotNull);
+      final runToken = DateTime.now().toUtc().microsecondsSinceEpoch.toString();
+      final baseCreatedAt = DateTime.now().toUtc();
+      for (var index = 0; index < 4; index++) {
+        final assetId = await _uploadGeneratedJpegAsSecondClient(
+          'immich-e2e-stack-046-$runToken-$index.jpg',
+          baseCreatedAt.add(Duration(microseconds: index)),
+          sourceMetadata: {
+            'device_make': 'ImmichE2E',
+            'device_model': 'Stack046',
+            'width': 72 + index,
+            'height': 72 + index,
+          },
+        );
+        createdRemoteAssetIds.add(assetId);
+      }
+
+      for (final assetId in createdRemoteAssetIds) {
+        await _waitForSuccessfulResponse(
+          tester,
+          () => assetsApi.viewAssetWithHttpInfo(assetId, size: api.AssetMediaSize.thumbnail),
+          timeout: const Duration(minutes: 3),
+        );
+      }
+
+      syncSuccess = await container.read(syncStreamServiceProvider).sync();
+      expect(syncSuccess, isTrue);
+      await pumpUntilFound(tester, find.byType(Timeline), timeout: const Duration(seconds: 60));
+
+      var timeline = container.read(timelineFactoryProvider).main([user!.id]);
+      await _expectTimelineAssetSet(
+        tester,
+        timeline,
+        includes: createdRemoteAssetIds.toSet(),
+        excludes: const {},
+        reason: 'Expected all 046 stack fixture assets to start visible in the timeline',
+      );
+      for (final assetId in createdRemoteAssetIds) {
+        await _waitForRemoteAssetState(
+          tester,
+          container,
+          assetId,
+          (asset) => asset.isRemoteOnly && asset.isImage && asset.stackId == null && !asset.isTrashed,
+          reason: 'Expected 046 asset $assetId to start unstacked and not deleted',
+        );
+      }
+
+      await _selectTimelineAssetsById(tester, container, createdRemoteAssetIds);
+      expect(_bottomSheetIcon(GeneralBottomSheet, Icons.filter_none_rounded), findsOneWidget);
+      await _tapBottomSheetAction(tester, GeneralBottomSheet, Icons.filter_none_rounded);
+      await _waitForMultiSelectCount(tester, container, 0, timeout: const Duration(seconds: 30));
+
+      final createdStack = await _waitForServerStackWithMembers(
+        tester,
+        stacksApi,
+        createdRemoteAssetIds.toSet(),
+        reason: 'Expected server stack to contain exactly the 046 assets after UI stack creation',
+      );
+      stackId = createdStack.id;
+      var primaryAssetId = createdStack.primaryAssetId;
+      expect(createdRemoteAssetIds, contains(primaryAssetId));
+
+      syncSuccess = await container.read(syncStreamServiceProvider).sync();
+      expect(syncSuccess, isTrue);
+      await _waitForLocalStackMembership(
+        tester,
+        container,
+        stackId,
+        expectedPrimaryAssetId: primaryAssetId,
+        stackedAssetIds: createdRemoteAssetIds.toSet(),
+        unstackedAssetIds: const {},
+        reason: 'Expected local DB to record the newly created 046 stack',
+      );
+      await _expectTimelineAssetSet(
+        tester,
+        timeline,
+        includes: {primaryAssetId},
+        excludes: createdRemoteAssetIds.where((assetId) => assetId != primaryAssetId).toSet(),
+        reason: 'Expected main timeline to collapse 046 stack members behind the primary asset',
+      );
+
+      final primaryAsset = await _waitForRemoteAssetState(
+        tester,
+        container,
+        primaryAssetId,
+        (asset) => asset.stackId == stackId,
+        reason: 'Expected local 046 primary asset to carry the stack id',
+      );
+      await _openTimelineAsset(tester, primaryAsset);
+      await _showViewerControls(tester, container);
+      await _pumpUntilFoundWithReason(
+        tester,
+        find.byType(AssetStackRow),
+        reason: 'Expected the viewer to show the 046 stack member strip',
+        timeout: const Duration(seconds: 30),
+      );
+      final browsedStack = await container.read(assetServiceProvider).getStack(primaryAsset);
+      expect(browsedStack.map((asset) => asset.id).toSet(), createdRemoteAssetIds.toSet());
+      expect(browsedStack.first.id, primaryAssetId);
+      final browsedAsset = browsedStack.firstWhere((asset) => asset.id != primaryAssetId);
+      final browsedTile = find.byKey(ValueKey(browsedAsset.heroTag));
+      await pumpUntilFound(tester, browsedTile, timeout: const Duration(seconds: 30));
+      await tester.tap(browsedTile.hitTestable().first, warnIfMissed: false);
+      await _pumpUntil(
+        tester,
+        () => container.read(assetViewerProvider).currentAsset?.id == browsedAsset.id,
+        timeout: const Duration(seconds: 20),
+      );
+
+      final updatedStack = await stacksApi.updateStack(
+        stackId,
+        api.StackUpdateDto(primaryAssetId: api.Optional.present(browsedAsset.id)),
+      );
+      expect(updatedStack, isNotNull);
+      expect(updatedStack!.primaryAssetId, browsedAsset.id);
+      primaryAssetId = browsedAsset.id;
+
+      syncSuccess = await container.read(syncStreamServiceProvider).sync();
+      expect(syncSuccess, isTrue);
+      await _waitForLocalStackMembership(
+        tester,
+        container,
+        stackId,
+        expectedPrimaryAssetId: primaryAssetId,
+        stackedAssetIds: createdRemoteAssetIds.toSet(),
+        unstackedAssetIds: const {},
+        reason: 'Expected local 046 stack primary asset to update after server primary change',
+      );
+
+      await container.read(appRouterProvider).maybePop();
+      await pumpUntilFound(tester, find.byType(MainTimelinePage), timeout: const Duration(seconds: 30));
+      await _expectTimelineAssetSet(
+        tester,
+        timeline,
+        includes: {primaryAssetId},
+        excludes: createdRemoteAssetIds.where((assetId) => assetId != primaryAssetId).toSet(),
+        reason: 'Expected timeline to swap the 046 visible primary after primary update',
+      );
+
+      final removedAssetId = createdRemoteAssetIds.firstWhere((assetId) => assetId != primaryAssetId);
+      await stacksApi.removeAssetFromStack(removedAssetId, stackId);
+      final remainingStackAssetIds = createdRemoteAssetIds.where((assetId) => assetId != removedAssetId).toSet();
+      await _waitForServerStackWithMembers(
+        tester,
+        stacksApi,
+        remainingStackAssetIds,
+        expectedPrimaryAssetId: primaryAssetId,
+        reason: 'Expected server stack to drop the removed 046 member without deleting it',
+      );
+      syncSuccess = await container.read(syncStreamServiceProvider).sync();
+      expect(syncSuccess, isTrue);
+      await _waitForLocalStackMembership(
+        tester,
+        container,
+        stackId,
+        expectedPrimaryAssetId: primaryAssetId,
+        stackedAssetIds: remainingStackAssetIds,
+        unstackedAssetIds: {removedAssetId},
+        reason: 'Expected local 046 stack membership to match server after member removal',
+      );
+      await _waitForAssetInfoState(
+        tester,
+        assetsApi,
+        removedAssetId,
+        (asset) => !asset.isTrashed && asset.stack.orElse(null) == null,
+        reason: 'Expected removing a 046 stack member to keep the asset alive and unstacked on the server',
+      );
+      await _expectTimelineAssetSet(
+        tester,
+        timeline,
+        includes: {primaryAssetId, removedAssetId},
+        excludes: remainingStackAssetIds.where((assetId) => assetId != primaryAssetId).toSet(),
+        reason: 'Expected removed 046 member to return to the timeline while the remaining stack stays collapsed',
+      );
+
+      await _selectTimelineAssetsById(tester, container, [primaryAssetId]);
+      expect(_bottomSheetIcon(GeneralBottomSheet, Icons.layers_clear_outlined), findsOneWidget);
+      await _tapBottomSheetAction(tester, GeneralBottomSheet, Icons.layers_clear_outlined);
+      await _waitForMultiSelectCount(tester, container, 0, timeout: const Duration(seconds: 30));
+      await _waitForServerStackGone(
+        tester,
+        stacksApi,
+        stackId,
+        reason: 'Expected server stack to be gone after UI unstack',
+      );
+      syncSuccess = await container.read(syncStreamServiceProvider).sync();
+      expect(syncSuccess, isTrue);
+      await _waitForLocalStackMembership(
+        tester,
+        container,
+        stackId,
+        expectedPrimaryAssetId: null,
+        stackedAssetIds: const {},
+        unstackedAssetIds: createdRemoteAssetIds.toSet(),
+        reason: 'Expected local 046 stack relationship to be fully cleared after unstack',
+      );
+      await _expectTimelineAssetSet(
+        tester,
+        timeline,
+        includes: createdRemoteAssetIds.toSet(),
+        excludes: const {},
+        reason: 'Expected all 046 assets to remain in the timeline after full unstack',
+      );
+
+      await timeline.dispose();
+      await tester.pumpWidget(const SizedBox.shrink());
+      await _pumpFor(tester, const Duration(milliseconds: 500));
+      await _loadAppPreservingStore(tester, overrideCancellation: true, closeDriftOnDispose: false);
+      await _waitForAccessToken(tester);
+      await _waitForCurrentUser(_email, tester);
+      container = _containerOfApp(tester);
+      apiService = container.read(apiServiceProvider);
+      assetsApi = apiService.assetsApi;
+      stacksApi = apiService.stacksApi;
+      await _dismissFeatureMessageIfVisible(tester);
+
+      syncSuccess = await container.read(syncStreamServiceProvider).sync();
+      expect(syncSuccess, isTrue);
+      timeline = container.read(timelineFactoryProvider).main([user.id]);
+      await _waitForLocalStackMembership(
+        tester,
+        container,
+        stackId,
+        expectedPrimaryAssetId: null,
+        stackedAssetIds: const {},
+        unstackedAssetIds: createdRemoteAssetIds.toSet(),
+        reason: 'Expected 046 unstacked state to persist after app restart',
+      );
+      await _expectTimelineAssetSet(
+        tester,
+        timeline,
+        includes: createdRemoteAssetIds.toSet(),
+        excludes: const {},
+        reason: 'Expected all 046 assets to remain visible after restart',
+      );
+      await timeline.dispose();
+    });
+
     if (_selectedCaseId.isNotEmpty && !_registeredSelectedCase) {
       test(_selectedCaseId, () => fail('No real stack auth test registered for $_selectedCaseId'));
     }
@@ -8141,6 +8421,112 @@ Future<RemoteAsset> _waitForRemoteAssetState(
 
   fail('$reason; latest local asset=$latest');
 }
+
+Future<api.StackResponseDto> _waitForServerStackWithMembers(
+  WidgetTester tester,
+  api.StacksApi stacksApi,
+  Set<String> expectedAssetIds, {
+  String? expectedPrimaryAssetId,
+  required String reason,
+}) async {
+  var latest = const <api.StackResponseDto>[];
+  Object? lastError;
+  final end = DateTime.now().add(const Duration(seconds: 60));
+  while (DateTime.now().isBefore(end)) {
+    try {
+      latest = await stacksApi.searchStacks() ?? const <api.StackResponseDto>[];
+      for (final stack in latest) {
+        final ids = _stackDtoAssetIds(stack);
+        if (ids.length == expectedAssetIds.length &&
+            ids.containsAll(expectedAssetIds) &&
+            (expectedPrimaryAssetId == null || stack.primaryAssetId == expectedPrimaryAssetId)) {
+          return stack;
+        }
+      }
+    } catch (error) {
+      lastError = error;
+    }
+    await _pumpFor(tester, const Duration(milliseconds: 500));
+  }
+
+  final observed = latest
+      .map((stack) => {'id': stack.id, 'primaryAssetId': stack.primaryAssetId, 'assetIds': _stackDtoAssetIds(stack)})
+      .toList();
+  fail('$reason; latest server stacks=$observed; last error=$lastError');
+}
+
+Future<void> _waitForServerStackGone(
+  WidgetTester tester,
+  api.StacksApi stacksApi,
+  String stackId, {
+  required String reason,
+}) async {
+  api.StackResponseDto? latest;
+  Object? lastError;
+  final end = DateTime.now().add(const Duration(seconds: 60));
+  while (DateTime.now().isBefore(end)) {
+    try {
+      latest = await stacksApi.getStack(stackId);
+      if (latest == null) {
+        return;
+      }
+    } catch (error) {
+      lastError = error;
+      if (error is api.ApiException && error.code == HttpStatus.notFound) {
+        return;
+      }
+    }
+    await _pumpFor(tester, const Duration(milliseconds: 500));
+  }
+
+  fail('$reason; latest server stack=$latest; last error=$lastError');
+}
+
+Future<void> _waitForLocalStackMembership(
+  WidgetTester tester,
+  ProviderContainer container,
+  String stackId, {
+  required String? expectedPrimaryAssetId,
+  required Set<String> stackedAssetIds,
+  required Set<String> unstackedAssetIds,
+  required String reason,
+}) async {
+  final drift = container.read(driftProvider);
+  final remoteAssets = container.read(remoteAssetRepositoryProvider);
+  final allAssetIds = {...stackedAssetIds, ...unstackedAssetIds};
+  var latestStackExists = false;
+  String? latestPrimaryAssetId;
+  Map<String, String?> latestAssignments = const {};
+  final end = DateTime.now().add(const Duration(seconds: 60));
+
+  while (DateTime.now().isBefore(end)) {
+    final stackRows = await drift
+        .customSelect(
+          'SELECT primary_asset_id FROM stack_entity WHERE id = ?',
+          variables: [Variable.withString(stackId)],
+        )
+        .get();
+    latestStackExists = stackRows.isNotEmpty;
+    latestPrimaryAssetId = stackRows.isEmpty ? null : stackRows.single.read<String>('primary_asset_id');
+    latestAssignments = <String, String?>{};
+    for (final assetId in allAssetIds) {
+      latestAssignments[assetId] = (await remoteAssets.get(assetId))?.stackId;
+    }
+    final stackMatches = expectedPrimaryAssetId == null
+        ? !latestStackExists
+        : latestStackExists && latestPrimaryAssetId == expectedPrimaryAssetId;
+    final stackedMatches = stackedAssetIds.every((assetId) => latestAssignments[assetId] == stackId);
+    final unstackedMatches = unstackedAssetIds.every((assetId) => latestAssignments[assetId] == null);
+    if (stackMatches && stackedMatches && unstackedMatches) {
+      return;
+    }
+    await _pumpFor(tester, const Duration(milliseconds: 500));
+  }
+
+  fail('$reason; stackExists=$latestStackExists primary=$latestPrimaryAssetId assignments=$latestAssignments');
+}
+
+Set<String> _stackDtoAssetIds(api.StackResponseDto stack) => stack.assets.map((asset) => asset.id).toSet();
 
 Future<api.AssetResponseDto> _waitForAssetInfoState(
   WidgetTester tester,
