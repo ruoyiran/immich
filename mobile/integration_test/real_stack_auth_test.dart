@@ -5256,6 +5256,8 @@ void main() async {
       var stacksApi = apiService.stacksApi;
       final createdRemoteAssetIds = <String>[];
       String? stackId;
+      final user = Store.tryGet(StoreKey.currentUser);
+      expect(user, isNotNull);
 
       addTearDown(() async {
         try {
@@ -5281,9 +5283,9 @@ void main() async {
       await container.read(syncStreamRepositoryProvider).reset();
       var syncSuccess = await container.read(syncStreamServiceProvider).sync();
       expect(syncSuccess, isTrue);
-
-      final user = Store.tryGet(StoreKey.currentUser);
-      expect(user, isNotNull);
+      if (Store.tryGet(StoreKey.currentUser) == null) {
+        await Store.put(StoreKey.currentUser, user!);
+      }
       final runToken = DateTime.now().toUtc().microsecondsSinceEpoch.toString();
       final baseCreatedAt = DateTime.now().toUtc();
       for (var index = 0; index < 4; index++) {
