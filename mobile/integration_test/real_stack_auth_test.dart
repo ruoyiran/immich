@@ -35,6 +35,11 @@ import 'package:immich_mobile/infrastructure/repositories/settings.repository.da
 import 'package:immich_mobile/infrastructure/repositories/storage.repository.dart';
 import 'package:immich_mobile/main.dart' as app;
 import 'package:immich_mobile/models/search/search_filter.model.dart';
+import 'package:immich_mobile/presentation/pages/dev/main_timeline.page.dart';
+import 'package:immich_mobile/presentation/pages/drift_album.page.dart';
+import 'package:immich_mobile/presentation/pages/drift_favorite.page.dart';
+import 'package:immich_mobile/presentation/pages/drift_library.page.dart';
+import 'package:immich_mobile/presentation/pages/search/drift_search.page.dart';
 import 'package:immich_mobile/presentation/widgets/asset_viewer/asset_viewer.page.dart';
 import 'package:immich_mobile/presentation/widgets/asset_viewer/video_viewer.widget.dart';
 import 'package:immich_mobile/presentation/widgets/images/thumbnail_tile.widget.dart';
@@ -53,6 +58,7 @@ import 'package:immich_mobile/providers/infrastructure/platform.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/search.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/sync.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/timeline.provider.dart';
+import 'package:immich_mobile/providers/tab.provider.dart';
 import 'package:immich_mobile/providers/websocket.provider.dart';
 import 'package:immich_mobile/repositories/asset_api.repository.dart';
 import 'package:immich_mobile/repositories/auth_api.repository.dart';
@@ -2871,6 +2877,108 @@ void main() async {
       }
     });
 
+    _realStackSessionTest('MOB-UI-033-$_caseSuffix', 'keeps primary navigation state across tabs and rotation', (
+      tester,
+    ) async {
+      tester.view.devicePixelRatio = 1.0;
+      tester.view.physicalSize = const Size(430, 932);
+      addTearDown(tester.view.reset);
+
+      await _loadAuthenticatedApp(tester, overrideCancellation: true);
+      final container = _containerOfApp(tester);
+      final user = Store.tryGet(StoreKey.currentUser);
+      expect(user, isNotNull);
+
+      await container.read(backgroundSyncProvider).syncLocal(full: true);
+      final syncSuccess = await container.read(syncStreamServiceProvider).sync();
+      expect(syncSuccess, isTrue);
+
+      final timeline = container.read(timelineFactoryProvider).main([user!.id]);
+      addTearDown(timeline.dispose);
+      await _waitForTimelineBuckets(tester, timeline, minAssets: _timelineMinimumAssetCount);
+
+      await _expectPrimaryNavigationState(
+        tester,
+        container,
+        tab: TabEnum.home,
+        selectedIndex: kPhotoTabIndex,
+        pageType: MainTimelinePage,
+        expectedNavigationType: NavigationBar,
+      );
+      await _expectPhotoRetapScrollsToTop(tester);
+
+      await _selectPrimaryNavigationTab(tester, kSearchTabIndex);
+      await _expectPrimaryNavigationState(
+        tester,
+        container,
+        tab: TabEnum.search,
+        selectedIndex: kSearchTabIndex,
+        pageType: DriftSearchPage,
+        expectedNavigationType: NavigationBar,
+      );
+
+      await _selectPrimaryNavigationTab(tester, kAlbumTabIndex);
+      await _expectPrimaryNavigationState(
+        tester,
+        container,
+        tab: TabEnum.albums,
+        selectedIndex: kAlbumTabIndex,
+        pageType: DriftAlbumsPage,
+        expectedNavigationType: NavigationBar,
+      );
+
+      await _selectPrimaryNavigationTab(tester, kLibraryTabIndex);
+      await _expectPrimaryNavigationState(
+        tester,
+        container,
+        tab: TabEnum.library,
+        selectedIndex: kLibraryTabIndex,
+        pageType: DriftLibraryPage,
+        expectedNavigationType: NavigationBar,
+      );
+      await _openFavoritePageAndReturn(tester, container, expectedNavigationType: NavigationBar);
+
+      await _setTestViewport(tester, const Size(1000, 520));
+      await _expectPrimaryNavigationState(
+        tester,
+        container,
+        tab: TabEnum.library,
+        selectedIndex: kLibraryTabIndex,
+        pageType: DriftLibraryPage,
+        expectedNavigationType: NavigationRail,
+      );
+
+      await _selectPrimaryNavigationTab(tester, kSearchTabIndex);
+      await _expectPrimaryNavigationState(
+        tester,
+        container,
+        tab: TabEnum.search,
+        selectedIndex: kSearchTabIndex,
+        pageType: DriftSearchPage,
+        expectedNavigationType: NavigationRail,
+      );
+
+      await _setTestViewport(tester, const Size(430, 932));
+      await _expectPrimaryNavigationState(
+        tester,
+        container,
+        tab: TabEnum.search,
+        selectedIndex: kSearchTabIndex,
+        pageType: DriftSearchPage,
+        expectedNavigationType: NavigationBar,
+      );
+
+      await _selectPrimaryNavigationTab(tester, kPhotoTabIndex);
+      await _expectPrimaryNavigationState(
+        tester,
+        container,
+        tab: TabEnum.home,
+        selectedIndex: kPhotoTabIndex,
+        pageType: MainTimelinePage,
+        expectedNavigationType: NavigationBar,
+      );
+    });
+
     if (_selectedCaseId.isNotEmpty && !_registeredSelectedCase) {
       test(_selectedCaseId, () => fail('No real stack auth test registered for $_selectedCaseId'));
     }
@@ -3941,6 +4049,92 @@ Future<int> _databaseUserVersion(Drift drift) async {
 Future<String> _databaseIntegrityCheck(Drift drift) async {
   final row = await drift.customSelect('PRAGMA integrity_check').getSingle();
   return row.read<String>('integrity_check');
+}
+
+Future<void> _expectPrimaryNavigationState(
+  WidgetTester tester,
+  ProviderContainer container, {
+  required TabEnum tab,
+  required int selectedIndex,
+  required Type pageType,
+  required Type expectedNavigationType,
+}) async {
+  await _pumpUntil(tester, () => find.byType(pageType).evaluate().isNotEmpty, timeout: const Duration(seconds: 30));
+  expect(container.read(tabProvider), tab);
+
+  if (expectedNavigationType == NavigationRail) {
+    expect(find.byType(NavigationRail), findsOneWidget);
+    expect(find.byType(NavigationBar), findsNothing);
+    expect(tester.widget<NavigationRail>(find.byType(NavigationRail)).selectedIndex, selectedIndex);
+    return;
+  }
+
+  expect(find.byType(NavigationBar), findsOneWidget);
+  expect(find.byType(NavigationRail), findsNothing);
+  expect(tester.widget<NavigationBar>(find.byType(NavigationBar)).selectedIndex, selectedIndex);
+}
+
+Future<void> _selectPrimaryNavigationTab(WidgetTester tester, int index) async {
+  final navigationBar = find.byType(NavigationBar);
+  if (navigationBar.evaluate().isNotEmpty) {
+    final widget = tester.widget<NavigationBar>(navigationBar.first);
+    widget.onDestinationSelected!(index);
+  } else {
+    final navigationRail = find.byType(NavigationRail);
+    expect(navigationRail, findsOneWidget);
+    final widget = tester.widget<NavigationRail>(navigationRail.first);
+    widget.onDestinationSelected!(index);
+  }
+  await _pumpFor(tester, const Duration(milliseconds: 800));
+}
+
+Future<void> _expectPhotoRetapScrollsToTop(WidgetTester tester) async {
+  await pumpUntilFound(tester, find.byType(Timeline), timeout: const Duration(seconds: 60));
+  final scrollable = find.descendant(of: find.byType(Timeline), matching: find.byType(Scrollable));
+  await pumpUntilFound(tester, scrollable, timeout: const Duration(seconds: 30));
+  final position = tester.state<ScrollableState>(scrollable.first).position;
+  await _pumpUntil(tester, () => position.maxScrollExtent > 0, timeout: const Duration(seconds: 60));
+
+  await tester.fling(scrollable.first, const Offset(0, -1500), 1500);
+  await _pumpFor(tester, const Duration(milliseconds: 700));
+  expect(position.pixels, greaterThan(0));
+
+  await _selectPrimaryNavigationTab(tester, kPhotoTabIndex);
+  await _pumpUntil(tester, () => position.pixels <= 1, timeout: const Duration(seconds: 10));
+}
+
+Future<void> _openFavoritePageAndReturn(
+  WidgetTester tester,
+  ProviderContainer container, {
+  required Type expectedNavigationType,
+}) async {
+  final favorites = find.descendant(of: find.byType(DriftLibraryPage), matching: find.text('favorites'.tr()));
+  await pumpUntilFound(tester, favorites, timeout: const Duration(seconds: 30));
+  await tester.tap(favorites.first);
+  await _pumpFor(tester, const Duration(milliseconds: 800));
+  await _pumpUntil(
+    tester,
+    () => find.byType(DriftFavoritePage).evaluate().isNotEmpty,
+    timeout: const Duration(seconds: 30),
+  );
+
+  await tester.binding.handlePopRoute();
+  await _pumpFor(tester, const Duration(milliseconds: 800));
+  await _expectPrimaryNavigationState(
+    tester,
+    container,
+    tab: TabEnum.library,
+    selectedIndex: kLibraryTabIndex,
+    pageType: DriftLibraryPage,
+    expectedNavigationType: expectedNavigationType,
+  );
+}
+
+Future<void> _setTestViewport(WidgetTester tester, Size size) async {
+  tester.view.physicalSize = size;
+  tester.view.devicePixelRatio = 1.0;
+  await tester.pump();
+  await _pumpFor(tester, const Duration(milliseconds: 800));
 }
 
 Future<void> _runAndroidBackgroundUploadOnce() async {
