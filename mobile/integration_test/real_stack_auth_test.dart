@@ -37,6 +37,7 @@ import 'package:immich_mobile/infrastructure/repositories/settings.repository.da
 import 'package:immich_mobile/infrastructure/repositories/storage.repository.dart';
 import 'package:immich_mobile/main.dart' as app;
 import 'package:immich_mobile/models/search/search_filter.model.dart';
+import 'package:immich_mobile/models/upload/share_intent_attachment.model.dart';
 import 'package:immich_mobile/pages/backup/drift_backup.page.dart';
 import 'package:immich_mobile/pages/backup/drift_backup_album_selection.page.dart';
 import 'package:immich_mobile/pages/backup/drift_backup_asset_detail.page.dart';
@@ -44,6 +45,7 @@ import 'package:immich_mobile/pages/backup/drift_backup_options.page.dart';
 import 'package:immich_mobile/pages/backup/drift_upload_detail.page.dart';
 import 'package:immich_mobile/pages/library/locked/pin_auth.page.dart';
 import 'package:immich_mobile/pages/login/login.page.dart';
+import 'package:immich_mobile/pages/share_intent/share_intent.page.dart';
 import 'package:immich_mobile/presentation/pages/dev/main_timeline.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_album.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_archive.page.dart';
@@ -66,6 +68,7 @@ import 'package:immich_mobile/presentation/widgets/timeline/header.widget.dart';
 import 'package:immich_mobile/presentation/widgets/timeline/timeline.widget.dart';
 import 'package:immich_mobile/providers/api.provider.dart';
 import 'package:immich_mobile/providers/asset_viewer/asset_viewer.provider.dart';
+import 'package:immich_mobile/providers/asset_viewer/share_intent_upload.provider.dart';
 import 'package:immich_mobile/providers/asset_viewer/video_player_provider.dart';
 import 'package:immich_mobile/providers/background_sync.provider.dart';
 import 'package:immich_mobile/providers/backup/backup_album.provider.dart';
@@ -4467,6 +4470,156 @@ void main() async {
       expect(browserAssetResponse.bodyBytes, isNotEmpty);
     });
 
+    _realStackSessionTest('MOB-UI-042-$_caseSuffix', 'imports shared media through the share intent upload flow', (
+      tester,
+    ) async {
+      tester.view.devicePixelRatio = 1.0;
+      tester.view.physicalSize = const Size(430, 932);
+      addTearDown(tester.view.reset);
+
+      await _loadAuthenticatedApp(tester, overrideCancellation: true);
+      final container = _containerOfApp(tester);
+      final apiService = container.read(apiServiceProvider);
+      final assetsApi = apiService.assetsApi;
+      final searchApi = apiService.searchApi;
+      final createdRemoteAssetIds = <String>{};
+      final fixtureRoot = await Directory.systemTemp.createTemp('immich-share-intent-042-');
+
+      addTearDown(() async {
+        for (final assetId in createdRemoteAssetIds) {
+          await _deleteTestAssetBestEffort(assetsApi, assetId);
+        }
+        if (fixtureRoot.existsSync()) {
+          fixtureRoot.deleteSync(recursive: true);
+        }
+      });
+
+      final baselineSyncSuccess = await container.read(syncStreamServiceProvider).sync();
+      expect(baselineSyncSuccess, isTrue);
+      await pumpUntilFound(tester, find.byType(Timeline), timeout: const Duration(seconds: 60));
+      final user = Store.tryGet(StoreKey.currentUser);
+      expect(user, isNotNull);
+      final timeline = container.read(timelineFactoryProvider).main([user!.id]);
+      addTearDown(timeline.dispose);
+      await _pumpUntil(tester, () => timeline.totalAssets > 0, timeout: const Duration(seconds: 60));
+      final timelineAssets = await _loadAllTimelineAssets(timeline);
+      final sourceVideo = _firstRemoteVideo(timelineAssets);
+      expect(sourceVideo, isNotNull, reason: 'Expected at least one remote video for the share intent video fixture');
+
+      final runToken = DateTime.now().toUtc().microsecondsSinceEpoch.toString();
+      final cancelImageName = 'immich-e2e-share-intent-042-cancel-$runToken.jpg';
+      final uploadImageName = 'immich-e2e-share-intent-042-image-$runToken.jpg';
+      final uploadVideoName = 'immich-e2e-share-intent-042-video-$runToken.mp4';
+
+      final cancelImageFile = await _writeShareIntentImageFile(fixtureRoot, cancelImageName, runToken.hashCode);
+      final uploadImageFile = await _writeShareIntentImageFile(fixtureRoot, uploadImageName, runToken.hashCode + 1);
+      final uploadVideoFile = await _writeShareIntentVideoFile(
+        container,
+        tester,
+        sourceVideo!,
+        fixtureRoot,
+        uploadVideoName,
+        runToken,
+      );
+
+      expect(await _serverAssetIdsByOriginalFilename(searchApi, cancelImageName), isEmpty);
+      expect(await _serverAssetIdsByOriginalFilename(searchApi, uploadImageName), isEmpty);
+      expect(
+        await _serverAssetIdsByOriginalFilename(searchApi, uploadVideoName, type: api.AssetTypeEnum.VIDEO),
+        isEmpty,
+      );
+
+      final notifier = container.read(shareIntentUploadProvider.notifier);
+      final cancelAttachment = await _shareIntentAttachment(cancelImageFile, ShareIntentAttachmentType.image);
+      notifier.onSharedMedia([cancelAttachment]);
+      await _waitForShareIntentPage(tester, {cancelImageName});
+      await _waitForShareIntentState(
+        tester,
+        container,
+        (attachments) => attachments.length == 1 && attachments.single.status == UploadStatus.enqueued,
+        reason: 'Expected the single shared image to be listed before cancel',
+      );
+
+      final backButton = find.descendant(of: find.byType(ShareIntentPage), matching: find.byIcon(Icons.arrow_back));
+      await pumpUntilFound(tester, backButton, timeout: const Duration(seconds: 30));
+      await tester.tap(backButton.first, warnIfMissed: false);
+      await _pumpUntil(
+        tester,
+        () => find.byType(ShareIntentPage).evaluate().isEmpty,
+        timeout: const Duration(seconds: 30),
+      );
+      expect(
+        await _serverAssetIdsByOriginalFilename(searchApi, cancelImageName),
+        isEmpty,
+        reason: 'Cancelling the share intent page must not upload the shared image',
+      );
+
+      final uploadImageAttachment = await _shareIntentAttachment(uploadImageFile, ShareIntentAttachmentType.image);
+      final uploadVideoAttachment = await _shareIntentAttachment(uploadVideoFile, ShareIntentAttachmentType.video);
+      notifier.onSharedMedia([uploadImageAttachment, uploadVideoAttachment]);
+      await _waitForShareIntentPage(tester, {uploadImageName, uploadVideoName});
+      await _waitForShareIntentState(
+        tester,
+        container,
+        (attachments) =>
+            attachments.length == 2 &&
+            attachments.every((attachment) => attachment.status == UploadStatus.enqueued) &&
+            attachments.any((attachment) => attachment.isImage) &&
+            attachments.any((attachment) => attachment.isVideo),
+        reason: 'Expected image and video attachments to be selected for upload',
+      );
+
+      final uploadButton = find.descendant(
+        of: find.byType(ShareIntentPage),
+        matching: find.widgetWithText(ElevatedButton, 'upload'.tr()),
+      );
+      await pumpUntilFound(tester, uploadButton, timeout: const Duration(seconds: 30));
+      await tester.tap(uploadButton.last, warnIfMissed: false);
+
+      await _waitForShareIntentState(
+        tester,
+        container,
+        (attachments) =>
+            attachments.length == 2 &&
+            attachments.every(
+              (attachment) => attachment.status == UploadStatus.complete && attachment.uploadProgress == 1.0,
+            ),
+        reason: 'Expected all shared media uploads to complete',
+      );
+
+      final uploadedImageIds = await _waitForServerAssetIdsByOriginalFilename(
+        tester,
+        searchApi,
+        uploadImageName,
+        (ids) => ids.isNotEmpty,
+        reason: 'Expected the confirmed shared image to exist on the real server',
+      );
+      final uploadedVideoIds = await _waitForServerAssetIdsByOriginalFilename(
+        tester,
+        searchApi,
+        uploadVideoName,
+        (ids) => ids.isNotEmpty,
+        reason: 'Expected the confirmed shared video to exist on the real server',
+        type: api.AssetTypeEnum.VIDEO,
+        timeout: const Duration(minutes: 2),
+      );
+      createdRemoteAssetIds.addAll(uploadedImageIds);
+      createdRemoteAssetIds.addAll(uploadedVideoIds);
+
+      final syncSuccess = await container.read(syncStreamServiceProvider).sync();
+      expect(syncSuccess, isTrue);
+      for (final assetId in createdRemoteAssetIds) {
+        await _waitForRemoteAssetState(
+          tester,
+          container,
+          assetId,
+          (asset) => asset.visibility == AssetVisibility.timeline && !asset.isTrashed,
+          reason: 'Expected share intent uploaded asset $assetId to sync into the local timeline',
+        );
+      }
+      expect(await _serverAssetIdsByOriginalFilename(searchApi, cancelImageName), isEmpty);
+    });
+
     if (_selectedCaseId.isNotEmpty && !_registeredSelectedCase) {
       test(_selectedCaseId, () => fail('No real stack auth test registered for $_selectedCaseId'));
     }
@@ -5903,6 +6056,93 @@ void _expectSharedDisplayNames(_ShareInvocation invocation, Set<String> displayN
   }
 }
 
+Future<File> _writeShareIntentImageFile(Directory directory, String filename, int seed) async {
+  final file = File('${directory.path}/$filename');
+  await file.writeAsBytes(_generatedJpegBytes(seed));
+  return file;
+}
+
+Future<File> _writeShareIntentVideoFile(
+  ProviderContainer container,
+  WidgetTester tester,
+  RemoteAsset source,
+  Directory directory,
+  String filename,
+  String token,
+) async {
+  final original = await _waitForSuccessfulResponse(
+    tester,
+    () => container.read(assetApiRepositoryProvider).downloadAsset(source.id, edited: false),
+  );
+  final file = File('${directory.path}/$filename');
+  final sink = file.openWrite();
+  sink.add(original.bodyBytes);
+  sink.add(_mp4FreeBoxBytes('immich-e2e-share-intent-042-$token'));
+  await sink.close();
+  return file;
+}
+
+List<int> _mp4FreeBoxBytes(String payload) {
+  final payloadBytes = utf8.encode(payload);
+  final size = payloadBytes.length + 8;
+  return [
+    (size >> 24) & 0xff,
+    (size >> 16) & 0xff,
+    (size >> 8) & 0xff,
+    size & 0xff,
+    0x66,
+    0x72,
+    0x65,
+    0x65,
+    ...payloadBytes,
+  ];
+}
+
+Future<ShareIntentAttachment> _shareIntentAttachment(File file, ShareIntentAttachmentType type) async {
+  return ShareIntentAttachment(
+    path: file.path,
+    type: type,
+    status: UploadStatus.enqueued,
+    fileLength: await file.length(),
+  );
+}
+
+Future<void> _waitForShareIntentPage(WidgetTester tester, Set<String> filenames) async {
+  await pumpUntilFound(tester, find.byType(ShareIntentPage), timeout: const Duration(seconds: 30));
+  for (final filename in filenames) {
+    await pumpUntilFound(tester, find.text(filename), timeout: const Duration(seconds: 30));
+  }
+}
+
+Future<List<ShareIntentAttachment>> _waitForShareIntentState(
+  WidgetTester tester,
+  ProviderContainer container,
+  bool Function(List<ShareIntentAttachment> attachments) matches, {
+  required String reason,
+  Duration timeout = const Duration(seconds: 90),
+}) async {
+  var latest = const <ShareIntentAttachment>[];
+  final end = DateTime.now().add(timeout);
+  while (DateTime.now().isBefore(end)) {
+    latest = container.read(shareIntentUploadProvider);
+    if (matches(latest)) {
+      return latest;
+    }
+    await _pumpFor(tester, const Duration(milliseconds: 200));
+  }
+
+  fail('$reason; latest share intent state=${_describeShareIntentState(latest)}');
+}
+
+String _describeShareIntentState(List<ShareIntentAttachment> attachments) {
+  return attachments
+      .map(
+        (attachment) =>
+            '${attachment.fileName}:${attachment.type.name}:${attachment.status.name}:${attachment.uploadProgress}',
+      )
+      .join(', ');
+}
+
 Future<void> _showViewerControls(WidgetTester tester, ProviderContainer container) async {
   await pumpUntilFound(tester, find.byType(AssetViewer), timeout: const Duration(seconds: 30));
   container.read(assetViewerProvider.notifier).setControls(true);
@@ -6467,8 +6707,12 @@ Future<({int processing, int remainder, int total})> _waitForBackupCounts(
   fail('$reason; latest backup counts=$latest');
 }
 
-Future<Set<String>> _serverAssetIdsByOriginalFilename(api.SearchApi searchApi, String filename) async {
-  final response = await searchApi.searchAssets(_metadataSearchDto(filename: filename, type: api.AssetTypeEnum.IMAGE));
+Future<Set<String>> _serverAssetIdsByOriginalFilename(
+  api.SearchApi searchApi,
+  String filename, {
+  api.AssetTypeEnum type = api.AssetTypeEnum.IMAGE,
+}) async {
+  final response = await searchApi.searchAssets(_metadataSearchDto(filename: filename, type: type));
   expect(response, isNotNull, reason: 'Expected search response for $filename');
   return _serverSearchAssetIds(response!);
 }
@@ -6512,6 +6756,7 @@ Future<Set<String>> _waitForServerAssetIdsByOriginalFilename(
   String filename,
   bool Function(Set<String> ids) matches, {
   required String reason,
+  api.AssetTypeEnum type = api.AssetTypeEnum.IMAGE,
   Duration timeout = const Duration(seconds: 60),
 }) async {
   var latest = const <String>{};
@@ -6519,7 +6764,7 @@ Future<Set<String>> _waitForServerAssetIdsByOriginalFilename(
   final end = DateTime.now().add(timeout);
   while (DateTime.now().isBefore(end)) {
     try {
-      latest = await _serverAssetIdsByOriginalFilename(searchApi, filename);
+      latest = await _serverAssetIdsByOriginalFilename(searchApi, filename, type: type);
       if (matches(latest)) {
         return latest;
       }
