@@ -79,20 +79,21 @@ class RemoteAssetRepository extends DriftDatabaseRepository {
   }
 
   /// Inserts a placeholder row for a freshly uploaded local asset so checksum
-  /// based local/remote merging updates immediately. The sync stream will
-  /// replace it with authoritative server data.
+  /// based local/remote merging updates immediately. The sync stream replaces
+  /// its metadata while retaining this device-specific upload checksum.
   Future<void> upsertUploadedAsset({
     required String remoteId,
     required String ownerId,
     required LocalAsset source,
   }) async {
+    final checksum = source.checksum ?? remoteId;
     await _db
         .into(_db.remoteAssetEntity)
         .insert(
           RemoteAssetEntityCompanion(
             id: Value(remoteId),
             ownerId: Value(ownerId),
-            checksum: Value(source.checksum ?? remoteId),
+            checksum: Value(checksum),
             name: Value(source.name),
             type: Value(source.type),
             createdAt: Value(source.createdAt),
@@ -104,7 +105,7 @@ class RemoteAssetRepository extends DriftDatabaseRepository {
             visibility: const Value(AssetVisibility.timeline),
             isEdited: Value(source.isEdited),
           ),
-          mode: InsertMode.insertOrIgnore,
+          onConflict: DoUpdate((_) => RemoteAssetEntityCompanion(checksum: Value(checksum))),
         );
   }
 

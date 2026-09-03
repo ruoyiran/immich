@@ -1,3 +1,4 @@
+import 'package:async/async.dart';
 import 'package:drift/drift.dart';
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -38,6 +39,26 @@ void main() {
       expect(albums[1].id, '3'); // selected & isIosSharedAlbum
       expect(albums[2].id, '1'); // none
       expect(albums[3].id, '2'); // excluded
+    });
+
+    test('watchers refresh album count and thumbnail after a local asset is deleted', () async {
+      final localAlbumRepo = mediumFactory.getRepository<DriftLocalAlbumRepository>();
+      final older = _localAsset('older', createdAt: DateTime(2024, 1, 1));
+      final newer = _localAsset('newer', createdAt: DateTime(2024, 1, 2));
+      await localAlbumRepo.upsert(mediumFactory.localAlbum(id: 'album'), toUpsert: [older, newer]);
+
+      final albums = StreamQueue(localAlbumRepo.watchAll());
+      final thumbnails = StreamQueue(localAlbumRepo.watchThumbnail('album'));
+      addTearDown(albums.cancel);
+      addTearDown(thumbnails.cancel);
+
+      expect((await albums.next).single.assetCount, 2);
+      expect((await thumbnails.next)?.id, newer.id);
+
+      await db.localAssetEntity.deleteWhere((asset) => asset.id.equals(newer.id));
+
+      expect((await albums.next).single.assetCount, 1);
+      expect((await thumbnails.next)?.id, older.id);
     });
   });
 
@@ -103,11 +124,11 @@ void main() {
   });
 }
 
-LocalAsset _localAsset(String id) => LocalAsset(
+LocalAsset _localAsset(String id, {DateTime? createdAt}) => LocalAsset(
   id: id,
   name: '$id.jpg',
   type: AssetType.image,
-  createdAt: DateTime(2024),
+  createdAt: createdAt ?? DateTime(2024),
   updatedAt: DateTime(2024),
   playbackStyle: AssetPlaybackStyle.image,
   isEdited: false,

@@ -224,7 +224,9 @@ class SyncStreamRepository extends DriftDatabaseRepository {
           batch.insert(
             _db.remoteAssetEntity,
             companion.copyWith(id: Value(asset.id)),
-            onConflict: DoUpdate((_) => companion),
+            // A completed upload may link a transformed server asset (for
+            // example, a split Motion HEIC) by the device file checksum.
+            onConflict: DoUpdate((_) => companion.copyWith(checksum: const Value.absent())),
           );
         }
       });
@@ -263,7 +265,9 @@ class SyncStreamRepository extends DriftDatabaseRepository {
           batch.insert(
             _db.remoteAssetEntity,
             companion.copyWith(id: Value(asset.id)),
-            onConflict: DoUpdate((_) => companion),
+            // Keep the checksum used to associate this remote ID with the
+            // original local file; all other fields remain server-authoritative.
+            onConflict: DoUpdate((_) => companion.copyWith(checksum: const Value.absent())),
           );
         }
       });
