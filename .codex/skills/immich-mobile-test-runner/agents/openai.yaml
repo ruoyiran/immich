@@ -1,0 +1,4 @@
+interface:
+  display_name: "Immich Mobile Test Runner"
+  short_description: "Run Immich mobile test queues safely"
+  default_prompt: "Use $immich-mobile-test-runner to run Immich mobile test cases from a Feishu sheet with progress updates."
