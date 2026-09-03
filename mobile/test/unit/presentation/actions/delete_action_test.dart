@@ -75,6 +75,17 @@ void main() {
 
   group('DeleteAction', () {
     group('trash', () {
+      testWidgets('trashes a freshly uploaded local asset without removing its device copy', (tester) async {
+        final asset = LocalAssetFactory.create(remoteId: 'remote');
+
+        await pumpDelete(tester, {asset});
+        await tester.pumpAndSettle();
+
+        verify(() => assetService.trash(['remote'])).called(1);
+        verifyNever(() => assetService.delete(any()));
+        verifyNever(() => cleanupService.deleteLocalAssets(any()));
+      });
+
       testWidgets('trashes a remote-only owned asset', (tester) async {
         final asset = owned();
 
@@ -86,24 +97,36 @@ void main() {
         verifyNever(() => cleanupService.deleteLocalAssets(any()));
       });
 
-      testWidgets('ignores assets owned by someone else', (tester) async {
+      testWidgets('ignores assets owned by someone else without removing a matching device copy', (tester) async {
         final mine = owned();
-        final theirs = RemoteAssetFactory.create();
+        final theirs = RemoteAssetFactory.create(localId: 'local');
 
         await pumpDelete(tester, {mine, theirs});
         await tester.pumpAndSettle();
 
         verify(() => assetService.trash([mine.id])).called(1);
+        verifyNever(() => cleanupService.deleteLocalAssets(any()));
       });
 
-      testWidgets('trashes a merged asset and removes its device copy', (tester) async {
+      testWidgets('trashes a merged asset without removing its device copy', (tester) async {
         final asset = owned(localId: 'local');
 
         await pumpDelete(tester, {asset});
         await tester.pumpAndSettle();
 
-        verify(() => cleanupService.deleteLocalAssets(['local'])).called(1);
         verify(() => assetService.trash([asset.id])).called(1);
+        verifyNever(() => cleanupService.deleteLocalAssets(any()));
+      });
+
+      testWidgets('does not trash remote assets when device deletion is rejected', (tester) async {
+        final local = LocalAssetFactory.create(id: 'local');
+        final remote = owned();
+
+        await pumpDelete(tester, {local, remote});
+        await tester.pumpAndSettle();
+
+        verify(() => cleanupService.deleteLocalAssets([local.id])).called(1);
+        verifyNever(() => assetService.trash(any()));
       });
     });
 
@@ -118,14 +141,26 @@ void main() {
         verifyNever(() => assetService.trash(any()));
       });
 
-      testWidgets('permanently deletes a merged asset and removes its device copy', (tester) async {
+      testWidgets('permanently deletes a merged asset without removing its device copy', (tester) async {
         final asset = owned(localId: 'local');
 
         await pumpDelete(tester, {asset}, trashEnabled: false);
         await respondToDialog(tester, confirm: true);
 
         verify(() => assetService.delete([asset.id])).called(1);
-        verify(() => cleanupService.deleteLocalAssets(['local'])).called(1);
+        verifyNever(() => cleanupService.deleteLocalAssets(any()));
+      });
+
+      testWidgets('permanently deletes a freshly uploaded local asset without removing its device copy', (
+        tester,
+      ) async {
+        final asset = LocalAssetFactory.create(remoteId: 'remote');
+
+        await pumpDelete(tester, {asset}, trashEnabled: false);
+        await respondToDialog(tester, confirm: true);
+
+        verify(() => assetService.delete(['remote'])).called(1);
+        verifyNever(() => cleanupService.deleteLocalAssets(any()));
       });
 
       testWidgets('permanently deletes already trashed assets even with trash enabled', (tester) async {
@@ -145,7 +180,7 @@ void main() {
         await respondToDialog(tester, confirm: true);
 
         verify(() => assetService.delete([asset.id])).called(1);
-        verify(() => cleanupService.deleteLocalAssets(['local'])).called(1);
+        verifyNever(() => cleanupService.deleteLocalAssets(any()));
       });
 
       testWidgets('does nothing when the confirmation is cancelled', (tester) async {
@@ -173,7 +208,7 @@ void main() {
     });
 
     group('prompt handling', () {
-      testWidgets('permanent delete shows a single app dialog', (tester) async {
+      testWidgets('permanent cloud delete shows a single app dialog without deleting from the device', (tester) async {
         final asset = owned(localId: 'local');
 
         await pumpDelete(tester, {asset}, trashEnabled: false);
@@ -185,7 +220,7 @@ void main() {
 
         expect(find.text(StaticTranslations.instance.move_to_device_trash), findsNothing);
         verify(() => assetService.delete([asset.id])).called(1);
-        verify(() => cleanupService.deleteLocalAssets(['local'])).called(1);
+        verifyNever(() => cleanupService.deleteLocalAssets(any()));
       });
 
       testWidgets('local only delete on Android with MANAGE_MEDIA shows the prompt', (tester) async {

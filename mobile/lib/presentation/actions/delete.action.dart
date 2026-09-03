@@ -21,25 +21,37 @@ final _stateProvider = Provider.family.autoDispose<_State?, ActionSource>((ref, 
   final authUserId = ref.watch(authUserProvider).id;
 
   final localIds = <String>[];
-  final ownedRemote = <RemoteAsset>[];
+  final remoteIds = <String>[];
+  var allRemoteAssetsRequirePermanentDelete = true;
   for (final asset in assets) {
-    if (asset.localId case final localId?) {
-      localIds.add(localId);
-    }
-    if (asset case final RemoteAsset remote when remote.ownerId == authUserId) {
-      ownedRemote.add(remote);
+    // A server-backed asset can still have a device copy. The regular delete action
+    // only removes that server asset; device copies are handled by CleanupLocalAction.
+    switch (asset) {
+      case final RemoteAsset remote when remote.ownerId == authUserId:
+        remoteIds.add(remote.id);
+        allRemoteAssetsRequirePermanentDelete &= remote.isTrashed || remote.isLocked;
+      case RemoteAsset():
+        break;
+      case final LocalAsset local:
+        final remoteId = local.remoteId;
+        if (remoteId == null) {
+          localIds.add(local.id);
+        } else {
+          remoteIds.add(remoteId);
+          allRemoteAssetsRequirePermanentDelete = false;
+        }
     }
   }
 
-  if (localIds.isEmpty && ownedRemote.isEmpty) {
+  if (localIds.isEmpty && remoteIds.isEmpty) {
     return null;
   }
 
   final trashEnabled = ref.watch(serverInfoProvider.select((state) => state.serverFeatures.trash));
   // Assets already in the trash or in the locked folder are deleted outright, irrespective of the server setting.
-  final trash = trashEnabled && !ownedRemote.every((asset) => asset.isTrashed || asset.isLocked);
+  final trash = trashEnabled && remoteIds.isNotEmpty && !allRemoteAssetsRequirePermanentDelete;
 
-  return (localIds: localIds, remoteIds: ownedRemote.map((asset) => asset.id).toList(growable: false), trash: trash);
+  return (localIds: localIds, remoteIds: remoteIds, trash: trash);
 }, dependencies: [assetsActionProvider]);
 
 class DeleteAction extends AssetActionBuilder {
@@ -107,8 +119,8 @@ class DeleteAction extends AssetActionBuilder {
   ) async {
     final assetService = ref.read(assetServiceProvider);
     if (localIds.isNotEmpty) {
-      await _cleanupLocalAssets(context, ref, localIds);
-      if (!context.mounted) {
+      final deletedCount = await _cleanupLocalAssets(context, ref, localIds);
+      if (deletedCount != localIds.length || !context.mounted) {
         return null;
       }
     }
