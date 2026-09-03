@@ -13,10 +13,12 @@ import 'package:http/http.dart' as http;
 import 'package:immich_mobile/constants/constants.dart';
 import 'package:immich_mobile/constants/enums.dart';
 import 'package:immich_mobile/domain/models/album/album.model.dart';
+import 'package:immich_mobile/domain/models/album/local_album.model.dart';
 import 'package:immich_mobile/domain/models/asset/base_asset.model.dart';
 import 'package:immich_mobile/domain/models/events.model.dart';
 import 'package:immich_mobile/domain/models/exif.model.dart';
 import 'package:immich_mobile/domain/models/person.model.dart';
+import 'package:immich_mobile/domain/models/settings_key.dart';
 import 'package:immich_mobile/domain/models/store.model.dart';
 import 'package:immich_mobile/domain/models/sync_event.model.dart';
 import 'package:immich_mobile/domain/models/timeline.model.dart';
@@ -28,6 +30,7 @@ import 'package:immich_mobile/domain/services/timeline.service.dart';
 import 'package:immich_mobile/domain/utils/event_stream.dart';
 import 'package:immich_mobile/entities/store.entity.dart';
 import 'package:immich_mobile/infrastructure/repositories/db.repository.dart';
+import 'package:immich_mobile/infrastructure/repositories/settings.repository.dart';
 import 'package:immich_mobile/infrastructure/repositories/storage.repository.dart';
 import 'package:immich_mobile/main.dart' as app;
 import 'package:immich_mobile/models/search/search_filter.model.dart';
@@ -45,6 +48,7 @@ import 'package:immich_mobile/providers/infrastructure/asset.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/cancel.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/db.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/people.provider.dart';
+import 'package:immich_mobile/providers/infrastructure/platform.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/search.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/sync.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/timeline.provider.dart';
@@ -53,6 +57,7 @@ import 'package:immich_mobile/repositories/asset_api.repository.dart';
 import 'package:immich_mobile/repositories/auth_api.repository.dart';
 import 'package:immich_mobile/repositories/download.repository.dart';
 import 'package:immich_mobile/services/api.service.dart';
+import 'package:immich_mobile/services/background_upload.service.dart';
 import 'package:immich_mobile/services/foreground_upload.service.dart';
 import 'package:immich_mobile/utils/bootstrap.dart';
 import 'package:immich_mobile/utils/option.dart';
@@ -91,6 +96,10 @@ const _resumableAssetName = String.fromEnvironment(
   'IMMICH_E2E_RESUMABLE_ASSET_NAME',
   defaultValue: 'immich-e2e-resumable-012.mp4',
 );
+const _backgroundBackupAssetName = String.fromEnvironment(
+  'IMMICH_E2E_BACKGROUND_BACKUP_ASSET_NAME',
+  defaultValue: 'immich-e2e-background-031.jpg',
+);
 const _resumableCancelAfterBytes = int.fromEnvironment(
   'IMMICH_E2E_RESUMABLE_CANCEL_AFTER_BYTES',
   defaultValue: 512 * 1024,
@@ -115,6 +124,7 @@ const _timelineMinimumAssetCount = int.fromEnvironment('IMMICH_E2E_TIMELINE_MIN_
 const _timelinePageSize = int.fromEnvironment('IMMICH_E2E_TIMELINE_PAGE_SIZE', defaultValue: 8);
 const _assetViewerImageCount = int.fromEnvironment('IMMICH_E2E_VIEWER_IMAGE_COUNT', defaultValue: 3);
 const _serverRestartReadyMarker = 'MOB-REAL-030:READY_FOR_SERVER_RESTART';
+const _backgroundWorkerTriggerMarker = 'MOB-REAL-031-A:TRIGGER_ANDROID_BACKGROUND_WORKER';
 
 var _registeredSelectedCase = false;
 
@@ -2719,6 +2729,113 @@ void main() async {
       );
     });
 
+    _realStackSessionTest('MOB-REAL-031-$_caseSuffix', 'runs scheduled background backup and tears down cleanly', (
+      tester,
+    ) async {
+      await _loadAuthenticatedApp(tester, overrideCancellation: true, closeDriftOnDispose: false);
+      final container = _containerOfApp(tester);
+      final drift = container.read(driftProvider);
+      final backgroundWorker = container.read(backgroundWorkerFgServiceProvider);
+      final backgroundWorkerLock = container.read(backgroundWorkerLockServiceProvider);
+      final assetsApi = container.read(apiServiceProvider).assetsApi;
+      final user = Store.tryGet(StoreKey.currentUser);
+      expect(user, isNotNull);
+
+      final uploadedRemoteIds = <String>{};
+      addTearDown(() async {
+        try {
+          await backgroundWorker.disable();
+          await backgroundWorkerLock.lock();
+        } catch (_) {
+          // Best-effort cleanup for native WorkManager state used by this test.
+        }
+        for (final remoteId in uploadedRemoteIds) {
+          await _deleteTestAssetBestEffort(assetsApi, remoteId);
+        }
+      });
+
+      final asset = await _waitForLocalAssetByName(container, _backgroundBackupAssetName, tester);
+      await _selectOnlyBackupAlbumForAsset(container, asset);
+      await SettingsRepository.instance.write(SettingsKey.backupEnabled, true);
+      await SettingsRepository.instance.write(SettingsKey.backupUseCellularForPhotos, true);
+      await SettingsRepository.instance.write(SettingsKey.backupUseCellularForVideos, true);
+      await SettingsRepository.instance.write(SettingsKey.backupRequireCharging, false);
+      await SettingsRepository.instance.write(SettingsKey.backupTriggerDelay, 1);
+
+      final searchApi = container.read(apiServiceProvider).searchApi;
+      final beforeServerIds = await _serverAssetIdsByOriginalFilename(searchApi, _backgroundBackupAssetName);
+      expect(beforeServerIds, isEmpty, reason: 'Background backup fixture name must be unique for this run');
+      final beforeRows = await _remoteSyncRowCounts(drift);
+
+      final initialCounts = await _waitForBackupCounts(
+        tester,
+        container,
+        user!.id,
+        (counts) => counts.total == 1 && counts.remainder == 1,
+        reason: 'Expected selected album to expose exactly one background backup candidate',
+      );
+
+      await container.read(backgroundWorkerLockServiceProvider).unlock();
+      await container.read(backgroundWorkerFgServiceProvider).disable();
+      await container.read(backgroundWorkerFgServiceProvider).configure(minimumDelaySeconds: 1, requireCharging: false);
+      await container.read(backgroundWorkerFgServiceProvider).enable();
+      debugPrint('$_backgroundWorkerTriggerMarker first');
+
+      final firstServerIds = await _waitForServerAssetIdsByOriginalFilename(
+        tester,
+        searchApi,
+        _backgroundBackupAssetName,
+        (ids) => ids.length == beforeServerIds.length + 1,
+        reason: 'Expected forced Android background worker to upload the selected local asset',
+        timeout: const Duration(minutes: 3),
+      );
+      final uploadedId = firstServerIds.difference(beforeServerIds).single;
+      uploadedRemoteIds.add(uploadedId);
+
+      final firstSyncSuccess = await container.read(syncStreamServiceProvider).sync();
+      expect(firstSyncSuccess, isTrue);
+      await _waitForRemoteAssetState(
+        tester,
+        container,
+        uploadedId,
+        (asset) => asset.visibility == AssetVisibility.timeline && !asset.isTrashed,
+        reason: 'Expected background-uploaded asset to sync into the local remote timeline',
+      );
+      expect(await _remoteAssetRowCountById(drift, uploadedId), 1);
+      final afterFirstRows = await _remoteSyncRowCounts(drift);
+      expect(
+        afterFirstRows['remote_asset_entity'],
+        greaterThanOrEqualTo(beforeRows['remote_asset_entity']! + 1),
+        reason: 'Background worker remote sync should converge after upload',
+      );
+
+      final afterFirstCounts = await _waitForBackupCounts(
+        tester,
+        container,
+        user.id,
+        (counts) => counts.remainder == initialCounts.remainder - 1,
+        reason: 'Uploaded background asset should no longer be a backup candidate',
+      );
+      expect(afterFirstCounts.processing, 0);
+      expect(await container.read(backgroundUploadServiceProvider).getActiveTasks(kBackupGroup), isEmpty);
+
+      debugPrint('$_backgroundWorkerTriggerMarker second');
+      await _pumpFor(tester, const Duration(seconds: 20));
+
+      final secondServerIds = await _serverAssetIdsByOriginalFilename(searchApi, _backgroundBackupAssetName);
+      expect(
+        secondServerIds,
+        firstServerIds,
+        reason: 'A repeated background schedule must not upload the same selected asset twice',
+      );
+      final secondSyncSuccess = await container.read(syncStreamServiceProvider).sync();
+      expect(secondSyncSuccess, isTrue);
+      expect(await _remoteAssetRowCountById(drift, uploadedId), 1);
+      expect(await _remoteSyncRowCounts(drift), afterFirstRows);
+      expect(await container.read(backgroundUploadServiceProvider).getActiveTasks(kBackupGroup), isEmpty);
+      await drift.customSelect('SELECT 1').getSingle();
+    });
+
     if (_selectedCaseId.isNotEmpty && !_registeredSelectedCase) {
       test(_selectedCaseId, () => fail('No real stack auth test registered for $_selectedCaseId'));
     }
@@ -3590,6 +3707,72 @@ Future<LocalAsset> _waitForLocalAssetByName(ProviderContainer container, String 
 
   final sorted = lastSeen.toList()..sort();
   fail('Local asset $name was not discovered; saw ${sorted.join(', ')}');
+}
+
+Future<void> _selectOnlyBackupAlbumForAsset(ProviderContainer container, LocalAsset asset) async {
+  final albumRepository = container.read(localAlbumRepository);
+  final albums = await albumRepository.getAll();
+  for (final album in albums) {
+    if (album.backupSelection != BackupSelection.none) {
+      await albumRepository.upsert(album.copyWith(backupSelection: BackupSelection.none));
+    }
+  }
+
+  final sourceAlbums = await container.read(localAssetRepository).getSourceAlbums(asset.id);
+  expect(sourceAlbums, isNotEmpty, reason: 'Expected ${asset.name} to belong to at least one local album');
+  await albumRepository.upsert(sourceAlbums.first.copyWith(backupSelection: BackupSelection.selected));
+}
+
+Future<({int processing, int remainder, int total})> _waitForBackupCounts(
+  WidgetTester tester,
+  ProviderContainer container,
+  String userId,
+  bool Function(({int processing, int remainder, int total}) counts) matches, {
+  required String reason,
+}) async {
+  ({int processing, int remainder, int total})? latest;
+  final end = DateTime.now().add(const Duration(seconds: 60));
+  while (DateTime.now().isBefore(end)) {
+    latest = await container.read(foregroundUploadServiceProvider).getBackupCounts(userId);
+    if (matches(latest)) {
+      return latest;
+    }
+    await _pumpFor(tester, const Duration(milliseconds: 500));
+  }
+
+  fail('$reason; latest backup counts=$latest');
+}
+
+Future<Set<String>> _serverAssetIdsByOriginalFilename(api.SearchApi searchApi, String filename) async {
+  final response = await searchApi.searchAssets(_metadataSearchDto(filename: filename, type: api.AssetTypeEnum.IMAGE));
+  expect(response, isNotNull, reason: 'Expected search response for $filename');
+  return _serverSearchAssetIds(response!);
+}
+
+Future<Set<String>> _waitForServerAssetIdsByOriginalFilename(
+  WidgetTester tester,
+  api.SearchApi searchApi,
+  String filename,
+  bool Function(Set<String> ids) matches, {
+  required String reason,
+  Duration timeout = const Duration(seconds: 60),
+}) async {
+  var latest = const <String>{};
+  Object? lastError;
+  final end = DateTime.now().add(timeout);
+  while (DateTime.now().isBefore(end)) {
+    try {
+      latest = await _serverAssetIdsByOriginalFilename(searchApi, filename);
+      if (matches(latest)) {
+        return latest;
+      }
+    } catch (error) {
+      lastError = error;
+    }
+    await _pumpFor(tester, const Duration(seconds: 1));
+  }
+
+  fail('$reason; latest ids=${latest.toList()..sort()}; last error=$lastError');
 }
 
 Future<List<LocalAsset>> _waitForLocalAssetsByPrefix(
