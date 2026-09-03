@@ -1,11 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:immich_mobile/constants/enums.dart';
+import 'package:immich_mobile/domain/models/asset/base_asset.model.dart';
 import 'package:immich_mobile/generated/translations.g.dart';
 import 'package:immich_mobile/presentation/actions/action.dart';
 import 'package:immich_mobile/providers/infrastructure/asset.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/toast.provider.dart';
 import 'package:immich_mobile/providers/routes.provider.dart';
+import 'package:immich_mobile/services/toast.service.dart';
 import 'package:immich_mobile/utils/error_handler.dart';
 
 typedef _State = ({bool shouldArchive, List<String> assetIds});
@@ -57,7 +59,16 @@ class ArchiveAction extends AssetActionBuilder {
 
     try {
       await assetService.update(assetIds, visibility: .some(shouldArchive ? .archive : .timeline));
-      toastService.success(message);
+      toastService.success(
+        message,
+        toast: ToastOption(
+          timeout: const Duration(seconds: 8),
+          onUndo: () => assetService.update(
+            assetIds,
+            visibility: .some(shouldArchive ? AssetVisibility.timeline : AssetVisibility.archive),
+          ),
+        ),
+      );
       clearSelection();
     } catch (error, stack) {
       handleError(error, stack: stack, description: "Failed to update the archive status for assets");

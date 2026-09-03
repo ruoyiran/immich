@@ -28,6 +28,25 @@ void main() {
       expect(find.text('second'), findsOneWidget);
     });
 
+    testWidgets('runs the optional action', (tester) async {
+      var tapped = false;
+      await tester.pumpTestWidget(const SizedBox());
+
+      snackbar.success(
+        'saved',
+        actionLabel: 'Undo',
+        onAction: () => tapped = true,
+      );
+      await tester.pump(const Duration(milliseconds: 500));
+
+      final snackBar = tester.widget<SnackBar>(find.byType(SnackBar));
+      expect(snackBar.action, isNotNull);
+      snackBar.action!.onPressed();
+      await tester.pump();
+
+      expect(tapped, isTrue);
+    });
+
     testWidgets('no-ops when the messenger is unmounted', (tester) async {
       expect(snackbar.show('x', .info), isNull);
     });
