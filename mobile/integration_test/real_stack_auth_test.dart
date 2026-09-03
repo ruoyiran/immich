@@ -15,10 +15,14 @@ import 'package:immich_mobile/constants/enums.dart';
 import 'package:immich_mobile/domain/models/album/album.model.dart';
 import 'package:immich_mobile/domain/models/asset/base_asset.model.dart';
 import 'package:immich_mobile/domain/models/events.model.dart';
+import 'package:immich_mobile/domain/models/exif.model.dart';
+import 'package:immich_mobile/domain/models/person.model.dart';
 import 'package:immich_mobile/domain/models/store.model.dart';
 import 'package:immich_mobile/domain/models/sync_event.model.dart';
 import 'package:immich_mobile/domain/models/timeline.model.dart';
 import 'package:immich_mobile/domain/models/user.model.dart';
+import 'package:immich_mobile/domain/services/asset.service.dart';
+import 'package:immich_mobile/domain/services/people.service.dart';
 import 'package:immich_mobile/domain/services/search.service.dart';
 import 'package:immich_mobile/domain/services/timeline.service.dart';
 import 'package:immich_mobile/domain/utils/event_stream.dart';
@@ -40,6 +44,7 @@ import 'package:immich_mobile/providers/infrastructure/album.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/asset.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/cancel.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/db.provider.dart';
+import 'package:immich_mobile/providers/infrastructure/people.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/search.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/sync.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/timeline.provider.dart';
@@ -1736,6 +1741,163 @@ void main() async {
       });
     });
 
+    _realStackSessionTest('MOB-REAL-026-$_caseSuffix', 'shows synced people and places for processed assets', (
+      tester,
+    ) async {
+      await _loadAuthenticatedApp(tester, overrideCancellation: true);
+      final container = _containerOfApp(tester);
+      final drift = container.read(driftProvider);
+      final apiService = container.read(apiServiceProvider);
+      final assetsApi = apiService.assetsApi;
+      final peopleApi = apiService.peopleApi;
+      final peopleService = container.read(driftPeopleServiceProvider);
+      final assetService = container.read(assetServiceProvider);
+      final uploadedRemoteIds = <String>[];
+      String? personId;
+
+      addTearDown(() async {
+        final id = personId;
+        if (id != null) {
+          await _deletePersonBestEffort(peopleApi, id);
+        }
+        for (final assetId in uploadedRemoteIds) {
+          await _deleteTestAssetBestEffort(assetsApi, assetId);
+        }
+      });
+
+      await container.read(syncApiRepositoryProvider).deleteSyncAck(_allReplayableSyncAckTypes);
+      await Store.delete(StoreKey.syncMigrationStatus);
+      await container.read(syncStreamRepositoryProvider).reset();
+      final baselineSyncSuccess = await container.read(syncStreamServiceProvider).sync();
+      expect(baselineSyncSuccess, isTrue);
+      final user = Store.tryGet(StoreKey.currentUser);
+      expect(user, isNotNull);
+
+      final runToken = DateTime.now().toUtc().microsecondsSinceEpoch.toString();
+      final personName = 'Immich E2E Person 026 $runToken';
+      final city = 'Immich E2E City 026 $runToken';
+      const state = 'Immich E2E State';
+      const country = 'Immich E2E Country';
+      final baseCreatedAt = DateTime.utc(2026, 1, 26, 12);
+
+      for (var index = 0; index < 3; index++) {
+        final createdAt = baseCreatedAt.add(Duration(minutes: index));
+        final assetId = await _uploadGeneratedJpegAsSecondClient(
+          'immich-e2e-people-places-026-$runToken-$index.jpg',
+          createdAt,
+          sourceMetadata: {
+            'device_make': 'ImmichE2E',
+            'device_model': 'PeoplePlaces026',
+            'width': 64,
+            'height': 64,
+            'latitude': 31.143680555555555 + index / 1000,
+            'longitude': 121.65776944444445 + index / 1000,
+            'country': country,
+            'state': state,
+            'city': city,
+          },
+        );
+        uploadedRemoteIds.add(assetId);
+      }
+
+      final createdPerson = await peopleApi.createPerson(
+        api.PersonCreateDto(
+          name: api.Optional.present(personName),
+          isHidden: const api.Optional.present(false),
+          isFavorite: const api.Optional.present(false),
+          birthDate: const api.Optional.present(null),
+          color: const api.Optional.present(null),
+        ),
+      );
+      expect(createdPerson, isNotNull);
+      personId = createdPerson!.id;
+
+      for (var index = 0; index < uploadedRemoteIds.length; index++) {
+        await _createFaceAsSecondClient(
+          assetId: uploadedRemoteIds[index],
+          personId: personId,
+          x: 6 + index,
+          y: 7 + index,
+          width: 24,
+          height: 28,
+          imageWidth: 64,
+          imageHeight: 64,
+        );
+      }
+
+      final serverFaces = await _waitForServerFaces(
+        tester,
+        uploadedRemoteIds.first,
+        (faces) => faces.any(
+          (face) =>
+              face['person'] is Map &&
+              (face['person'] as Map)['id'] == personId &&
+              face['boundingBoxX1'] == 6 &&
+              face['boundingBoxY1'] == 7 &&
+              face['sourceType'] == 'manual',
+        ),
+        reason: 'Expected server faces endpoint to link the test person and first asset',
+      );
+      expect(serverFaces, isNotEmpty);
+
+      final serverPlaceAssets = await _waitForServerPlaces(
+        tester,
+        (assets) => assets.any(
+          (asset) => uploadedRemoteIds.contains(asset.id) && asset.exifInfo.orElse(null)?.city.orElse(null) == city,
+        ),
+        reason: 'Expected server places endpoint to include the uploaded city asset',
+      );
+      expect(serverPlaceAssets.map((asset) => asset.exifInfo.orElse(null)?.city.orElse(null)), contains(city));
+
+      final syncSuccess = await container.read(syncStreamServiceProvider).sync();
+      expect(syncSuccess, isTrue);
+
+      final localAsset = await _waitForRemoteAssetState(
+        tester,
+        container,
+        uploadedRemoteIds.first,
+        (asset) => asset.visibility == AssetVisibility.timeline && !asset.isTrashed,
+        reason: 'Expected people/places asset to sync locally',
+      );
+      final localExif = await _waitForRemoteExifState(
+        tester,
+        assetService,
+        localAsset,
+        (exif) => exif.city == city && exif.state == state && exif.country == country && exif.hasCoordinates,
+        reason: 'Expected uploaded GPS metadata to sync into local EXIF',
+      );
+      expect(localExif.city, city);
+
+      final localPeople = await _waitForLocalPeopleState(
+        tester,
+        peopleService,
+        (people) => people.any((person) => person.id == personId && person.name == personName),
+        reason: 'Expected synced people list to include the created person',
+      );
+      expect(localPeople.map((person) => person.id), contains(personId));
+
+      for (final assetId in uploadedRemoteIds) {
+        final assetPeople = await _waitForAssetPeopleState(
+          tester,
+          peopleService,
+          assetId,
+          (people) => people.any((person) => person.id == personId),
+          reason: 'Expected synced face membership for asset $assetId',
+        );
+        expect(assetPeople.map((person) => person.name), contains(personName));
+        expect(await _remoteAssetFaceRowCount(drift, assetId, personId), 1);
+      }
+
+      final localPlaces = await _waitForLocalPlacesState(
+        tester,
+        assetService,
+        user!.id,
+        (places) => places.any((place) => place.$1 == city && uploadedRemoteIds.contains(place.$2)),
+        reason: 'Expected synced places list to include the uploaded city',
+      );
+      expect(localPlaces.map((place) => place.$1), contains(city));
+    });
+
     if (_selectedCaseId.isNotEmpty && !_registeredSelectedCase) {
       test(_selectedCaseId, () => fail('No real stack auth test registered for $_selectedCaseId'));
     }
@@ -2718,6 +2880,37 @@ Future<void> _updateTestAssetSourceMetadata(
   expect(response.statusCode, 200, reason: response.body);
 }
 
+Future<void> _createFaceAsSecondClient({
+  required String assetId,
+  required String personId,
+  required int x,
+  required int y,
+  required int width,
+  required int height,
+  required int imageWidth,
+  required int imageHeight,
+}) async {
+  final request = http.Request('POST', Uri.parse('${Store.get(StoreKey.serverEndpoint)}/faces'))
+    ..headers.addAll({
+      ...ApiService.getRequestHeaders(),
+      'Authorization': 'Bearer ${Store.get(StoreKey.accessToken)}',
+      HttpHeaders.contentTypeHeader: 'application/json',
+    })
+    ..body = jsonEncode({
+      'assetId': assetId,
+      'personId': personId,
+      'x': x,
+      'y': y,
+      'width': width,
+      'height': height,
+      'imageWidth': imageWidth,
+      'imageHeight': imageHeight,
+    });
+
+  final response = await http.Response.fromStream(await request.send());
+  expect(response.statusCode, inInclusiveRange(200, 299), reason: response.body);
+}
+
 Future<void> _deleteTestAssetBestEffort(api.AssetsApi assetsApi, String remoteAssetId) async {
   try {
     await assetsApi.deleteAssets(
@@ -2730,6 +2923,14 @@ Future<void> _deleteTestAssetBestEffort(api.AssetsApi assetsApi, String remoteAs
     await assetsApi.deleteAssets(api.AssetBulkDeleteDto(ids: [remoteAssetId], force: const api.Optional.present(true)));
   } catch (_) {
     // Best-effort cleanup for a test-created asset.
+  }
+}
+
+Future<void> _deletePersonBestEffort(api.PeopleApi peopleApi, String personId) async {
+  try {
+    await peopleApi.deletePerson(personId);
+  } catch (_) {
+    // Best-effort cleanup for a test-created person.
   }
 }
 
@@ -2842,6 +3043,183 @@ Future<Set<String>> _waitForSearchServiceAssetIds(
   }
 
   fail('$reason; latest app search ids=${latest.toList()..sort()}; last error=$lastError');
+}
+
+Future<List<Map<String, dynamic>>> _waitForServerFaces(
+  WidgetTester tester,
+  String remoteAssetId,
+  bool Function(List<Map<String, dynamic>> faces) matches, {
+  required String reason,
+}) async {
+  var latest = const <Map<String, dynamic>>[];
+  http.Response? lastResponse;
+  Object? lastError;
+  final end = DateTime.now().add(const Duration(seconds: 60));
+  while (DateTime.now().isBefore(end)) {
+    try {
+      final uri = Uri.parse(
+        '${Store.get(StoreKey.serverEndpoint)}/faces',
+      ).replace(queryParameters: {'id': remoteAssetId});
+      final response = await http.get(
+        uri,
+        headers: {...ApiService.getRequestHeaders(), 'Authorization': 'Bearer ${Store.get(StoreKey.accessToken)}'},
+      );
+      if (response.statusCode >= 200 && response.statusCode < 300) {
+        final payload = jsonDecode(response.body);
+        if (payload is List) {
+          latest = payload.whereType<Map>().map((face) => face.cast<String, dynamic>()).toList(growable: false);
+          if (matches(latest)) {
+            return latest;
+          }
+        }
+      }
+      lastResponse = response;
+    } catch (error) {
+      lastError = error;
+    }
+    await _pumpFor(tester, const Duration(milliseconds: 500));
+  }
+
+  fail(
+    '$reason; latest server faces=$latest; '
+    'last status=${lastResponse?.statusCode}; last body=${lastResponse?.body}; last error=$lastError',
+  );
+}
+
+Future<List<api.AssetResponseDto>> _waitForServerPlaces(
+  WidgetTester tester,
+  bool Function(List<api.AssetResponseDto> assets) matches, {
+  required String reason,
+}) async {
+  var latest = const <api.AssetResponseDto>[];
+  http.Response? lastResponse;
+  Object? lastError;
+  final end = DateTime.now().add(const Duration(seconds: 60));
+  while (DateTime.now().isBefore(end)) {
+    try {
+      final response = await http.get(
+        Uri.parse('${Store.get(StoreKey.serverEndpoint)}/search/cities'),
+        headers: {...ApiService.getRequestHeaders(), 'Authorization': 'Bearer ${Store.get(StoreKey.accessToken)}'},
+      );
+      if (response.statusCode >= 200 && response.statusCode < 300) {
+        final payload = jsonDecode(response.body);
+        if (payload is List) {
+          latest = [
+            for (final item in payload)
+              if (api.AssetResponseDto.fromJson(item) != null) api.AssetResponseDto.fromJson(item)!,
+          ];
+          if (matches(latest)) {
+            return latest;
+          }
+        }
+      }
+      lastResponse = response;
+    } catch (error) {
+      lastError = error;
+    }
+    await _pumpFor(tester, const Duration(milliseconds: 500));
+  }
+
+  fail(
+    '$reason; latest server city assets=$latest; '
+    'last status=${lastResponse?.statusCode}; last body=${lastResponse?.body}; last error=$lastError',
+  );
+}
+
+Future<ExifInfo> _waitForRemoteExifState(
+  WidgetTester tester,
+  AssetService assetService,
+  BaseAsset asset,
+  bool Function(ExifInfo exif) matches, {
+  required String reason,
+}) async {
+  ExifInfo? latest;
+  final end = DateTime.now().add(const Duration(seconds: 60));
+  while (DateTime.now().isBefore(end)) {
+    latest = await assetService.getExif(asset);
+    if (latest != null && matches(latest)) {
+      return latest;
+    }
+    await _pumpFor(tester, const Duration(milliseconds: 500));
+  }
+
+  fail('$reason; latest local EXIF=$latest');
+}
+
+Future<List<DriftPerson>> _waitForLocalPeopleState(
+  WidgetTester tester,
+  DriftPeopleService peopleService,
+  bool Function(List<DriftPerson> people) matches, {
+  required String reason,
+}) async {
+  var latest = const <DriftPerson>[];
+  final end = DateTime.now().add(const Duration(seconds: 60));
+  while (DateTime.now().isBefore(end)) {
+    latest = await peopleService.getAllPeople(minFaces: 1);
+    if (matches(latest)) {
+      return latest;
+    }
+    await _pumpFor(tester, const Duration(milliseconds: 500));
+  }
+
+  fail('$reason; latest local people=$latest');
+}
+
+Future<List<DriftPerson>> _waitForAssetPeopleState(
+  WidgetTester tester,
+  DriftPeopleService peopleService,
+  String remoteAssetId,
+  bool Function(List<DriftPerson> people) matches, {
+  required String reason,
+}) async {
+  var latest = const <DriftPerson>[];
+  final end = DateTime.now().add(const Duration(seconds: 60));
+  while (DateTime.now().isBefore(end)) {
+    latest = await peopleService.getAssetPeople(remoteAssetId);
+    if (matches(latest)) {
+      return latest;
+    }
+    await _pumpFor(tester, const Duration(milliseconds: 500));
+  }
+
+  fail('$reason; latest local asset people=$latest');
+}
+
+Future<List<(String, String)>> _waitForLocalPlacesState(
+  WidgetTester tester,
+  AssetService assetService,
+  String userId,
+  bool Function(List<(String, String)> places) matches, {
+  required String reason,
+}) async {
+  var latest = const <(String, String)>[];
+  final end = DateTime.now().add(const Duration(seconds: 60));
+  while (DateTime.now().isBefore(end)) {
+    latest = await assetService.getPlaces(userId);
+    if (matches(latest)) {
+      return latest;
+    }
+    await _pumpFor(tester, const Duration(milliseconds: 500));
+  }
+
+  fail('$reason; latest local places=$latest');
+}
+
+Future<int> _remoteAssetFaceRowCount(Drift drift, String remoteAssetId, String personId) async {
+  final row = await drift
+      .customSelect(
+        '''
+SELECT COUNT(*) AS count
+FROM asset_face_entity
+WHERE asset_id = ?
+  AND person_id = ?
+  AND is_visible = 1
+  AND deleted_at IS NULL
+''',
+        variables: [Variable.withString(remoteAssetId), Variable.withString(personId)],
+      )
+      .getSingle();
+  return row.read<int>('count');
 }
 
 Set<String> _serverSearchAssetIds(api.SearchResponseDto response) =>
