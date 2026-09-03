@@ -138,9 +138,24 @@ void main() {
 
       final location =
           verify(() => assetService.update([mine.id], location: captureAny(named: 'location'))).captured.single
-              as Option<LatLng>;
+              as Option<LatLng?>;
       expect(location.unwrapOrNull?.latitude, 1);
       expect(location.unwrapOrNull?.longitude, 2);
+    });
+
+    testWidgets('clears the location against every owned asset and keeps null present', (tester) async {
+      final mine = owned();
+      final theirs = RemoteAssetFactory.create();
+
+      await pumpAction(tester, const EditLocationAction(source: .timeline), {mine, theirs});
+      await clearLocation(actionContext, actionRef, [mine.id]);
+      await tester.pumpAndSettle();
+
+      final location =
+          verify(() => assetService.update([mine.id], location: captureAny(named: 'location'))).captured.single
+              as Option<LatLng?>;
+      expect(location, isA<Some<LatLng?>>());
+      expect(location.unwrapOrNull, isNull);
     });
   });
 

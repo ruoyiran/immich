@@ -280,8 +280,9 @@ class RemoteAssetRepository extends DriftDatabaseRepository {
     Option<bool> isFavorite = const .none(),
     Option<AssetVisibility> visibility = const .none(),
     Option<DateTime> createdAt = const .none(),
+    Option<DateTime> localDateTime = const .none(),
   }) async {
-    if ([isFavorite, visibility, createdAt].every((option) => option.isNone)) {
+    if ([isFavorite, visibility, createdAt, localDateTime].every((option) => option.isNone)) {
       return;
     }
 
@@ -289,6 +290,7 @@ class RemoteAssetRepository extends DriftDatabaseRepository {
       visibility: visibility.toDriftValue(),
       isFavorite: isFavorite.toDriftValue(),
       createdAt: createdAt.toDriftValue(),
+      localDateTime: localDateTime.toDriftValue(),
     );
     return _db.batch((batch) {
       for (final remoteId in remoteIds) {

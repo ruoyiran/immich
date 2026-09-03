@@ -12,7 +12,7 @@ class RemoteExifRepository extends DriftDatabaseRepository {
     List<String> ids, {
     Option<DateTime> dateTimeOriginal = const .none(),
     Option<String> timeZone = const .none(),
-    Option<LatLng> location = const .none(),
+    Option<LatLng?> location = const .none(),
   }) async {
     if ([dateTimeOriginal, timeZone, location].every((option) => option.isNone)) {
       return;
@@ -21,8 +21,8 @@ class RemoteExifRepository extends DriftDatabaseRepository {
     final companion = RemoteExifEntityCompanion(
       dateTimeOriginal: dateTimeOriginal.toDriftValue(),
       timeZone: timeZone.toDriftValue(),
-      latitude: location.map((loc) => loc.latitude).toDriftValue(),
-      longitude: location.map((loc) => loc.longitude).toDriftValue(),
+      latitude: location.map((loc) => loc?.latitude).toDriftValue(),
+      longitude: location.map((loc) => loc?.longitude).toDriftValue(),
     );
 
     return _db.batch((batch) {

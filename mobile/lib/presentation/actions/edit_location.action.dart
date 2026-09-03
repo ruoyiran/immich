@@ -9,6 +9,7 @@ import 'package:immich_mobile/providers/infrastructure/asset.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/asset_viewer/asset.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/toast.provider.dart';
 import 'package:immich_mobile/utils/error_handler.dart';
+import 'package:immich_mobile/utils/option.dart';
 import 'package:immich_mobile/widgets/common/location_picker.dart';
 import 'package:maplibre_gl/maplibre_gl.dart';
 
@@ -79,7 +80,16 @@ Future<void> saveLocation(BuildContext context, WidgetRef ref, List<String> asse
   final message = context.t.edit_location_action_prompt(count: assetIds.length);
   final toastService = ref.read(toastServiceProvider);
 
-  await ref.read(assetServiceProvider).update(assetIds, location: .some(location));
+  await ref.read(assetServiceProvider).update(assetIds, location: Option<LatLng?>.some(location));
+  ref.invalidate(assetExifProvider);
+  toastService.success(message);
+}
+
+Future<void> clearLocation(BuildContext context, WidgetRef ref, List<String> assetIds) async {
+  final message = context.t.edit_location_action_prompt(count: assetIds.length);
+  final toastService = ref.read(toastServiceProvider);
+
+  await ref.read(assetServiceProvider).update(assetIds, location: const Option<LatLng?>.some(null));
   ref.invalidate(assetExifProvider);
   toastService.success(message);
 }
