@@ -31,10 +31,12 @@ import 'package:immich_mobile/domain/services/timeline.service.dart';
 import 'package:immich_mobile/domain/utils/event_stream.dart';
 import 'package:immich_mobile/entities/store.entity.dart';
 import 'package:immich_mobile/infrastructure/repositories/db.repository.dart';
+import 'package:immich_mobile/infrastructure/repositories/local_album.repository.dart';
 import 'package:immich_mobile/infrastructure/repositories/settings.repository.dart';
 import 'package:immich_mobile/infrastructure/repositories/storage.repository.dart';
 import 'package:immich_mobile/main.dart' as app;
 import 'package:immich_mobile/models/search/search_filter.model.dart';
+import 'package:immich_mobile/pages/backup/drift_backup_album_selection.page.dart';
 import 'package:immich_mobile/pages/library/locked/pin_auth.page.dart';
 import 'package:immich_mobile/pages/login/login.page.dart';
 import 'package:immich_mobile/presentation/pages/dev/main_timeline.page.dart';
@@ -51,6 +53,7 @@ import 'package:immich_mobile/providers/api.provider.dart';
 import 'package:immich_mobile/providers/asset_viewer/asset_viewer.provider.dart';
 import 'package:immich_mobile/providers/asset_viewer/video_player_provider.dart';
 import 'package:immich_mobile/providers/background_sync.provider.dart';
+import 'package:immich_mobile/providers/backup/backup_album.provider.dart';
 import 'package:immich_mobile/providers/gallery_permission.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/album.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/asset.provider.dart';
@@ -74,6 +77,7 @@ import 'package:immich_mobile/utils/bootstrap.dart';
 import 'package:immich_mobile/utils/option.dart';
 import 'package:immich_mobile/utils/semver.dart';
 import 'package:immich_mobile/widgets/asset_viewer/video_controls.dart';
+import 'package:immich_mobile/widgets/backup/drift_album_info_list_tile.dart';
 import 'package:immich_mobile/widgets/photo_view/photo_view.dart';
 import 'package:openapi/api.dart' as api;
 import 'package:path_provider/path_provider.dart';
@@ -145,6 +149,10 @@ const _upgradeExpectedBackupSettings = <String, Object>{
   'backupRequireCharging': true,
   'backupTriggerDelay': 17,
 };
+const _backupAlbumSelectionCameraAlbum = 'Camera';
+const _backupAlbumSelectionScreenshotsAlbum = 'Screenshots';
+const _backupAlbumSelectionDownloadAlbum = 'Download';
+const _backupAlbumSelectionDuplicateAlbum = 'ImmichE2ESameName035';
 
 var _registeredSelectedCase = false;
 
@@ -3098,6 +3106,132 @@ void main() async {
       },
     );
 
+    _realStackSessionTest(
+      'MOB-UI-035-$_caseSuffix',
+      'persists backup album search, selection, exclusions, and upload scope',
+      (tester) async {
+        tester.view.devicePixelRatio = 1.0;
+        tester.view.physicalSize = const Size(430, 932);
+        addTearDown(tester.view.reset);
+
+        await _loadAuthenticatedApp(tester, overrideCancellation: true, closeDriftOnDispose: false);
+        final container = _containerOfApp(tester);
+        final drift = container.read(driftProvider);
+        final albumRepository = container.read(localAlbumRepository);
+        final router = container.read(appRouterProvider);
+        final user = Store.tryGet(StoreKey.currentUser);
+        expect(user, isNotNull);
+
+        final originalSelections = await _albumBackupSelections(container);
+        final originalBackupEnabled = SettingsRepository.instance.appConfig.backup.enabled;
+        final originalSyncAlbums = SettingsRepository.instance.appConfig.backup.syncAlbums;
+        addTearDown(() async {
+          await _restoreAlbumBackupSelections(albumRepository, originalSelections);
+          await SettingsRepository.instance.write(SettingsKey.backupEnabled, originalBackupEnabled);
+          await SettingsRepository.instance.write(SettingsKey.backupSyncAlbums, originalSyncAlbums);
+          await drift.close();
+        });
+
+        await SettingsRepository.instance.write(SettingsKey.backupEnabled, false);
+        await SettingsRepository.instance.write(SettingsKey.backupSyncAlbums, false);
+        await _clearAlbumBackupSelections(container);
+
+        final albums = await _waitForBackupAlbumFixtures(
+          tester,
+          container,
+          requiredNames: {
+            _backupAlbumSelectionCameraAlbum,
+            _backupAlbumSelectionScreenshotsAlbum,
+            _backupAlbumSelectionDownloadAlbum,
+          },
+          duplicatedName: _backupAlbumSelectionDuplicateAlbum,
+        );
+        final cameraAlbum = _singleAlbumNamed(albums, _backupAlbumSelectionCameraAlbum);
+        final screenshotsAlbum = _singleAlbumNamed(albums, _backupAlbumSelectionScreenshotsAlbum);
+        final downloadAlbum = _singleAlbumNamed(albums, _backupAlbumSelectionDownloadAlbum);
+        final duplicateAlbums = _albumsNamed(albums, _backupAlbumSelectionDuplicateAlbum);
+        expect(duplicateAlbums, hasLength(2), reason: 'Expected two same-name fixture albums for duplicate handling');
+
+        unawaited(router.push(const DriftBackupAlbumSelectionRoute()));
+        await _pumpUntil(
+          tester,
+          () => find.byType(DriftBackupAlbumSelectionPage).evaluate().isNotEmpty,
+          timeout: const Duration(seconds: 30),
+        );
+
+        await _searchBackupAlbums(tester, _backupAlbumSelectionCameraAlbum);
+        await _waitForVisibleBackupAlbumTile(tester, _backupAlbumSelectionCameraAlbum);
+        final cameraSearchResults = _visibleBackupAlbumNames(tester);
+        expect(cameraSearchResults, contains(_backupAlbumSelectionCameraAlbum));
+        expect(cameraSearchResults, isNot(contains(_backupAlbumSelectionScreenshotsAlbum)));
+
+        await _tapBackupAlbumTile(tester, _backupAlbumSelectionCameraAlbum);
+        await _waitForAlbumSelection(container, cameraAlbum.id, BackupSelection.selected, tester);
+        await _clearBackupAlbumSearch(tester);
+        await _waitForAlbumSelection(container, cameraAlbum.id, BackupSelection.selected, tester);
+
+        await _tapBackupAlbumTile(tester, _backupAlbumSelectionCameraAlbum);
+        await _waitForAlbumSelection(container, cameraAlbum.id, BackupSelection.none, tester);
+
+        await _searchBackupAlbums(tester, _backupAlbumSelectionDuplicateAlbum);
+        await _waitForVisibleBackupAlbumTile(tester, _backupAlbumSelectionDuplicateAlbum);
+        expect(
+          _visibleBackupAlbumNames(tester).where((name) => name == _backupAlbumSelectionDuplicateAlbum),
+          hasLength(2),
+        );
+        await tester.tap(find.widgetWithText(ElevatedButton, 'select_all'.tr()));
+        await _pumpFor(tester, const Duration(milliseconds: 800));
+        for (final album in duplicateAlbums) {
+          await _waitForAlbumSelection(container, album.id, BackupSelection.selected, tester);
+        }
+        await _clearBackupAlbumSearch(tester);
+
+        await _searchBackupAlbums(tester, _backupAlbumSelectionScreenshotsAlbum);
+        await _waitForVisibleBackupAlbumTile(tester, _backupAlbumSelectionScreenshotsAlbum);
+        await _tapBackupAlbumTile(tester, _backupAlbumSelectionScreenshotsAlbum);
+        await _waitForAlbumSelection(container, screenshotsAlbum.id, BackupSelection.selected, tester);
+        await _clearBackupAlbumSearch(tester);
+
+        await _searchBackupAlbums(tester, _backupAlbumSelectionDownloadAlbum);
+        await _waitForVisibleBackupAlbumTile(tester, _backupAlbumSelectionDownloadAlbum);
+        await _doubleTapBackupAlbumTile(tester, _backupAlbumSelectionDownloadAlbum);
+        await _waitForAlbumSelection(container, downloadAlbum.id, BackupSelection.excluded, tester);
+        expect(
+          await _albumSelection(container, downloadAlbum.id),
+          isNot(BackupSelection.selected),
+          reason: 'An excluded album must be mutually exclusive with selected backup albums',
+        );
+
+        await _popBackupAlbumSelectionPage(tester);
+
+        final selectedAlbumIds = {screenshotsAlbum.id, ...duplicateAlbums.map((album) => album.id)};
+        final excludedAlbumIds = {downloadAlbum.id};
+        await _expectAlbumSelections(container, {
+          cameraAlbum.id: BackupSelection.none,
+          screenshotsAlbum.id: BackupSelection.selected,
+          for (final album in duplicateAlbums) album.id: BackupSelection.selected,
+          downloadAlbum.id: BackupSelection.excluded,
+        });
+        final expectedTotal = await _expectedBackupAssetTotal(container, selectedAlbumIds, excludedAlbumIds);
+        final counts = await container.read(foregroundUploadServiceProvider).getBackupCounts(user!.id);
+        expect(counts.total, expectedTotal);
+
+        unawaited(router.push(const DriftBackupAlbumSelectionRoute()));
+        await _pumpUntil(
+          tester,
+          () => find.byType(DriftBackupAlbumSelectionPage).evaluate().isNotEmpty,
+          timeout: const Duration(seconds: 30),
+        );
+        await container.read(backupAlbumProvider.notifier).getAll();
+        await _expectAlbumSelections(container, {
+          screenshotsAlbum.id: BackupSelection.selected,
+          for (final album in duplicateAlbums) album.id: BackupSelection.selected,
+          downloadAlbum.id: BackupSelection.excluded,
+        });
+        await _popBackupAlbumSelectionPage(tester);
+      },
+    );
+
     if (_selectedCaseId.isNotEmpty && !_registeredSelectedCase) {
       test(_selectedCaseId, () => fail('No real stack auth test registered for $_selectedCaseId'));
     }
@@ -4005,6 +4139,202 @@ Future<void> _selectOnlyBackupAlbumForAsset(ProviderContainer container, LocalAs
   final sourceAlbums = await container.read(localAssetRepository).getSourceAlbums(asset.id);
   expect(sourceAlbums, isNotEmpty, reason: 'Expected ${asset.name} to belong to at least one local album');
   await albumRepository.upsert(sourceAlbums.first.copyWith(backupSelection: BackupSelection.selected));
+}
+
+Future<Map<String, BackupSelection>> _albumBackupSelections(ProviderContainer container) async {
+  final albums = await container.read(localAlbumServiceProvider).getAll();
+  return {for (final album in albums) album.id: album.backupSelection};
+}
+
+Future<void> _restoreAlbumBackupSelections(
+  DriftLocalAlbumRepository albumRepository,
+  Map<String, BackupSelection> selectionsById,
+) async {
+  final albums = await albumRepository.getAll();
+  for (final album in albums) {
+    final originalSelection = selectionsById[album.id] ?? BackupSelection.none;
+    if (album.backupSelection != originalSelection) {
+      await albumRepository.upsert(album.copyWith(backupSelection: originalSelection));
+    }
+  }
+}
+
+Future<void> _clearAlbumBackupSelections(ProviderContainer container) async {
+  final albumRepository = container.read(localAlbumRepository);
+  final albums = await albumRepository.getAll();
+  for (final album in albums) {
+    if (album.backupSelection != BackupSelection.none) {
+      await albumRepository.upsert(album.copyWith(backupSelection: BackupSelection.none));
+    }
+  }
+  await container.read(backupAlbumProvider.notifier).getAll();
+}
+
+Future<List<LocalAlbum>> _waitForBackupAlbumFixtures(
+  WidgetTester tester,
+  ProviderContainer container, {
+  required Set<String> requiredNames,
+  required String duplicatedName,
+}) async {
+  var albums = <LocalAlbum>[];
+  for (var attempt = 0; attempt < 12; attempt++) {
+    await container.read(backgroundSyncProvider).syncLocal(full: true);
+    await container.read(backupAlbumProvider.notifier).getAll();
+    albums = await container.read(localAlbumServiceProvider).getAll();
+    final names = albums.map((album) => album.name).toSet();
+    final hasRequired = requiredNames.every(names.contains);
+    final duplicateCount = albums.where((album) => album.name == duplicatedName).length;
+    if (hasRequired && duplicateCount >= 2) {
+      return albums;
+    }
+    await _pumpFor(tester, const Duration(seconds: 2));
+  }
+
+  final seenNames = albums.map((album) => album.name).toSet().toList()..sort();
+  fail(
+    'Expected backup album fixtures $requiredNames and two "$duplicatedName" albums; '
+    'saw ${seenNames.join(', ')}',
+  );
+}
+
+LocalAlbum _singleAlbumNamed(List<LocalAlbum> albums, String name) {
+  final matches = _albumsNamed(albums, name);
+  expect(matches, hasLength(1), reason: 'Expected exactly one local album named $name');
+  return matches.single;
+}
+
+List<LocalAlbum> _albumsNamed(List<LocalAlbum> albums, String name) {
+  return albums.where((album) => album.name == name).toList();
+}
+
+Future<void> _searchBackupAlbums(WidgetTester tester, String query) async {
+  final page = find.byType(DriftBackupAlbumSelectionPage);
+  final searchButton = find.descendant(of: page, matching: find.byIcon(Icons.search));
+  if (searchButton.evaluate().isNotEmpty) {
+    await tester.tap(searchButton.last);
+    await _pumpFor(tester, const Duration(milliseconds: 300));
+  }
+  await tester.enterText(find.descendant(of: page, matching: find.byType(TextField)).last, query);
+  await tester.testTextInput.receiveAction(TextInputAction.done);
+  FocusManager.instance.primaryFocus?.unfocus();
+  await _pumpFor(tester, const Duration(milliseconds: 500));
+}
+
+Future<void> _clearBackupAlbumSearch(WidgetTester tester) async {
+  final page = find.byType(DriftBackupAlbumSelectionPage);
+  await tester.tap(find.descendant(of: page, matching: find.byIcon(Icons.close)).last);
+  await _pumpFor(tester, const Duration(milliseconds: 500));
+}
+
+Future<void> _tapBackupAlbumTile(WidgetTester tester, String albumName) async {
+  await _ensureBackupAlbumVisible(tester, albumName);
+  await tester.tap(_backupAlbumTileFinder(albumName).first, warnIfMissed: false);
+  await _pumpFor(tester, const Duration(milliseconds: 800));
+}
+
+Future<void> _doubleTapBackupAlbumTile(WidgetTester tester, String albumName) async {
+  await _ensureBackupAlbumVisible(tester, albumName);
+  await tester.tap(_backupAlbumTileFinder(albumName).first, warnIfMissed: false);
+  await tester.pump(const Duration(milliseconds: 80));
+  await tester.tap(_backupAlbumTileFinder(albumName).first, warnIfMissed: false);
+  await _pumpFor(tester, const Duration(milliseconds: 800));
+}
+
+Future<void> _ensureBackupAlbumVisible(WidgetTester tester, String albumName) async {
+  final tile = _backupAlbumTileFinder(albumName);
+  if (tile.evaluate().isNotEmpty) {
+    await tester.ensureVisible(tile.first);
+    return;
+  }
+
+  final scrollable = find.descendant(of: find.byType(DriftBackupAlbumSelectionPage), matching: find.byType(Scrollable));
+  expect(scrollable, findsWidgets, reason: 'Expected a scrollable backup album list before looking for $albumName');
+  await tester.scrollUntilVisible(tile, 600, scrollable: scrollable.first, maxScrolls: 40);
+  await _pumpFor(tester, const Duration(milliseconds: 200));
+}
+
+Finder _backupAlbumTileFinder(String albumName) {
+  return find.byWidgetPredicate((widget) => widget is DriftAlbumInfoListTile && widget.album.name == albumName);
+}
+
+List<String> _visibleBackupAlbumNames(WidgetTester tester) {
+  return tester
+      .widgetList<DriftAlbumInfoListTile>(find.byType(DriftAlbumInfoListTile))
+      .map((tile) => tile.album.name)
+      .toList();
+}
+
+Future<void> _waitForVisibleBackupAlbumTile(WidgetTester tester, String albumName) async {
+  var visibleNames = const <String>[];
+  for (var attempt = 0; attempt < 30; attempt++) {
+    visibleNames = _visibleBackupAlbumNames(tester);
+    if (visibleNames.contains(albumName)) {
+      return;
+    }
+    await _pumpFor(tester, const Duration(milliseconds: 200));
+  }
+
+  fail('Expected visible backup album "$albumName"; saw visible albums: ${visibleNames.join(', ')}');
+}
+
+Future<void> _waitForAlbumSelection(
+  ProviderContainer container,
+  String albumId,
+  BackupSelection selection,
+  WidgetTester tester,
+) async {
+  BackupSelection? lastSelection;
+  for (var attempt = 0; attempt < 20; attempt++) {
+    await container.read(backupAlbumProvider.notifier).getAll();
+    lastSelection = await _albumSelection(container, albumId);
+    if (lastSelection == selection) {
+      return;
+    }
+    await _pumpFor(tester, const Duration(milliseconds: 200));
+  }
+
+  fail('Expected album $albumId to be $selection but saw $lastSelection');
+}
+
+Future<BackupSelection> _albumSelection(ProviderContainer container, String albumId) async {
+  final albums = await container.read(localAlbumServiceProvider).getAll();
+  return albums.singleWhere((album) => album.id == albumId).backupSelection;
+}
+
+Future<void> _expectAlbumSelections(ProviderContainer container, Map<String, BackupSelection> expectedById) async {
+  final actual = await _albumBackupSelections(container);
+  for (final entry in expectedById.entries) {
+    expect(actual[entry.key], entry.value, reason: 'Unexpected backup selection for local album ${entry.key}');
+  }
+}
+
+Future<int> _expectedBackupAssetTotal(
+  ProviderContainer container,
+  Set<String> selectedAlbumIds,
+  Set<String> excludedAlbumIds,
+) async {
+  final albumRepository = container.read(localAlbumRepository);
+  final selectedAssetIds = <String>{};
+  for (final albumId in selectedAlbumIds) {
+    selectedAssetIds.addAll((await albumRepository.getAssets(albumId)).map((asset) => asset.id));
+  }
+
+  final excludedAssetIds = <String>{};
+  for (final albumId in excludedAlbumIds) {
+    excludedAssetIds.addAll((await albumRepository.getAssets(albumId)).map((asset) => asset.id));
+  }
+
+  return selectedAssetIds.difference(excludedAssetIds).length;
+}
+
+Future<void> _popBackupAlbumSelectionPage(WidgetTester tester) async {
+  await tester.tap(find.byIcon(Icons.arrow_back_ios_rounded).first);
+  await _pumpFor(tester, const Duration(seconds: 1));
+  await _pumpUntil(
+    tester,
+    () => find.byType(DriftBackupAlbumSelectionPage).evaluate().isEmpty,
+    timeout: const Duration(seconds: 30),
+  );
 }
 
 Future<void> _seedUpgradeState(WidgetTester tester) async {
