@@ -45,6 +45,8 @@ class VideoPlayerNotifier extends StateNotifier<VideoPlayerState> {
   Timer? _bufferingTimer;
   Timer? _seekTimer;
   VideoPlaybackStatus? _holdStatus;
+  VideoPlaybackStatus _requestedStatus = VideoPlaybackStatus.paused;
+  int _playbackOperation = 0;
 
   @override
   void dispose() {
@@ -74,11 +76,19 @@ class VideoPlayerNotifier extends StateNotifier<VideoPlayerState> {
       return;
     }
 
+    final operation = ++_playbackOperation;
+    _requestedStatus = VideoPlaybackStatus.paused;
     _bufferingTimer?.cancel();
+    if (mounted) {
+      state = state.copyWith(status: VideoPlaybackStatus.paused);
+    }
 
     try {
       await _controller!.pause();
       await _flushSeek();
+      if (mounted && operation == _playbackOperation) {
+        state = state.copyWith(status: VideoPlaybackStatus.paused);
+      }
     } catch (e) {
       _log.severe('Error pausing video: $e');
     }
@@ -89,14 +99,18 @@ class VideoPlayerNotifier extends StateNotifier<VideoPlayerState> {
       return;
     }
 
+    final operation = ++_playbackOperation;
+    _requestedStatus = VideoPlaybackStatus.playing;
     try {
       await _flushSeek();
       await _controller!.play();
+      if (mounted && operation == _playbackOperation) {
+        state = state.copyWith(status: VideoPlaybackStatus.playing);
+        _startBufferingTimer();
+      }
     } catch (e) {
       _log.severe('Error playing video: $e');
     }
-
-    _startBufferingTimer();
   }
 
   Future<void> _flushSeek() async {
@@ -236,6 +250,10 @@ class VideoPlayerNotifier extends StateNotifier<VideoPlayerState> {
     }
 
     final newStatus = _mapStatus(playbackInfo.status);
+    if (_requestedStatus == VideoPlaybackStatus.paused && newStatus == VideoPlaybackStatus.playing) {
+      return;
+    }
+
     switch (newStatus) {
       case VideoPlaybackStatus.playing:
         unawaited(WakelockPlus.enable());

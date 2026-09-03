@@ -45,7 +45,7 @@ class _NativeVideoViewerState extends ConsumerState<NativeVideoViewer> with Widg
   late final Future<VideoSource?> _videoSource;
   Timer? _loadTimer;
   bool _isVideoReady = false;
-  bool _shouldPlayOnForeground = true;
+  bool _shouldPlayOnForeground = false;
 
   VideoPlayerNotifier get _notifier => ref.read(videoPlayerProvider(widget.asset.id).notifier);
 
@@ -83,16 +83,22 @@ class _NativeVideoViewerState extends ConsumerState<NativeVideoViewer> with Widg
   }
 
   @override
-  Future<void> didChangeAppLifecycleState(AppLifecycleState state) async {
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (!mounted) {
+      return;
+    }
+
     switch (state) {
       case AppLifecycleState.resumed:
         if (_shouldPlayOnForeground) {
-          await _notifier.play();
+          _shouldPlayOnForeground = false;
+          unawaited(_notifier.play());
         }
       case AppLifecycleState.paused:
-        _shouldPlayOnForeground = await _controller?.isPlaying() ?? true;
-        if (_shouldPlayOnForeground && mounted) {
-          await _notifier.pause();
+        final status = ref.read(videoPlayerProvider(widget.asset.id)).status;
+        _shouldPlayOnForeground = status == VideoPlaybackStatus.playing || status == VideoPlaybackStatus.buffering;
+        if (_shouldPlayOnForeground) {
+          unawaited(_notifier.pause());
         }
       default:
     }

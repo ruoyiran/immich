@@ -21,10 +21,12 @@ import 'package:immich_mobile/entities/store.entity.dart';
 import 'package:immich_mobile/infrastructure/repositories/storage.repository.dart';
 import 'package:immich_mobile/main.dart' as app;
 import 'package:immich_mobile/presentation/widgets/asset_viewer/asset_viewer.page.dart';
+import 'package:immich_mobile/presentation/widgets/asset_viewer/video_viewer.widget.dart';
 import 'package:immich_mobile/presentation/widgets/images/thumbnail_tile.widget.dart';
 import 'package:immich_mobile/presentation/widgets/timeline/timeline.widget.dart';
 import 'package:immich_mobile/providers/api.provider.dart';
 import 'package:immich_mobile/providers/asset_viewer/asset_viewer.provider.dart';
+import 'package:immich_mobile/providers/asset_viewer/video_player_provider.dart';
 import 'package:immich_mobile/providers/background_sync.provider.dart';
 import 'package:immich_mobile/providers/gallery_permission.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/album.provider.dart';
@@ -36,6 +38,7 @@ import 'package:immich_mobile/repositories/download.repository.dart';
 import 'package:immich_mobile/services/api.service.dart';
 import 'package:immich_mobile/services/foreground_upload.service.dart';
 import 'package:immich_mobile/utils/bootstrap.dart';
+import 'package:immich_mobile/widgets/asset_viewer/video_controls.dart';
 import 'package:immich_mobile/widgets/photo_view/photo_view.dart';
 import 'package:openapi/api.dart' as api;
 import 'package:path_provider/path_provider.dart';
@@ -661,6 +664,89 @@ void main() async {
       expect(firstPageAgain.any((asset) => asset.refersToSameAsset(imageAssets.first)), isTrue);
     });
 
+    _realStackSessionTest('MOB-REAL-018-$_caseSuffix', 'plays, pauses, seeks, and resumes a remote video viewer', (
+      tester,
+    ) async {
+      await _loadAuthenticatedApp(tester);
+
+      final container = _containerOfApp(tester);
+      final syncSuccess = await container.read(backgroundSyncProvider).syncRemote();
+      expect(syncSuccess, isTrue);
+
+      final user = Store.tryGet(StoreKey.currentUser);
+      expect(user, isNotNull);
+
+      final timeline = container.read(timelineFactoryProvider).main([user!.id]);
+      addTearDown(timeline.dispose);
+
+      await _waitForTimelineBuckets(tester, timeline, minAssets: _timelineMinimumAssetCount);
+      final assets = await _loadAllTimelineAssets(timeline);
+      final video = _firstRemoteVideo(assets);
+      expect(video, isNotNull, reason: 'Expected at least one remote video in the real timeline');
+
+      await _expectRemoteVideoMedia(container, tester, video!);
+      await _openTimelineAsset(tester, video);
+      await pumpUntilFound(tester, find.byType(AssetViewer), timeout: const Duration(seconds: 60));
+      expect(container.read(assetViewerProvider).currentAsset?.remoteId, video.id);
+      await pumpUntilFound(tester, find.byType(NativeVideoViewer), timeout: const Duration(seconds: 60));
+
+      final loaded = await _waitForVideoState(
+        tester,
+        container,
+        video.id,
+        (state) => state.duration > Duration.zero,
+        timeout: const Duration(seconds: 90),
+      );
+      expect(loaded.duration, greaterThan(const Duration(seconds: 2)));
+
+      await _playVideoFromControls(tester, container, video.id);
+      final firstPlayingPosition = await _waitForVideoPositionAfter(tester, container, video.id, Duration.zero);
+      expect(firstPlayingPosition, greaterThan(Duration.zero));
+
+      await _pauseVideoFromControls(tester, container, video.id);
+      final pausedPosition = container.read(videoPlayerProvider(video.id)).position;
+      await _pumpFor(tester, const Duration(seconds: 2));
+      final pausedAfterWait = container.read(videoPlayerProvider(video.id)).position;
+      expect(pausedAfterWait, lessThanOrEqualTo(pausedPosition + const Duration(seconds: 1)));
+
+      final middleTarget = await _seekVideoWithSlider(tester, container, video.id, 0.50);
+      final middlePosition = container.read(videoPlayerProvider(video.id)).position;
+      expect(middlePosition, greaterThanOrEqualTo(middleTarget - const Duration(seconds: 1)));
+
+      await _playVideoFromControls(tester, container, video.id);
+      await _waitForVideoPositionAfter(tester, container, video.id, middlePosition);
+
+      await _backgroundApp(tester);
+      await _waitForVideoState(
+        tester,
+        container,
+        video.id,
+        (state) => state.status == VideoPlaybackStatus.paused,
+        timeout: const Duration(seconds: 10),
+      );
+      final lifecyclePausePosition = container.read(videoPlayerProvider(video.id)).position;
+
+      await _foregroundApp(tester);
+      await _waitForVideoState(
+        tester,
+        container,
+        video.id,
+        (state) => state.status == VideoPlaybackStatus.playing || state.status == VideoPlaybackStatus.buffering,
+        timeout: const Duration(seconds: 20),
+      );
+      final lifecycleResumePosition = container.read(videoPlayerProvider(video.id)).position;
+      expect(lifecycleResumePosition, greaterThanOrEqualTo(lifecyclePausePosition - const Duration(seconds: 1)));
+
+      await _pauseVideoFromControls(tester, container, video.id);
+      final tailTarget = await _seekVideoWithSlider(tester, container, video.id, 0.85);
+      final tailPosition = container.read(videoPlayerProvider(video.id)).position;
+      expect(tailPosition, greaterThan(middlePosition));
+      expect(tailPosition, greaterThanOrEqualTo(tailTarget - const Duration(seconds: 1)));
+
+      await _playVideoFromControls(tester, container, video.id);
+      await _waitForVideoPositionAfter(tester, container, video.id, tailPosition);
+    });
+
     if (_selectedCaseId.isNotEmpty && !_registeredSelectedCase) {
       test(_selectedCaseId, () => fail('No real stack auth test registered for $_selectedCaseId'));
     }
@@ -705,6 +791,15 @@ int _findRemoteImageWindow(List<BaseAsset> assets, int count) {
 List<RemoteAsset> _remoteImagesFrom(List<BaseAsset> assets, int start, int count) =>
     assets.skip(start).whereType<RemoteAsset>().where((asset) => asset.isImage).take(count).toList();
 
+RemoteAsset? _firstRemoteVideo(List<BaseAsset> assets) {
+  for (final asset in assets.whereType<RemoteAsset>()) {
+    if (asset.isVideo) {
+      return asset;
+    }
+  }
+  return null;
+}
+
 Future<void> _expectRemoteImageMedia(ProviderContainer container, WidgetTester tester, RemoteAsset asset) async {
   final assetsApi = container.read(apiServiceProvider).assetsApi;
   final info = await _waitForBasicAssetInfo(tester, assetsApi, asset.id);
@@ -732,6 +827,42 @@ Future<void> _expectRemoteImageMedia(ProviderContainer container, WidgetTester t
   final checksum = asset.checksum;
   expect(checksum, isNotNull);
   expect(base64Encode(md5.convert(original.bodyBytes).bytes), checksum);
+}
+
+Future<void> _expectRemoteVideoMedia(ProviderContainer container, WidgetTester tester, RemoteAsset asset) async {
+  final assetsApi = container.read(apiServiceProvider).assetsApi;
+  final info = await _waitForBasicAssetInfo(tester, assetsApi, asset.id);
+  expect(info.type, api.AssetTypeEnum.VIDEO);
+  expect(info.originalFileName, isNotEmpty);
+  expect(info.fileCreatedAt.toUtc(), asset.createdAt.toUtc());
+
+  final thumbnail = await _waitForSuccessfulResponse(
+    tester,
+    () => assetsApi.viewAssetWithHttpInfo(asset.id, size: api.AssetMediaSize.thumbnail),
+  );
+  expect(thumbnail.bodyBytes, isNotEmpty);
+
+  final playback = await _waitForSuccessfulResponse(
+    tester,
+    () => assetsApi.playAssetVideoWithHttpInfo(asset.id),
+    acceptedStatusCodes: const {200, 206},
+  );
+  expect(playback.bodyBytes, isNotEmpty);
+
+  final rangedPlayback = await _waitForSuccessfulResponse(
+    tester,
+    () => http.get(
+      Uri.parse('${Store.get(StoreKey.serverEndpoint)}/assets/${asset.id}/video/playback'),
+      headers: {
+        ...ApiService.getRequestHeaders(),
+        'Authorization': 'Bearer ${Store.get(StoreKey.accessToken)}',
+        HttpHeaders.rangeHeader: 'bytes=0-2047',
+      },
+    ),
+    acceptedStatusCodes: const {206},
+  );
+  expect(rangedPlayback.bodyBytes, isNotEmpty);
+  expect(rangedPlayback.headers[HttpHeaders.contentRangeHeader], startsWith('bytes 0-'));
 }
 
 Future<api.AssetResponseDto> _waitForBasicAssetInfo(
@@ -836,6 +967,141 @@ Future<void> _zoomViewerImage(WidgetTester tester, ProviderContainer container) 
   await tester.pump(const Duration(milliseconds: 80));
   await tester.tap(photoView.first, warnIfMissed: false);
   await _pumpUntil(tester, () => container.read(assetViewerProvider).isZoomed, timeout: const Duration(seconds: 10));
+}
+
+Future<void> _backgroundApp(WidgetTester tester) async {
+  for (final state in [AppLifecycleState.inactive, AppLifecycleState.hidden, AppLifecycleState.paused]) {
+    tester.binding.handleAppLifecycleStateChanged(state);
+    if (state != AppLifecycleState.paused) {
+      await tester.pump();
+    }
+  }
+}
+
+Future<void> _foregroundApp(WidgetTester tester) async {
+  for (final state in [AppLifecycleState.hidden, AppLifecycleState.inactive, AppLifecycleState.resumed]) {
+    tester.binding.handleAppLifecycleStateChanged(state);
+  }
+  await tester.pump();
+}
+
+Future<VideoPlayerState> _waitForVideoState(
+  WidgetTester tester,
+  ProviderContainer container,
+  String assetId,
+  bool Function(VideoPlayerState) condition, {
+  required Duration timeout,
+}) async {
+  final end = DateTime.now().add(timeout);
+  while (true) {
+    final state = container.read(videoPlayerProvider(assetId));
+    if (condition(state)) {
+      return state;
+    }
+    if (DateTime.now().isAfter(end)) {
+      throw TimeoutException(
+        'Timed out waiting for video state: status=${state.status.name}, '
+        'position=${state.position.inMilliseconds}ms, duration=${state.duration.inMilliseconds}ms',
+      );
+    }
+    await tester.pump(const Duration(milliseconds: 100));
+  }
+}
+
+Future<Duration> _waitForVideoPositionAfter(
+  WidgetTester tester,
+  ProviderContainer container,
+  String assetId,
+  Duration position,
+) async {
+  final threshold = position + const Duration(milliseconds: 250);
+  final state = await _waitForVideoState(
+    tester,
+    container,
+    assetId,
+    (state) => state.position >= threshold,
+    timeout: const Duration(seconds: 30),
+  );
+  return state.position;
+}
+
+Finder _videoControlsFor(String assetId) =>
+    find.byWidgetPredicate((widget) => widget is VideoControls && widget.videoPlayerName == assetId);
+
+Future<void> _showVideoControls(WidgetTester tester, ProviderContainer container, String assetId) async {
+  container.read(assetViewerProvider.notifier).setControls(true);
+  await tester.pump();
+  await pumpUntilFound(tester, _videoControlsFor(assetId), timeout: const Duration(seconds: 30));
+}
+
+Future<void> _tapVideoPlayPauseControl(WidgetTester tester, ProviderContainer container, String assetId) async {
+  await _showVideoControls(tester, container, assetId);
+  final button = find.descendant(of: _videoControlsFor(assetId), matching: find.byType(IconButton));
+  await pumpUntilFound(tester, button, timeout: const Duration(seconds: 30));
+  final iconButton = tester.widget<IconButton>(button.first);
+  expect(iconButton.onPressed, isNotNull);
+  iconButton.onPressed!();
+  await _pumpFor(tester, const Duration(milliseconds: 500));
+}
+
+Future<void> _playVideoFromControls(WidgetTester tester, ProviderContainer container, String assetId) async {
+  final state = container.read(videoPlayerProvider(assetId));
+  if (state.status == VideoPlaybackStatus.paused || state.status == VideoPlaybackStatus.completed) {
+    await _tapVideoPlayPauseControl(tester, container, assetId);
+  }
+
+  await _waitForVideoState(
+    tester,
+    container,
+    assetId,
+    (state) => state.status == VideoPlaybackStatus.playing || state.status == VideoPlaybackStatus.buffering,
+    timeout: const Duration(seconds: 30),
+  );
+}
+
+Future<void> _pauseVideoFromControls(WidgetTester tester, ProviderContainer container, String assetId) async {
+  final state = container.read(videoPlayerProvider(assetId));
+  if (state.status != VideoPlaybackStatus.paused) {
+    await _tapVideoPlayPauseControl(tester, container, assetId);
+  }
+
+  await _waitForVideoState(
+    tester,
+    container,
+    assetId,
+    (state) => state.status == VideoPlaybackStatus.paused,
+    timeout: const Duration(seconds: 30),
+  );
+}
+
+Future<Duration> _seekVideoWithSlider(
+  WidgetTester tester,
+  ProviderContainer container,
+  String assetId,
+  double fraction,
+) async {
+  final loaded = await _waitForVideoState(
+    tester,
+    container,
+    assetId,
+    (state) => state.duration > Duration.zero,
+    timeout: const Duration(seconds: 30),
+  );
+  final target = Duration(microseconds: (loaded.duration.inMicroseconds * fraction).round());
+
+  await _showVideoControls(tester, container, assetId);
+  final slider = find.descendant(of: _videoControlsFor(assetId), matching: find.byType(Slider));
+  await pumpUntilFound(tester, slider, timeout: const Duration(seconds: 30));
+  final rect = tester.getRect(slider.first);
+  await tester.tapAt(Offset(rect.left + rect.width * fraction, rect.center.dy));
+  await _waitForVideoState(
+    tester,
+    container,
+    assetId,
+    (state) => state.position >= target - const Duration(seconds: 1),
+    timeout: const Duration(seconds: 10),
+  );
+  return target;
 }
 
 void _realStackSessionTest(String caseId, String description, Future<void> Function(WidgetTester) body) {
