@@ -126,6 +126,15 @@ const _timelinePageSize = int.fromEnvironment('IMMICH_E2E_TIMELINE_PAGE_SIZE', d
 const _assetViewerImageCount = int.fromEnvironment('IMMICH_E2E_VIEWER_IMAGE_COUNT', defaultValue: 3);
 const _serverRestartReadyMarker = 'MOB-REAL-030:READY_FOR_SERVER_RESTART';
 const _backgroundWorkerTriggerMarker = 'MOB-REAL-031-A:TRIGGER_ANDROID_BACKGROUND_WORKER';
+const _upgradeStage = String.fromEnvironment('IMMICH_E2E_UPGRADE_STAGE', defaultValue: 'single');
+const _upgradeSnapshotFilename = 'mob-real-032-upgrade-snapshot.json';
+const _upgradeExpectedBackupSettings = <String, Object>{
+  'backupEnabled': true,
+  'backupUseCellularForPhotos': true,
+  'backupUseCellularForVideos': true,
+  'backupRequireCharging': true,
+  'backupTriggerDelay': 17,
+};
 
 var _registeredSelectedCase = false;
 
@@ -2841,6 +2850,27 @@ void main() async {
       await drift.customSelect('SELECT 1').getSingle();
     });
 
+    _realStackSessionTest('MOB-REAL-032-$_caseSuffix', 'preserves login and local library across app upgrade', (
+      tester,
+    ) async {
+      switch (_upgradeStage) {
+        case 'seed':
+          await _seedUpgradeState(tester);
+          return;
+        case 'verify':
+          await _verifyUpgradeState(tester);
+          return;
+        case 'single':
+          await _seedUpgradeState(tester);
+          await tester.pumpWidget(const SizedBox.shrink());
+          await _pumpFor(tester, const Duration(milliseconds: 500));
+          await _verifyUpgradeState(tester);
+          return;
+        default:
+          fail('Unknown IMMICH_E2E_UPGRADE_STAGE=$_upgradeStage; expected seed, verify, or single');
+      }
+    });
+
     if (_selectedCaseId.isNotEmpty && !_registeredSelectedCase) {
       test(_selectedCaseId, () => fail('No real stack auth test registered for $_selectedCaseId'));
     }
@@ -3726,6 +3756,191 @@ Future<void> _selectOnlyBackupAlbumForAsset(ProviderContainer container, LocalAs
   final sourceAlbums = await container.read(localAssetRepository).getSourceAlbums(asset.id);
   expect(sourceAlbums, isNotEmpty, reason: 'Expected ${asset.name} to belong to at least one local album');
   await albumRepository.upsert(sourceAlbums.first.copyWith(backupSelection: BackupSelection.selected));
+}
+
+Future<void> _seedUpgradeState(WidgetTester tester) async {
+  final snapshotFile = await _upgradeSnapshotFile();
+  if (snapshotFile.existsSync()) {
+    snapshotFile.deleteSync();
+  }
+
+  await _loadAuthenticatedApp(tester, overrideCancellation: true, closeDriftOnDispose: false);
+  final container = _containerOfApp(tester);
+  final drift = container.read(driftProvider);
+
+  addTearDown(() async {
+    await tester.pumpWidget(const SizedBox.shrink());
+    await _pumpFor(tester, const Duration(milliseconds: 200));
+    await drift.close();
+  });
+
+  final user = Store.tryGet(StoreKey.currentUser);
+  expect(user, isNotNull);
+  expect((Store.tryGet(StoreKey.accessToken) ?? '').isNotEmpty, isTrue);
+
+  await _writeUpgradeBackupSettings();
+  await container.read(backgroundSyncProvider).syncLocal(full: true);
+  final localAssets = await _localAssets(container);
+  expect(localAssets, isNotEmpty, reason: 'Expected the seeded app data to include the simulator media library');
+
+  final syncSuccess = await container.read(syncStreamServiceProvider).sync();
+  expect(syncSuccess, isTrue);
+
+  final localRows = await _upgradeLocalRowCounts(drift);
+  expect(localRows['local_asset_entity'], greaterThan(0));
+  expect(localRows['local_album_entity'], greaterThan(0));
+  expect(localRows['store_entity'], greaterThan(0));
+  expect(localRows['settings'], greaterThan(0));
+
+  final remoteRows = await _remoteSyncRowCounts(drift);
+  expect(remoteRows['remote_asset_entity'], greaterThan(0));
+
+  final localAssetNames = localAssets.map((asset) => asset.name).toSet().toList()..sort();
+  final snapshot = {
+    'caseId': 'MOB-REAL-032-$_caseSuffix',
+    'seededAt': DateTime.now().toUtc().toIso8601String(),
+    'userId': user!.id,
+    'email': user.email,
+    'serverEndpoint': Store.get(StoreKey.serverEndpoint),
+    'serverUrl': Store.get(StoreKey.serverUrl),
+    'deviceId': Store.tryGet(StoreKey.deviceId),
+    'accessTokenPresent': true,
+    'backupSettings': _readUpgradeBackupSettings(),
+    'databaseUserVersion': await _databaseUserVersion(drift),
+    'databaseIntegrity': await _databaseIntegrityCheck(drift),
+    'localRows': localRows,
+    'remoteRows': remoteRows,
+    'localAssetNames': localAssetNames.take(25).toList(),
+  };
+
+  expect(snapshot['databaseUserVersion'], drift.schemaVersion);
+  expect(snapshot['databaseIntegrity'], 'ok');
+  snapshotFile.writeAsStringSync(jsonEncode(snapshot));
+}
+
+Future<void> _verifyUpgradeState(WidgetTester tester) async {
+  final snapshot = await _readUpgradeSnapshot();
+
+  await _loadAppPreservingStore(tester, overrideCancellation: true, closeDriftOnDispose: false);
+  await _pumpFor(tester, const Duration(milliseconds: 500));
+  await _waitForAccessToken(tester);
+  await _waitForCurrentUser(snapshot['email'] as String, tester);
+  await _dismissFeatureMessageIfVisible(tester);
+
+  final container = _containerOfApp(tester);
+  final drift = container.read(driftProvider);
+  addTearDown(() async {
+    await tester.pumpWidget(const SizedBox.shrink());
+    await _pumpFor(tester, const Duration(milliseconds: 200));
+    await drift.close();
+  });
+
+  final user = Store.tryGet(StoreKey.currentUser);
+  expect(user, isNotNull);
+  expect(user!.id, snapshot['userId']);
+  expect(user.email, snapshot['email']);
+  expect(Store.tryGet(StoreKey.serverEndpoint), snapshot['serverEndpoint']);
+  expect(Store.tryGet(StoreKey.serverUrl), snapshot['serverUrl']);
+  expect(Store.tryGet(StoreKey.deviceId), snapshot['deviceId']);
+  expect((Store.tryGet(StoreKey.accessToken) ?? '').isNotEmpty, isTrue);
+  expect(_readUpgradeBackupSettings(), _upgradeExpectedBackupSettings);
+
+  await container.read(backgroundSyncProvider).syncLocal(full: true);
+  final localAssets = await _localAssets(container);
+  final localAssetNames = localAssets.map((asset) => asset.name).toSet();
+  expect(localAssetNames, isNotEmpty);
+  expect(
+    localAssetNames.intersection(_jsonStringSet(snapshot['localAssetNames'])).isNotEmpty,
+    isTrue,
+    reason: 'Expected simulator library assets discovered before upgrade to remain visible after upgrade',
+  );
+
+  final beforeLocalRows = _jsonIntMap(snapshot['localRows']);
+  final afterLocalRows = await _upgradeLocalRowCounts(drift);
+  _expectRowsNotReduced(afterLocalRows, beforeLocalRows, label: 'local library after upgrade');
+
+  final beforeRemoteRows = _jsonIntMap(snapshot['remoteRows']);
+  final syncSuccess = await container.read(syncStreamServiceProvider).sync();
+  expect(syncSuccess, isTrue);
+  final afterRemoteRows = await _remoteSyncRowCounts(drift);
+  _expectRowsNotReduced(afterRemoteRows, beforeRemoteRows, label: 'remote sync after upgrade');
+
+  final secondSyncSuccess = await container.read(syncStreamServiceProvider).sync();
+  expect(secondSyncSuccess, isTrue);
+  expect(
+    await _remoteSyncRowCounts(drift),
+    afterRemoteRows,
+    reason: 'Post-upgrade sync should not duplicate Drift remote rows',
+  );
+
+  expect(await _databaseUserVersion(drift), drift.schemaVersion);
+  expect(await _databaseIntegrityCheck(drift), 'ok');
+}
+
+Future<File> _upgradeSnapshotFile() async {
+  final directory = await getApplicationDocumentsDirectory();
+  return File('${directory.path}/$_upgradeSnapshotFilename');
+}
+
+Future<Map<String, dynamic>> _readUpgradeSnapshot() async {
+  final file = await _upgradeSnapshotFile();
+  expect(
+    file.existsSync(),
+    isTrue,
+    reason: 'Expected upgrade seed snapshot to survive app reinstall without data wipe',
+  );
+  return jsonDecode(file.readAsStringSync()) as Map<String, dynamic>;
+}
+
+Future<void> _writeUpgradeBackupSettings() async {
+  await SettingsRepository.instance.write(SettingsKey.backupEnabled, true);
+  await SettingsRepository.instance.write(SettingsKey.backupUseCellularForPhotos, true);
+  await SettingsRepository.instance.write(SettingsKey.backupUseCellularForVideos, true);
+  await SettingsRepository.instance.write(SettingsKey.backupRequireCharging, true);
+  await SettingsRepository.instance.write(SettingsKey.backupTriggerDelay, 17);
+}
+
+Map<String, Object> _readUpgradeBackupSettings() {
+  final config = SettingsRepository.instance.appConfig;
+  return {
+    'backupEnabled': config.read(SettingsKey.backupEnabled),
+    'backupUseCellularForPhotos': config.read(SettingsKey.backupUseCellularForPhotos),
+    'backupUseCellularForVideos': config.read(SettingsKey.backupUseCellularForVideos),
+    'backupRequireCharging': config.read(SettingsKey.backupRequireCharging),
+    'backupTriggerDelay': config.read(SettingsKey.backupTriggerDelay),
+  };
+}
+
+Future<Map<String, int>> _upgradeLocalRowCounts(Drift drift) async {
+  const tables = ['store_entity', 'settings', 'local_album_entity', 'local_asset_entity', 'local_album_asset_entity'];
+  return {for (final table in tables) table: await _rowCount(drift, table)};
+}
+
+void _expectRowsNotReduced(Map<String, int> actualRows, Map<String, int> minimumRows, {required String label}) {
+  for (final entry in minimumRows.entries) {
+    expect(
+      actualRows[entry.key],
+      greaterThanOrEqualTo(entry.value),
+      reason: '$label row count for ${entry.key} should not shrink: before=$minimumRows after=$actualRows',
+    );
+  }
+}
+
+Map<String, int> _jsonIntMap(Object? raw) {
+  final map = raw! as Map<String, dynamic>;
+  return {for (final entry in map.entries) entry.key: (entry.value as num).toInt()};
+}
+
+Set<String> _jsonStringSet(Object? raw) => (raw! as List).cast<String>().toSet();
+
+Future<int> _databaseUserVersion(Drift drift) async {
+  final row = await drift.customSelect('PRAGMA user_version').getSingle();
+  return row.read<int>('user_version');
+}
+
+Future<String> _databaseIntegrityCheck(Drift drift) async {
+  final row = await drift.customSelect('PRAGMA integrity_check').getSingle();
+  return row.read<String>('integrity_check');
 }
 
 Future<void> _runAndroidBackgroundUploadOnce() async {
