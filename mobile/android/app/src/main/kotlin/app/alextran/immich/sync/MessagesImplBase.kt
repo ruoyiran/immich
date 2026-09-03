@@ -219,7 +219,7 @@ open class NativeSyncApiImplBase(context: Context) : ImmichPlugin(), ActivityAwa
             if (isFlipped) width else height,
             size,
             duration,
-            0L,
+            orientation.toLong(),
             isFavorite,
             playbackStyle = playbackStyle,
           )

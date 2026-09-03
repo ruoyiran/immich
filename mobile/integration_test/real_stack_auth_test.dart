@@ -70,6 +70,14 @@ const _motionPhotoAssetName = String.fromEnvironment(
   'IMMICH_E2E_MOTION_PHOTO_ASSET_NAME',
   defaultValue: 'immich-e2e-motion-014.heic',
 );
+const _metadataExifAssetName = String.fromEnvironment(
+  'IMMICH_E2E_METADATA_EXIF_ASSET_NAME',
+  defaultValue: 'immich-e2e-metadata-015-exif.jpg',
+);
+const _metadataNoExifAssetName = String.fromEnvironment(
+  'IMMICH_E2E_METADATA_NO_EXIF_ASSET_NAME',
+  defaultValue: 'immich-e2e-metadata-015-no-exif.jpg',
+);
 
 var _registeredSelectedCase = false;
 
@@ -492,6 +500,55 @@ void main() async {
       expect(duplicateRemoteId, remoteAssetId);
     });
 
+    _realStackSessionTest('MOB-REAL-015-$_caseSuffix', 'preserves image metadata through upload', (tester) async {
+      await _loadAuthenticatedApp(tester);
+
+      final container = _containerOfApp(tester);
+      final exifAsset = await _waitForLocalAssetByName(container, _metadataExifAssetName, tester);
+      final noExifAsset = await _waitForLocalAssetByName(container, _metadataNoExifAssetName, tester);
+
+      expect(exifAsset.isImage, isTrue);
+      expect(exifAsset.orientation, 90);
+      expect(exifAsset.width, 90);
+      expect(exifAsset.height, 160);
+
+      final exifRemoteId = await _uploadSingleAssetToServer(container, exifAsset);
+      final noExifRemoteId = await _uploadSingleAssetToServer(container, noExifAsset);
+      expect(noExifRemoteId, isNot(exifRemoteId));
+
+      final assetsApi = container.read(apiServiceProvider).assetsApi;
+      final exifInfo = await _waitForAssetInfo(tester, assetsApi, exifRemoteId);
+      expect(exifInfo.type, api.AssetTypeEnum.IMAGE);
+      expect(exifInfo.originalFileName.toLowerCase(), endsWith('.jpg'));
+      expect(exifInfo.width, 90);
+      expect(exifInfo.height, 160);
+      _expectUtcDateTimeParts(exifInfo.fileCreatedAt, 2024, 12, 31, 23, 30);
+
+      final exif = exifInfo.exifInfo.orElse(null);
+      expect(exif, isNotNull);
+      expect(exif!.dateTimeOriginal.orElse(null), isNotNull);
+      _expectUtcDateTimeParts(exif.dateTimeOriginal.orElse(null)!, 2024, 12, 31, 23, 30);
+      expect(exif.exifImageWidth.orElse(null), 90);
+      expect(exif.exifImageHeight.orElse(null), 160);
+      expect(exif.make.orElse(null), 'ImmichE2E');
+      expect(exif.model.orElse(null), 'Metadata015');
+      expect(exif.latitude.orElse(null), closeTo(27.717245, 0.0001));
+      expect(exif.longitude.orElse(null), closeTo(85.323959, 0.0001));
+
+      final noExifInfo = await _waitForAssetInfo(tester, assetsApi, noExifRemoteId);
+      expect(noExifInfo.type, api.AssetTypeEnum.IMAGE);
+      expect(noExifInfo.originalFileName.toLowerCase(), endsWith('.jpg'));
+      expect(noExifInfo.width, 120);
+      expect(noExifInfo.height, 80);
+      _expectDateTimesClose(noExifInfo.fileCreatedAt, noExifAsset.createdAt, const Duration(minutes: 2));
+      final noExif = noExifInfo.exifInfo.orElse(null);
+      expect(noExif, isNotNull);
+      expect(noExif!.make.orElse(null), isNull);
+      expect(noExif.model.orElse(null), isNull);
+      expect(noExif.latitude.orElse(null), isNull);
+      expect(noExif.longitude.orElse(null), isNull);
+    });
+
     if (_selectedCaseId.isNotEmpty && !_registeredSelectedCase) {
       test(_selectedCaseId, () => fail('No real stack auth test registered for $_selectedCaseId'));
     }
@@ -708,6 +765,45 @@ Future<String> _uploadSingleAssetToServer(ProviderContainer container, LocalAsse
   expect(uploadError, isNull);
   expect(remoteAssetId, isNotNull);
   return remoteAssetId!;
+}
+
+Future<api.AssetResponseDto> _waitForAssetInfo(
+  WidgetTester tester,
+  api.AssetsApi assetsApi,
+  String remoteAssetId,
+) async {
+  api.AssetResponseDto? info;
+  Object? lastError;
+  for (var attempt = 0; attempt < 20; attempt++) {
+    try {
+      info = await assetsApi.getAssetInfo(remoteAssetId);
+      if (info != null && info.hasMetadata && info.exifInfo.orElse(null) != null) {
+        return info;
+      }
+    } catch (error) {
+      lastError = error;
+    }
+    await _pumpFor(tester, const Duration(seconds: 2));
+  }
+
+  if (info != null) {
+    fail('Asset $remoteAssetId did not expose metadata: $info');
+  }
+  fail('Asset $remoteAssetId metadata was unavailable, last error: $lastError');
+}
+
+void _expectUtcDateTimeParts(DateTime value, int year, int month, int day, int hour, int minute) {
+  final utc = value.toUtc();
+  expect(utc.year, year);
+  expect(utc.month, month);
+  expect(utc.day, day);
+  expect(utc.hour, hour);
+  expect(utc.minute, minute);
+}
+
+void _expectDateTimesClose(DateTime actual, DateTime expected, Duration tolerance) {
+  final delta = actual.toUtc().difference(expected.toUtc()).abs();
+  expect(delta, lessThanOrEqualTo(tolerance));
 }
 
 Future<List<File>> _resumableStateFiles() async {
