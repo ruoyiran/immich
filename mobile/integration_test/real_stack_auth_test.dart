@@ -797,6 +797,57 @@ void main() async {
       expect(secondAckSet, containsAll(firstAckSet), reason: 'ACKs from the first sync should remain persisted');
     });
 
+    _realStackSessionTest('MOB-REAL-020-$_caseSuffix', 'resumes safely after an interrupted sync stream', (
+      tester,
+    ) async {
+      final (container, drift) = await _loadAuthenticatedSyncContainer();
+      addTearDown(container.dispose);
+
+      await container.read(syncApiRepositoryProvider).deleteSyncAck(_allReplayableSyncAckTypes);
+      await Store.delete(StoreKey.syncMigrationStatus);
+      await container.read(syncStreamRepositoryProvider).reset();
+
+      final expectedEvents = await _collectSyncStreamEvents(container);
+      expect(expectedEvents, isNotEmpty, reason: 'Expected the real sync stream to return backfill events');
+      _expectRealSyncCoverage(expectedEvents);
+      final expectedRows = _expectedRemoteSyncRowCounts(expectedEvents);
+
+      final interruptedEvents = await _interruptSyncAfterFirstSafeEvent(container);
+      expect(interruptedEvents, hasLength(1));
+      expect(interruptedEvents.single.type, api.SyncEntityType.authUserV1);
+
+      final interruptedRows = await _remoteSyncRowCounts(drift);
+      _expectRemoteSyncRows(
+        interruptedRows,
+        _expectedRemoteSyncRowCounts(interruptedEvents),
+        label: 'interrupted sync',
+      );
+
+      final interruptedAckSet = await _syncAckSet(container);
+      final interruptedAckTypes = _syncAckTypes(interruptedAckSet);
+      expect(interruptedAckTypes, contains(api.SyncEntityType.authUserV1));
+      expect(interruptedAckTypes, isNot(contains(api.SyncEntityType.syncCompleteV1)));
+
+      final resumedSyncSuccess = await container.read(syncStreamServiceProvider).sync();
+      expect(resumedSyncSuccess, isTrue);
+
+      final resumedRows = await _remoteSyncRowCounts(drift);
+      _expectRemoteSyncRows(resumedRows, expectedRows, label: 'resumed sync');
+
+      final resumedAckSet = await _syncAckSet(container);
+      expect(resumedAckSet.length, greaterThan(interruptedAckSet.length));
+      _expectAckCoverage(resumedAckSet, expectedEvents);
+
+      final secondSyncSuccess = await container.read(syncStreamServiceProvider).sync();
+      expect(secondSyncSuccess, isTrue);
+
+      final secondRows = await _remoteSyncRowCounts(drift);
+      expect(secondRows, resumedRows, reason: 'Second sync after recovery should not duplicate Drift rows');
+
+      final secondAckSet = await _syncAckSet(container);
+      expect(secondAckSet, containsAll(resumedAckSet), reason: 'Recovered ACKs should remain persisted');
+    });
+
     if (_selectedCaseId.isNotEmpty && !_registeredSelectedCase) {
       test(_selectedCaseId, () => fail('No real stack auth test registered for $_selectedCaseId'));
     }
@@ -897,6 +948,30 @@ Future<List<SyncEvent>> _collectSyncStreamEvents(ProviderContainer container) as
         serverVersion: SemVer(major: serverVersion!.major, minor: serverVersion.minor, patch: serverVersion.patch_),
         initialBatchSize: 25,
         batchSize: 50,
+      );
+  return events;
+}
+
+Future<List<SyncEvent>> _interruptSyncAfterFirstSafeEvent(ProviderContainer container) async {
+  final apiService = container.read(apiServiceProvider);
+  final serverVersion = await apiService.serverInfoApi.getServerVersion();
+  expect(serverVersion, isNotNull);
+
+  final events = <SyncEvent>[];
+  await container
+      .read(syncApiRepositoryProvider)
+      .streamChanges(
+        (batch, abort, _) async {
+          final event = batch.single;
+          events.add(event);
+          expect(event.type, api.SyncEntityType.authUserV1);
+          await container.read(syncStreamRepositoryProvider).updateAuthUsersV1([event.data as api.SyncAuthUserV1]);
+          await container.read(syncApiRepositoryProvider).ack([event.ack]);
+          abort();
+        },
+        serverVersion: SemVer(major: serverVersion!.major, minor: serverVersion.minor, patch: serverVersion.patch_),
+        initialBatchSize: 1,
+        batchSize: 1,
       );
   return events;
 }
@@ -1098,10 +1173,14 @@ Future<Set<String>> _syncAckSet(ProviderContainer container) async {
   return {for (final ack in syncAcks ?? <api.SyncAckDto>[]) '${ack.type.toJson()}\t${ack.ack}'};
 }
 
-void _expectAckCoverage(Set<String> ackSet, List<SyncEvent> expectedEvents) {
-  final ackedTypes = {
+Set<api.SyncEntityType> _syncAckTypes(Set<String> ackSet) {
+  return {
     for (final ack in ackSet) api.SyncEntityType.fromJson(ack.split('\t').first),
   }.whereType<api.SyncEntityType>().toSet();
+}
+
+void _expectAckCoverage(Set<String> ackSet, List<SyncEvent> expectedEvents) {
+  final ackedTypes = _syncAckTypes(ackSet);
 
   final expectedTypes = _logicalSyncTypes(expectedEvents);
   final requiredTypes = {
