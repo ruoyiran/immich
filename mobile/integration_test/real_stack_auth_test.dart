@@ -1060,6 +1060,215 @@ void main() async {
       },
     );
 
+    _realStackSessionTest(
+      'MOB-REAL-023-$_caseSuffix',
+      'keeps archive and hidden assets isolated from the main timeline',
+      (tester) async {
+        await _loadAuthenticatedApp(tester, overrideCancellation: true);
+        final container = _containerOfApp(tester);
+        final drift = container.read(driftProvider);
+        final assetsApi = container.read(apiServiceProvider).assetsApi;
+        final uploadedRemoteIds = <String>[];
+
+        addTearDown(() async {
+          for (final assetId in uploadedRemoteIds) {
+            await _deleteTestAssetBestEffort(assetsApi, assetId);
+          }
+        });
+
+        await container.read(syncApiRepositoryProvider).deleteSyncAck(_allReplayableSyncAckTypes);
+        await Store.delete(StoreKey.syncMigrationStatus);
+        await container.read(syncStreamRepositoryProvider).reset();
+        final baselineSyncSuccess = await container.read(syncStreamServiceProvider).sync();
+        expect(baselineSyncSuccess, isTrue);
+
+        final user = Store.tryGet(StoreKey.currentUser);
+        expect(user, isNotNull);
+
+        final baseCreatedAt = DateTime.now().toUtc();
+        final normalCreatedAt = baseCreatedAt.subtract(const Duration(seconds: 2));
+        final favoriteCreatedAt = baseCreatedAt.subtract(const Duration(seconds: 1));
+        final hiddenCreatedAt = baseCreatedAt;
+
+        final normalId = await _uploadGeneratedJpegAsSecondClient(
+          'immich-e2e-archive-023-normal-${normalCreatedAt.microsecondsSinceEpoch}.jpg',
+          normalCreatedAt,
+        );
+        uploadedRemoteIds.add(normalId);
+        final favoriteId = await _uploadGeneratedJpegAsSecondClient(
+          'immich-e2e-archive-023-favorite-${favoriteCreatedAt.microsecondsSinceEpoch}.jpg',
+          favoriteCreatedAt,
+          isFavorite: true,
+        );
+        uploadedRemoteIds.add(favoriteId);
+        final hiddenId = await _uploadGeneratedJpegAsSecondClient(
+          'immich-e2e-archive-023-hidden-${hiddenCreatedAt.microsecondsSinceEpoch}.jpg',
+          hiddenCreatedAt,
+          visibility: api.AssetVisibility.hidden,
+        );
+        uploadedRemoteIds.add(hiddenId);
+
+        final uploadSyncSuccess = await container.read(syncStreamServiceProvider).sync();
+        expect(uploadSyncSuccess, isTrue);
+
+        await _waitForRemoteAssetState(
+          tester,
+          container,
+          normalId,
+          (asset) => asset.visibility == AssetVisibility.timeline && !asset.isFavorite && !asset.isTrashed,
+          reason: 'Expected normal uploaded asset to sync as a timeline asset',
+        );
+        await _waitForRemoteAssetState(
+          tester,
+          container,
+          favoriteId,
+          (asset) => asset.visibility == AssetVisibility.timeline && asset.isFavorite && !asset.isTrashed,
+          reason: 'Expected favorite uploaded asset to sync as a favorite timeline asset',
+        );
+        await _waitForRemoteAssetState(
+          tester,
+          container,
+          hiddenId,
+          (asset) => asset.visibility == AssetVisibility.hidden && !asset.isTrashed,
+          reason: 'Expected hidden uploaded asset to sync as hidden',
+        );
+
+        final timelineFactory = container.read(timelineFactoryProvider);
+        final mainTimeline = timelineFactory.main([user!.id]);
+        final favoriteTimeline = timelineFactory.favorite(user.id);
+        final archiveTimeline = timelineFactory.archive(user.id);
+        addTearDown(mainTimeline.dispose);
+        addTearDown(favoriteTimeline.dispose);
+        addTearDown(archiveTimeline.dispose);
+
+        await _expectTimelineAssetSet(
+          tester,
+          mainTimeline,
+          includes: {normalId, favoriteId},
+          excludes: {hiddenId},
+          reason: 'Initial main timeline should include timeline assets and exclude hidden assets',
+        );
+        await _expectTimelineAssetSet(
+          tester,
+          favoriteTimeline,
+          includes: {favoriteId},
+          excludes: {normalId, hiddenId},
+          reason: 'Initial favorite timeline should include only the favorited visible asset',
+        );
+        await _expectTimelineAssetSet(
+          tester,
+          archiveTimeline,
+          includes: const {},
+          excludes: {normalId, favoriteId, hiddenId},
+          reason: 'Initial archive timeline should not include timeline or hidden assets',
+        );
+
+        await assetsApi.updateAssets(
+          api.AssetBulkUpdateDto(
+            ids: [favoriteId],
+            visibility: const api.Optional.present(api.AssetVisibility.archive),
+          ),
+        );
+        await _waitForAssetInfoState(
+          tester,
+          assetsApi,
+          favoriteId,
+          (info) => info.visibility == api.AssetVisibility.archive && info.isFavorite && !info.isTrashed,
+          reason: 'Expected archived favorite asset to keep favorite relation on the server',
+        );
+        final archiveSyncSuccess = await container.read(syncStreamServiceProvider).sync();
+        expect(archiveSyncSuccess, isTrue);
+
+        await _waitForRemoteAssetState(
+          tester,
+          container,
+          favoriteId,
+          (asset) => asset.visibility == AssetVisibility.archive && asset.isFavorite && !asset.isTrashed,
+          reason: 'Expected archived favorite asset to sync locally',
+        );
+        expect(await _remoteAssetRowCountById(drift, favoriteId), 1);
+
+        await _expectTimelineAssetSet(
+          tester,
+          mainTimeline,
+          includes: {normalId},
+          excludes: {favoriteId, hiddenId},
+          reason: 'Main timeline should not leak archived or hidden assets',
+        );
+        await _expectTimelineAssetSet(
+          tester,
+          archiveTimeline,
+          includes: {favoriteId},
+          excludes: {normalId, hiddenId},
+          reason: 'Archive timeline should contain the archived asset and exclude hidden assets',
+        );
+        await _expectTimelineAssetSet(
+          tester,
+          favoriteTimeline,
+          includes: {favoriteId},
+          excludes: {normalId, hiddenId},
+          reason: 'Favorite timeline should retain archived favorite assets without leaking hidden assets',
+        );
+
+        await assetsApi.updateAssets(
+          api.AssetBulkUpdateDto(
+            ids: [favoriteId],
+            visibility: const api.Optional.present(api.AssetVisibility.timeline),
+          ),
+        );
+        await _waitForAssetInfoState(
+          tester,
+          assetsApi,
+          favoriteId,
+          (info) => info.visibility == api.AssetVisibility.timeline && info.isFavorite && !info.isTrashed,
+          reason: 'Expected unarchived favorite asset to return to timeline visibility on the server',
+        );
+        final restoreSyncSuccess = await container.read(syncStreamServiceProvider).sync();
+        expect(restoreSyncSuccess, isTrue);
+
+        final restoredAssets = await _expectTimelineAssetSet(
+          tester,
+          mainTimeline,
+          includes: {normalId, favoriteId},
+          excludes: {hiddenId},
+          reason: 'Restored favorite asset should return to the main timeline while hidden stays isolated',
+        );
+        final restoredFavoriteIndex = restoredAssets.indexWhere((asset) => _timelineAssetId(asset) == favoriteId);
+        final normalIndex = restoredAssets.indexWhere((asset) => _timelineAssetId(asset) == normalId);
+        expect(restoredFavoriteIndex, greaterThanOrEqualTo(0));
+        expect(normalIndex, greaterThanOrEqualTo(0));
+        expect(
+          restoredFavoriteIndex,
+          lessThan(normalIndex),
+          reason: 'Restored asset should return to the main timeline at its created-at position',
+        );
+
+        await _expectTimelineAssetSet(
+          tester,
+          archiveTimeline,
+          includes: const {},
+          excludes: {normalId, favoriteId, hiddenId},
+          reason: 'Archive timeline should be empty for restored and hidden test assets',
+        );
+        await _expectTimelineAssetSet(
+          tester,
+          favoriteTimeline,
+          includes: {favoriteId},
+          excludes: {normalId, hiddenId},
+          reason: 'Favorite timeline should still expose the restored favorite without hidden leakage',
+        );
+
+        final rowsAfterRestore = await _remoteSyncRowCounts(drift);
+        final secondSyncSuccess = await container.read(syncStreamServiceProvider).sync();
+        expect(secondSyncSuccess, isTrue);
+        expect(
+          await _remoteSyncRowCounts(drift),
+          rowsAfterRestore,
+          reason: 'Second sync after archive lifecycle should not duplicate local rows',
+        );
+      },
+    );
+
     if (_selectedCaseId.isNotEmpty && !_registeredSelectedCase) {
       test(_selectedCaseId, () => fail('No real stack auth test registered for $_selectedCaseId'));
     }
@@ -1979,7 +2188,12 @@ Future<String> _uploadSingleAssetToServer(ProviderContainer container, LocalAsse
   return remoteAssetId!;
 }
 
-Future<String> _uploadGeneratedJpegAsSecondClient(String fileName, DateTime createdAt) async {
+Future<String> _uploadGeneratedJpegAsSecondClient(
+  String fileName,
+  DateTime createdAt, {
+  bool isFavorite = false,
+  api.AssetVisibility? visibility,
+}) async {
   final bytes = _generatedJpegBytes(createdAt.microsecondsSinceEpoch);
   final request = http.MultipartRequest('POST', Uri.parse('${Store.get(StoreKey.serverEndpoint)}/assets'))
     ..headers.addAll({
@@ -1991,7 +2205,8 @@ Future<String> _uploadGeneratedJpegAsSecondClient(String fileName, DateTime crea
       'fileCreatedAt': createdAt.toIso8601String(),
       'fileModifiedAt': createdAt.toIso8601String(),
       'filename': fileName,
-      'isFavorite': 'false',
+      'isFavorite': isFavorite.toString(),
+      if (visibility != null) 'visibility': visibility.toJson(),
     })
     ..files.add(http.MultipartFile.fromBytes('assetData', bytes, filename: fileName));
 
@@ -2021,7 +2236,7 @@ Uint8List _generatedJpegBytes(int seed) {
   const onePixelJpeg =
       '/9j/2wBDAAgEBAQEBAUFBQUFBQYGBgYGBgYGBgYGBgYHBwcICAgHBwcGBgcHCAgICAkJCQgICAgJCQoKCgwMCwsODg4RERT/xABNAAEBAAAAAAAAAAAAAAAAAAAABwEBAQEAAAAAAAAAAAAAAAAAAAIDEAEAAAAAAAAAAAAAAAAAAAAAEQEAAAAAAAAAAAAAAAAAAAAA/8AAEQgAUAB4AwEiAAIRAAMRAP/aAAwDAQACEQMRAD8AvADRIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD/2Q==';
   final bytes = base64Decode(onePixelJpeg);
-  final comment = utf8.encode('immich-e2e-realtime-021-$seed');
+  final comment = utf8.encode('immich-e2e-generated-$seed');
   final commentLength = comment.length + 2;
   return Uint8List.fromList([
     bytes[0],
@@ -2078,6 +2293,30 @@ Future<api.AssetResponseDto> _waitForAssetInfoState(
   }
 
   fail('$reason; latest server asset=$latest; last error=$lastError');
+}
+
+Future<List<BaseAsset>> _expectTimelineAssetSet(
+  WidgetTester tester,
+  TimelineService timeline, {
+  required Set<String> includes,
+  required Set<String> excludes,
+  required String reason,
+}) async {
+  var latest = const <BaseAsset>[];
+  final end = DateTime.now().add(const Duration(seconds: 60));
+  while (DateTime.now().isBefore(end)) {
+    await _pumpFor(tester, const Duration(milliseconds: 300));
+    latest = timeline.totalAssets == 0 ? const <BaseAsset>[] : await _loadAllTimelineAssets(timeline);
+    final latestIds = _timelineAssetIds(latest);
+    final hasExpected = includes.every(latestIds.contains);
+    final hasNoUnexpected = excludes.every((assetId) => !latestIds.contains(assetId));
+    if (hasExpected && hasNoUnexpected) {
+      return latest;
+    }
+  }
+
+  final latestIds = _timelineAssetIds(latest).toList()..sort();
+  fail('$reason; latest timeline ids=${latestIds.join(', ')}');
 }
 
 Future<void> _waitForRemoteAssetGoneOrTrashed(
