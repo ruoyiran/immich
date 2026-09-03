@@ -4,6 +4,7 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
+import 'package:drift/drift.dart' show Variable;
 import 'package:easy_localization/easy_localization.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -33,10 +34,12 @@ import 'package:immich_mobile/providers/asset_viewer/video_player_provider.dart'
 import 'package:immich_mobile/providers/background_sync.provider.dart';
 import 'package:immich_mobile/providers/gallery_permission.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/album.provider.dart';
+import 'package:immich_mobile/providers/infrastructure/asset.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/cancel.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/db.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/sync.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/timeline.provider.dart';
+import 'package:immich_mobile/providers/websocket.provider.dart';
 import 'package:immich_mobile/repositories/asset_api.repository.dart';
 import 'package:immich_mobile/repositories/auth_api.repository.dart';
 import 'package:immich_mobile/repositories/download.repository.dart';
@@ -848,6 +851,118 @@ void main() async {
       expect(secondAckSet, containsAll(resumedAckSet), reason: 'Recovered ACKs should remain persisted');
     });
 
+    _realStackSessionTest(
+      'MOB-REAL-021-$_caseSuffix',
+      'converges realtime and incremental changes from another client',
+      (tester) async {
+        await _loadAuthenticatedApp(tester, overrideCancellation: true);
+        final container = _containerOfApp(tester);
+        final drift = container.read(driftProvider);
+        final assetsApi = container.read(apiServiceProvider).assetsApi;
+        final websocket = container.read(websocketProvider.notifier);
+        String? uploadedRemoteId;
+
+        addTearDown(() async {
+          try {
+            websocket.disconnect();
+          } catch (_) {
+            // The ProviderScope may already have disposed the notifier.
+          }
+          final assetId = uploadedRemoteId;
+          if (assetId != null) {
+            try {
+              await assetsApi.deleteAssets(
+                api.AssetBulkDeleteDto(ids: [assetId], force: const api.Optional.present(true)),
+              );
+            } catch (_) {
+              // Best-effort cleanup for a test-created asset.
+            }
+          }
+        });
+
+        await container.read(syncApiRepositoryProvider).deleteSyncAck(_allReplayableSyncAckTypes);
+        await Store.delete(StoreKey.syncMigrationStatus);
+        await container.read(syncStreamRepositoryProvider).reset();
+        final baselineSyncSuccess = await container.read(syncStreamServiceProvider).sync();
+        expect(baselineSyncSuccess, isTrue);
+        final baselineRows = await _remoteSyncRowCounts(drift);
+
+        await _connectAndWaitForWebsocket(tester, container);
+
+        final createdAt = DateTime.now().toUtc();
+        final fileName = 'immich-e2e-realtime-021-${createdAt.microsecondsSinceEpoch}.jpg';
+        final uploadedId = await _uploadGeneratedJpegAsSecondClient(fileName, createdAt);
+        uploadedRemoteId = uploadedId;
+        final uploadSyncSuccess = await container.read(syncStreamServiceProvider).sync();
+        expect(uploadSyncSuccess, isTrue);
+
+        final uploadedAsset = await _waitForRemoteAssetState(
+          tester,
+          container,
+          uploadedId,
+          (asset) => !asset.isFavorite && !asset.isTrashed,
+          reason: 'Expected realtime remote-change handling to create a local remote asset row',
+        );
+        expect(uploadedAsset.isImage, isTrue);
+
+        await assetsApi.updateAssets(
+          api.AssetBulkUpdateDto(ids: [uploadedId], isFavorite: const api.Optional.present(true)),
+        );
+        final updateSyncSuccess = await container.read(syncStreamServiceProvider).sync();
+        expect(updateSyncSuccess, isTrue);
+
+        await _waitForRemoteAssetState(
+          tester,
+          container,
+          uploadedId,
+          (asset) => asset.isFavorite && !asset.isTrashed,
+          reason: 'Expected websocket-driven incremental sync to apply favorite update',
+        );
+
+        container.read(websocketProvider.notifier).disconnect();
+        await _pumpUntil(
+          tester,
+          () => !container.read(websocketProvider).isConnected,
+          timeout: const Duration(seconds: 10),
+        );
+
+        await assetsApi.updateAssets(
+          api.AssetBulkUpdateDto(ids: [uploadedId], isFavorite: const api.Optional.present(false)),
+        );
+        await assetsApi.deleteAssets(
+          api.AssetBulkDeleteDto(ids: [uploadedId], force: const api.Optional.present(false)),
+        );
+        await _pumpFor(tester, const Duration(seconds: 3));
+
+        final staleAsset = await container.read(remoteAssetRepositoryProvider).get(uploadedId);
+        expect(staleAsset, isNotNull);
+        expect(staleAsset!.isFavorite, isTrue, reason: 'Disconnected websocket should not apply remote changes inline');
+        expect(staleAsset.isTrashed, isFalse);
+
+        await _connectAndWaitForWebsocket(tester, container);
+        final recoveredSyncSuccess = await container.read(syncStreamServiceProvider).sync();
+        expect(recoveredSyncSuccess, isTrue);
+
+        await _waitForRemoteAssetGoneOrTrashed(
+          tester,
+          container,
+          uploadedId,
+          reason: 'Expected reconnect sync to backfill offline favorite and trash changes',
+        );
+        expect(await _remoteAssetRowCountById(drift, uploadedId), lessThanOrEqualTo(1));
+
+        final recoveredRows = await _remoteSyncRowCounts(drift);
+        expect(recoveredRows['remote_asset_entity'], greaterThanOrEqualTo(baselineRows['remote_asset_entity']!));
+        final secondSyncSuccess = await container.read(syncStreamServiceProvider).sync();
+        expect(secondSyncSuccess, isTrue);
+        expect(
+          await _remoteSyncRowCounts(drift),
+          recoveredRows,
+          reason: 'Second sync after realtime recovery should not duplicate rows',
+        );
+      },
+    );
+
     if (_selectedCaseId.isNotEmpty && !_registeredSelectedCase) {
       test(_selectedCaseId, () => fail('No real stack auth test registered for $_selectedCaseId'));
     }
@@ -974,6 +1089,11 @@ Future<List<SyncEvent>> _interruptSyncAfterFirstSafeEvent(ProviderContainer cont
         batchSize: 1,
       );
   return events;
+}
+
+Future<void> _connectAndWaitForWebsocket(WidgetTester tester, ProviderContainer container) async {
+  container.read(websocketProvider.notifier).connect();
+  await _pumpUntil(tester, () => container.read(websocketProvider).isConnected, timeout: const Duration(seconds: 30));
 }
 
 void _expectRealSyncCoverage(List<SyncEvent> events) {
@@ -1582,7 +1702,7 @@ Future<void> _loadAppPreservingStore(WidgetTester tester) async {
   await EasyLocalization.ensureInitialized();
 }
 
-Future<void> _loadAuthenticatedApp(WidgetTester tester) async {
+Future<void> _loadAuthenticatedApp(WidgetTester tester, {bool overrideCancellation = false}) async {
   await EasyLocalization.ensureInitialized();
   final (drift, _) = await Bootstrap.initDomain();
   await Store.clear();
@@ -1590,7 +1710,13 @@ Future<void> _loadAuthenticatedApp(WidgetTester tester) async {
   await _seedAuthenticatedStore();
 
   await tester.pumpWidget(
-    ProviderScope(overrides: [driftProvider.overrideWith(driftOverride(drift))], child: const app.MainWidget()),
+    ProviderScope(
+      overrides: [
+        driftProvider.overrideWith(driftOverride(drift)),
+        if (overrideCancellation) cancellationProvider.overrideWithValue(Completer()),
+      ],
+      child: const app.MainWidget(),
+    ),
   );
   await EasyLocalization.ensureInitialized();
   await _pumpFor(tester, const Duration(milliseconds: 500));
@@ -1754,6 +1880,96 @@ Future<String> _uploadSingleAssetToServer(ProviderContainer container, LocalAsse
   expect(uploadError, isNull);
   expect(remoteAssetId, isNotNull);
   return remoteAssetId!;
+}
+
+Future<String> _uploadGeneratedJpegAsSecondClient(String fileName, DateTime createdAt) async {
+  final bytes = _generatedJpegBytes(createdAt.microsecondsSinceEpoch);
+  final request = http.MultipartRequest('POST', Uri.parse('${Store.get(StoreKey.serverEndpoint)}/assets'))
+    ..headers.addAll({
+      ...ApiService.getRequestHeaders(),
+      'Authorization': 'Bearer ${Store.get(StoreKey.accessToken)}',
+      'x-immich-checksum': base64Encode(md5.convert(bytes).bytes),
+    })
+    ..fields.addAll({
+      'fileCreatedAt': createdAt.toIso8601String(),
+      'fileModifiedAt': createdAt.toIso8601String(),
+      'filename': fileName,
+      'isFavorite': 'false',
+    })
+    ..files.add(http.MultipartFile.fromBytes('assetData', bytes, filename: fileName));
+
+  final response = await http.Response.fromStream(await request.send());
+  expect(response.statusCode, inInclusiveRange(200, 299), reason: response.body);
+  final payload = jsonDecode(response.body) as Map<String, dynamic>;
+  expect(payload['status'], 'created', reason: response.body);
+  return payload['id'] as String;
+}
+
+Uint8List _generatedJpegBytes(int seed) {
+  const onePixelJpeg =
+      '/9j/2wBDAAgEBAQEBAUFBQUFBQYGBgYGBgYGBgYGBgYHBwcICAgHBwcGBgcHCAgICAkJCQgICAgJCQoKCgwMCwsODg4RERT/xABNAAEBAAAAAAAAAAAAAAAAAAAABwEBAQEAAAAAAAAAAAAAAAAAAAIDEAEAAAAAAAAAAAAAAAAAAAAAEQEAAAAAAAAAAAAAAAAAAAAA/8AAEQgAUAB4AwEiAAIRAAMRAP/aAAwDAQACEQMRAD8AvADRIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD/2Q==';
+  final bytes = base64Decode(onePixelJpeg);
+  final comment = utf8.encode('immich-e2e-realtime-021-$seed');
+  final commentLength = comment.length + 2;
+  return Uint8List.fromList([
+    bytes[0],
+    bytes[1],
+    0xff,
+    0xfe,
+    commentLength >> 8,
+    commentLength & 0xff,
+    ...comment,
+    ...bytes.skip(2),
+  ]);
+}
+
+Future<RemoteAsset> _waitForRemoteAssetState(
+  WidgetTester tester,
+  ProviderContainer container,
+  String remoteAssetId,
+  bool Function(RemoteAsset asset) matches, {
+  required String reason,
+}) async {
+  RemoteAsset? latest;
+  final end = DateTime.now().add(const Duration(seconds: 60));
+  while (DateTime.now().isBefore(end)) {
+    latest = await container.read(remoteAssetRepositoryProvider).get(remoteAssetId);
+    if (latest != null && matches(latest)) {
+      return latest;
+    }
+    await _pumpFor(tester, const Duration(milliseconds: 500));
+  }
+
+  fail('$reason; latest local asset=$latest');
+}
+
+Future<void> _waitForRemoteAssetGoneOrTrashed(
+  WidgetTester tester,
+  ProviderContainer container,
+  String remoteAssetId, {
+  required String reason,
+}) async {
+  RemoteAsset? latest;
+  final end = DateTime.now().add(const Duration(seconds: 60));
+  while (DateTime.now().isBefore(end)) {
+    latest = await container.read(remoteAssetRepositoryProvider).get(remoteAssetId);
+    if (latest == null || latest.isTrashed) {
+      return;
+    }
+    await _pumpFor(tester, const Duration(milliseconds: 500));
+  }
+
+  fail('$reason; latest local asset=$latest');
+}
+
+Future<int> _remoteAssetRowCountById(Drift drift, String remoteAssetId) async {
+  final row = await drift
+      .customSelect(
+        'SELECT COUNT(*) AS count FROM remote_asset_entity WHERE id = ?',
+        variables: [Variable.withString(remoteAssetId)],
+      )
+      .getSingle();
+  return row.read<int>('count');
 }
 
 Future<api.AssetResponseDto> _waitForAssetInfo(
