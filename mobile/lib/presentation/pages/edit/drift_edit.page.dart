@@ -63,6 +63,7 @@ class _DriftEditImagePageState extends ConsumerState<DriftEditImagePage> with Ti
         return;
       }
 
+      ref.read(editorStateProvider.notifier).markSaved();
       ImmichToast.show(context: context, msg: 'success'.tr(), toastType: ToastType.success);
       Navigator.of(context).pop();
     } catch (e) {
@@ -98,10 +99,10 @@ class _DriftEditImagePageState extends ConsumerState<DriftEditImagePage> with Ti
 
   @override
   Widget build(BuildContext context) {
-    final hasUnsavedEdits = ref.watch(editorStateProvider.select((state) => state.hasUnsavedEdits));
+    final canPop = ref.watch(editorStateProvider.select((state) => !state.hasUnsavedEdits || state.isApplyingEdits));
 
     return PopScope(
-      canPop: !hasUnsavedEdits,
+      canPop: canPop,
       onPopInvokedWithResult: (didPop, result) async {
         if (didPop) {
           return;
@@ -374,6 +375,24 @@ class _EditorPreviewState extends ConsumerState<_EditorPreview> with TickerProvi
     ref.read(editorStateProvider.notifier).setCrop(cropController.crop);
   }
 
+  void setCropControllerAspectRatio(double? ratio) {
+    if (ratio == null || cropController.getImage() != null) {
+      cropController.aspectRatio = ratio;
+      return;
+    }
+
+    cropController.value = cropController.value.copyWith(aspectRatio: ratio);
+  }
+
+  void setCropControllerCrop(Rect crop) {
+    if (cropController.getImage() != null) {
+      cropController.crop = crop;
+      return;
+    }
+
+    cropController.value = cropController.value.copyWith(crop: crop);
+  }
+
   @override
   void dispose() {
     cropController.removeListener(onCrop);
@@ -400,11 +419,11 @@ class _EditorPreviewState extends ConsumerState<_EditorPreview> with TickerProvi
           ratio = ratio != null ? 1 / ratio : null;
         }
 
-        cropController.aspectRatio = ratio;
+        setCropControllerAspectRatio(ratio);
       }
 
       if (cropController.crop != current.crop) {
-        cropController.crop = current.crop;
+        setCropControllerCrop(current.crop);
       }
     });
 

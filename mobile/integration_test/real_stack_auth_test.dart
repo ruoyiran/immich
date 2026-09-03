@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:ui' as ui;
 
 import 'package:background_downloader/background_downloader.dart';
 import 'package:crypto/crypto.dart';
@@ -11,11 +12,13 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:http/http.dart' as http;
+import 'package:immich_mobile/constants/aspect_ratios.dart';
 import 'package:immich_mobile/constants/constants.dart';
 import 'package:immich_mobile/constants/enums.dart';
 import 'package:immich_mobile/domain/models/album/album.model.dart';
 import 'package:immich_mobile/domain/models/album/local_album.model.dart';
 import 'package:immich_mobile/domain/models/asset/base_asset.model.dart';
+import 'package:immich_mobile/domain/models/asset_edit.model.dart';
 import 'package:immich_mobile/domain/models/events.model.dart';
 import 'package:immich_mobile/domain/models/exif.model.dart';
 import 'package:immich_mobile/domain/models/person.model.dart';
@@ -54,6 +57,8 @@ import 'package:immich_mobile/presentation/pages/drift_favorite.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_library.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_locked_folder.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_remote_album.page.dart';
+import 'package:immich_mobile/presentation/pages/edit/drift_edit.page.dart';
+import 'package:immich_mobile/presentation/pages/edit/editor.provider.dart';
 import 'package:immich_mobile/presentation/pages/search/drift_search.page.dart';
 import 'package:immich_mobile/presentation/widgets/album/album_selector.widget.dart';
 import 'package:immich_mobile/presentation/widgets/asset_viewer/asset_viewer.page.dart';
@@ -97,6 +102,7 @@ import 'package:immich_mobile/services/background_upload.service.dart';
 import 'package:immich_mobile/services/download.service.dart';
 import 'package:immich_mobile/services/foreground_upload.service.dart';
 import 'package:immich_mobile/utils/bootstrap.dart';
+import 'package:immich_mobile/utils/editor.utils.dart';
 import 'package:immich_mobile/utils/option.dart';
 import 'package:immich_mobile/utils/semver.dart';
 import 'package:immich_mobile/widgets/asset_viewer/video_controls.dart';
@@ -4620,6 +4626,181 @@ void main() async {
       expect(await _serverAssetIdsByOriginalFilename(searchApi, cancelImageName), isEmpty);
     });
 
+    _realStackSessionTest('MOB-UI-043-$_caseSuffix', 'edits image crop transform reset and save', (tester) async {
+      tester.view.devicePixelRatio = 1.0;
+      tester.view.physicalSize = const Size(430, 932);
+      addTearDown(tester.view.reset);
+
+      await _loadAuthenticatedApp(tester, overrideCancellation: true);
+      final container = _containerOfApp(tester);
+      final apiService = container.read(apiServiceProvider);
+      final assetsApi = apiService.assetsApi;
+      final createdRemoteAssetIds = <String>[];
+
+      addTearDown(() async {
+        for (final assetId in createdRemoteAssetIds) {
+          await _deleteTestAssetBestEffort(assetsApi, assetId);
+        }
+      });
+
+      final runToken = DateTime.now().toUtc().microsecondsSinceEpoch.toString();
+      final imageName = 'immich-e2e-image-edit-043-$runToken.png';
+      final imageId = await _uploadGeneratedPngAsSecondClient(
+        imageName,
+        DateTime.now().toUtc(),
+        width: 1600,
+        height: 1000,
+      );
+      createdRemoteAssetIds.add(imageId);
+
+      final originalDownload = await _waitForSuccessfulResponse(
+        tester,
+        () => container.read(assetApiRepositoryProvider).downloadAsset(imageId, edited: false),
+        timeout: const Duration(minutes: 3),
+      );
+      expect(await _decodeImageSize(originalDownload.bodyBytes), (width: 1600, height: 1000));
+      await _waitForSuccessfulResponse(
+        tester,
+        () => _authenticatedApiGet('/assets/$imageId/thumbnail?size=thumbnail&edited=false&c=$runToken'),
+        timeout: const Duration(minutes: 3),
+      );
+
+      final syncSuccess = await container.read(syncStreamServiceProvider).sync();
+      expect(syncSuccess, isTrue);
+      await pumpUntilFound(tester, find.byType(Timeline), timeout: const Duration(seconds: 60));
+      final user = Store.tryGet(StoreKey.currentUser);
+      expect(user, isNotNull);
+      final timeline = container.read(timelineFactoryProvider).main([user!.id]);
+      addTearDown(timeline.dispose);
+      await _expectTimelineAssetSet(
+        tester,
+        timeline,
+        includes: {imageId},
+        excludes: const {},
+        reason: 'Expected the 043 high-resolution image in the main timeline before editing',
+      );
+      final remoteImage = await _waitForRemoteAssetState(
+        tester,
+        container,
+        imageId,
+        (asset) => asset.isRemoteOnly && asset.isEditable && asset.width == 1600 && asset.height == 1000,
+        reason: 'Expected the 043 image to sync with editable dimensions before opening the editor',
+      );
+      final exif = await _waitForRemoteExifState(
+        tester,
+        container.read(assetServiceProvider),
+        remoteImage,
+        (exif) => exif.width == 1600 && exif.height == 1000,
+        reason: 'Expected the 043 image EXIF dimensions before opening the editor action',
+      );
+      expect(exif.isFlipped, isFalse);
+
+      await _openTimelineAsset(tester, remoteImage);
+      await _showViewerControls(tester, container);
+      await _tapViewerActionIcon(tester, Icons.tune);
+      await pumpUntilFound(tester, find.byType(DriftEditImagePage), timeout: const Duration(seconds: 30));
+      await _waitForEditorState(
+        tester,
+        container,
+        (state) => state.originalWidth == 1600 && state.originalHeight == 1000 && !state.hasEdits,
+        reason: 'Expected the editor to load the original 043 image dimensions',
+      );
+
+      const finalCrop = Rect.fromLTWH(0.10, 0.10, 0.50, 0.45);
+      container.read(editorStateProvider.notifier).setCrop(finalCrop);
+      await _waitForEditorState(
+        tester,
+        container,
+        (state) => state.crop == finalCrop && state.hasUnsavedEdits,
+        reason: 'Expected free crop edits to update the editor state',
+      );
+      await _tapEditorAspectRatio(tester, '16:9');
+      await _waitForEditorState(
+        tester,
+        container,
+        (state) => state.aspectRatio == const CropAspectRatio(numerator: 16, denominator: 9),
+        reason: 'Expected the fixed 16:9 crop ratio to be selected',
+      );
+
+      await _tapEditorIcon(tester, Icons.flip, occurrence: 0);
+      await _waitForEditorState(
+        tester,
+        container,
+        (state) => state.flipHorizontal,
+        reason: 'Expected horizontal flip to update the editor state',
+      );
+      await _tapEditorIcon(tester, Icons.rotate_right);
+      await _waitForEditorState(
+        tester,
+        container,
+        (state) => state.rotationAngle == 90,
+        reason: 'Expected clockwise rotation to update the editor state',
+      );
+
+      await _tapEditorReset(tester);
+      await _waitForEditorState(
+        tester,
+        container,
+        (state) =>
+            !state.hasEdits &&
+            state.crop == const Rect.fromLTRB(0, 0, 1, 1) &&
+            state.aspectRatio == CropAspectRatio.free,
+        reason: 'Expected reset to restore the original crop, transform, and ratio',
+      );
+
+      container.read(editorStateProvider.notifier).setCrop(finalCrop);
+      await _tapEditorAspectRatio(tester, '16:9');
+      await _tapEditorIcon(tester, Icons.flip, occurrence: 0);
+      await _tapEditorIcon(tester, Icons.rotate_right);
+      await _waitForEditorState(
+        tester,
+        container,
+        (state) => state.hasEdits && state.flipHorizontal && state.rotationAngle == 90,
+        reason: 'Expected final edit state before save',
+      );
+      final expectedCropParameters = convertRectToCropParameters(container.read(editorStateProvider).crop, 1600, 1000);
+      await _tapEditorIcon(tester, Icons.done_rounded);
+      await _pumpUntil(
+        tester,
+        () => find.byType(DriftEditImagePage).evaluate().isEmpty,
+        timeout: const Duration(minutes: 2),
+      );
+
+      final postEditSyncSuccess = await container.read(syncStreamServiceProvider).sync();
+      expect(postEditSyncSuccess, isTrue);
+      final edits = await _waitForLocalAssetEdits(
+        tester,
+        container,
+        imageId,
+        (edits) => edits.length == 3 && edits[0] is CropEdit && edits[1] is MirrorEdit && edits[2] is RotateEdit,
+        reason: 'Expected saved crop, mirror, and rotate edits to sync locally',
+      );
+      final crop = edits[0] as CropEdit;
+      expect(crop.parameters.x, expectedCropParameters.x);
+      expect(crop.parameters.y, expectedCropParameters.y);
+      expect(crop.parameters.width, expectedCropParameters.width);
+      expect(crop.parameters.height, expectedCropParameters.height);
+      expect((edits[1] as MirrorEdit).parameters.axis, api.MirrorAxis.horizontal);
+      expect((edits[2] as RotateEdit).parameters.angle, 90);
+
+      final editedDownload = await _waitForEditedAssetDownloadWithSize(
+        tester,
+        container,
+        imageId,
+        (size) => size == (width: expectedCropParameters.height, height: expectedCropParameters.width),
+        reason: 'Expected the edited 043 image download to reflect crop and rotation dimensions',
+      );
+      expect(editedDownload.statusCode, 200);
+      final refreshedImage = await _waitForRemoteAssetState(
+        tester,
+        container,
+        imageId,
+        (asset) => asset.isEdited,
+        reason: 'Expected the 043 local asset row to be marked edited after save',
+      );
+      expect(refreshedImage.id, imageId);
+    });
+
     if (_selectedCaseId.isNotEmpty && !_registeredSelectedCase) {
       test(_selectedCaseId, () => fail('No real stack auth test registered for $_selectedCaseId'));
     }
@@ -6134,6 +6315,116 @@ Future<List<ShareIntentAttachment>> _waitForShareIntentState(
   fail('$reason; latest share intent state=${_describeShareIntentState(latest)}');
 }
 
+Future<EditorState> _waitForEditorState(
+  WidgetTester tester,
+  ProviderContainer container,
+  bool Function(EditorState state) matches, {
+  required String reason,
+}) async {
+  EditorState? latest;
+  final end = DateTime.now().add(const Duration(seconds: 30));
+  while (DateTime.now().isBefore(end)) {
+    final current = container.read(editorStateProvider);
+    latest = current;
+    if (matches(current)) {
+      return current;
+    }
+    await _pumpFor(tester, const Duration(milliseconds: 200));
+  }
+
+  fail('$reason; latest editor state=$latest');
+}
+
+Future<List<AssetEdit>> _waitForLocalAssetEdits(
+  WidgetTester tester,
+  ProviderContainer container,
+  String remoteAssetId,
+  bool Function(List<AssetEdit> edits) matches, {
+  required String reason,
+}) async {
+  var latest = const <AssetEdit>[];
+  final end = DateTime.now().add(const Duration(seconds: 60));
+  while (DateTime.now().isBefore(end)) {
+    latest = await container.read(remoteAssetRepositoryProvider).getAssetEdits(remoteAssetId);
+    if (matches(latest)) {
+      return latest;
+    }
+    await _pumpFor(tester, const Duration(milliseconds: 500));
+  }
+
+  fail('$reason; latest edits=${latest.map((edit) => edit.runtimeType).join(', ')}');
+}
+
+Future<http.Response> _waitForEditedAssetDownloadWithSize(
+  WidgetTester tester,
+  ProviderContainer container,
+  String remoteAssetId,
+  bool Function(({int width, int height}) size) matches, {
+  required String reason,
+}) async {
+  ({int width, int height})? latestSize;
+  http.Response? lastResponse;
+  Object? lastError;
+  final end = DateTime.now().add(const Duration(minutes: 2));
+  while (DateTime.now().isBefore(end)) {
+    try {
+      final response = await container.read(assetApiRepositoryProvider).downloadAsset(remoteAssetId, edited: true);
+      lastResponse = response;
+      if (response.statusCode == 200 && response.bodyBytes.isNotEmpty) {
+        latestSize = await _decodeImageSize(response.bodyBytes);
+        if (matches(latestSize)) {
+          return response;
+        }
+      }
+    } catch (error) {
+      lastError = error;
+    }
+    await _pumpFor(tester, const Duration(seconds: 2));
+  }
+
+  fail(
+    '$reason; latest edited image size=$latestSize; '
+    'last status=${lastResponse?.statusCode}; last error=$lastError',
+  );
+}
+
+Future<void> _tapEditorAspectRatio(WidgetTester tester, String label) async {
+  final ratioText = find.descendant(of: find.byType(DriftEditImagePage), matching: find.text(label));
+  final ratioStrip = find.descendant(of: find.byType(DriftEditImagePage), matching: find.byType(SingleChildScrollView));
+  await pumpUntilFound(tester, ratioText, timeout: const Duration(seconds: 30));
+
+  for (var attempt = 0; attempt < 8; attempt++) {
+    final visibleText = ratioText.hitTestable();
+    if (tester.any(visibleText)) {
+      final textCenter = tester.getCenter(visibleText.first);
+      await tester.tapAt(textCenter.translate(0, -38));
+      await _pumpFor(tester, const Duration(milliseconds: 400));
+      return;
+    }
+    expect(ratioStrip, findsWidgets, reason: 'Expected the editor aspect ratio strip to be visible');
+    await tester.drag(ratioStrip.last, const Offset(-240, 0));
+    await _pumpFor(tester, const Duration(milliseconds: 300));
+  }
+
+  fail('Could not tap editor aspect ratio $label');
+}
+
+Future<void> _tapEditorIcon(WidgetTester tester, IconData icon, {int occurrence = 0}) async {
+  final iconFinder = find.descendant(of: find.byType(DriftEditImagePage), matching: find.byIcon(icon)).hitTestable();
+  await pumpUntilFound(tester, iconFinder, timeout: const Duration(seconds: 30));
+  expect(iconFinder, findsAtLeastNWidgets(occurrence + 1), reason: 'Expected editor icon $icon to be tappable');
+  await tester.tap(iconFinder.at(occurrence), warnIfMissed: false);
+  await _pumpFor(tester, const Duration(milliseconds: 500));
+}
+
+Future<void> _tapEditorReset(WidgetTester tester) async {
+  final resetButton = find.descendant(of: find.byType(DriftEditImagePage), matching: find.text('reset'.tr()));
+  await pumpUntilFound(tester, resetButton, timeout: const Duration(seconds: 30));
+  expect(resetButton.hitTestable(), findsWidgets, reason: 'Expected the editor reset button to be tappable');
+  await tester.tap(resetButton.hitTestable().last, warnIfMissed: false);
+  await _pumpFor(tester, const Duration(milliseconds: 500));
+}
+
 String _describeShareIntentState(List<ShareIntentAttachment> attachments) {
   return attachments
       .map(
@@ -6883,6 +7174,34 @@ Future<String> _uploadGeneratedJpegAsSecondClient(
   return assetId;
 }
 
+Future<String> _uploadGeneratedPngAsSecondClient(
+  String fileName,
+  DateTime createdAt, {
+  required int width,
+  required int height,
+}) async {
+  final bytes = await _generatedPngBytes(createdAt.microsecondsSinceEpoch, width: width, height: height);
+  final request = http.MultipartRequest('POST', Uri.parse('${Store.get(StoreKey.serverEndpoint)}/assets'))
+    ..headers.addAll({
+      ...ApiService.getRequestHeaders(),
+      'Authorization': 'Bearer ${Store.get(StoreKey.accessToken)}',
+      'x-immich-checksum': base64Encode(md5.convert(bytes).bytes),
+    })
+    ..fields.addAll({
+      'fileCreatedAt': createdAt.toIso8601String(),
+      'fileModifiedAt': createdAt.toIso8601String(),
+      'filename': fileName,
+      'isFavorite': 'false',
+    })
+    ..files.add(http.MultipartFile.fromBytes('assetData', bytes, filename: fileName));
+
+  final response = await http.Response.fromStream(await request.send());
+  expect(response.statusCode, inInclusiveRange(200, 299), reason: response.body);
+  final payload = jsonDecode(response.body) as Map<String, dynamic>;
+  expect(payload['status'], 'created', reason: response.body);
+  return payload['id'] as String;
+}
+
 Future<void> _updateTestAssetSourceMetadata(
   String remoteAssetId,
   String fileName,
@@ -7273,6 +7592,41 @@ Uint8List _generatedJpegBytes(int seed) {
     ...comment,
     ...bytes.skip(2),
   ]);
+}
+
+Future<Uint8List> _generatedPngBytes(int seed, {required int width, required int height}) async {
+  final recorder = ui.PictureRecorder();
+  final canvas = ui.Canvas(recorder);
+  final paint = ui.Paint()..color = const ui.Color(0xff19435f);
+  canvas.drawRect(ui.Rect.fromLTWH(0, 0, width.toDouble(), height.toDouble()), paint);
+
+  paint.color = ui.Color(0xff000000 | ((seed >> 8) & 0x00ffffff));
+  canvas.drawRect(ui.Rect.fromLTWH(width * 0.05, height * 0.08, width * 0.40, height * 0.48), paint);
+  paint.color = ui.Color(0xff000000 | ((seed * 2654435761) & 0x00ffffff));
+  canvas.drawRect(ui.Rect.fromLTWH(width * 0.52, height * 0.16, width * 0.36, height * 0.62), paint);
+  paint.color = const ui.Color(0xfff4c542);
+  canvas.drawCircle(ui.Offset(width * 0.72, height * 0.35), height * 0.12, paint);
+  paint.color = const ui.Color(0xffd9480f);
+  canvas.drawRect(ui.Rect.fromLTWH(width * 0.18, height * 0.72, width * 0.60, height * 0.12), paint);
+
+  final image = await recorder.endRecording().toImage(width, height);
+  final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
+  image.dispose();
+  if (byteData == null) {
+    fail('Failed to encode generated PNG fixture');
+  }
+  return byteData.buffer.asUint8List(byteData.offsetInBytes, byteData.lengthInBytes);
+}
+
+Future<({int width, int height})> _decodeImageSize(List<int> bodyBytes) async {
+  final bytes = bodyBytes is Uint8List ? bodyBytes : Uint8List.fromList(bodyBytes);
+  final codec = await ui.instantiateImageCodec(bytes);
+  final frame = await codec.getNextFrame();
+  final image = frame.image;
+  final size = (width: image.width, height: image.height);
+  image.dispose();
+  codec.dispose();
+  return size;
 }
 
 Future<RemoteAsset> _waitForRemoteAssetState(
