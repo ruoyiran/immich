@@ -12,6 +12,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:http/http.dart' as http;
 import 'package:immich_mobile/constants/constants.dart';
 import 'package:immich_mobile/constants/enums.dart';
+import 'package:immich_mobile/domain/models/album/album.model.dart';
 import 'package:immich_mobile/domain/models/asset/base_asset.model.dart';
 import 'package:immich_mobile/domain/models/events.model.dart';
 import 'package:immich_mobile/domain/models/store.model.dart';
@@ -1269,6 +1270,154 @@ void main() async {
       },
     );
 
+    _realStackSessionTest(
+      'MOB-REAL-024-$_caseSuffix',
+      'keeps album membership cover and sync idempotent across clients',
+      (tester) async {
+        await _loadAuthenticatedApp(tester, overrideCancellation: true);
+        final container = _containerOfApp(tester);
+        final drift = container.read(driftProvider);
+        final apiService = container.read(apiServiceProvider);
+        final albumsApi = apiService.albumsApi;
+        final assetsApi = apiService.assetsApi;
+        final uploadedRemoteIds = <String>[];
+        String? albumId;
+
+        addTearDown(() async {
+          final id = albumId;
+          if (id != null) {
+            await _deleteAlbumBestEffort(albumsApi, id);
+          }
+          for (final assetId in uploadedRemoteIds) {
+            await _deleteTestAssetBestEffort(assetsApi, assetId);
+          }
+        });
+
+        await container.read(syncApiRepositoryProvider).deleteSyncAck(_allReplayableSyncAckTypes);
+        await Store.delete(StoreKey.syncMigrationStatus);
+        await container.read(syncStreamRepositoryProvider).reset();
+        final baselineSyncSuccess = await container.read(syncStreamServiceProvider).sync();
+        expect(baselineSyncSuccess, isTrue);
+
+        final baseCreatedAt = DateTime.now().toUtc();
+        final assetIds = <String>[];
+        for (var index = 0; index < 3; index++) {
+          final createdAt = baseCreatedAt.subtract(Duration(seconds: 3 - index));
+          final assetId = await _uploadGeneratedJpegAsSecondClient(
+            'immich-e2e-album-024-$index-${createdAt.microsecondsSinceEpoch}.jpg',
+            createdAt,
+          );
+          uploadedRemoteIds.add(assetId);
+          assetIds.add(assetId);
+        }
+
+        final uploadSyncSuccess = await container.read(syncStreamServiceProvider).sync();
+        expect(uploadSyncSuccess, isTrue);
+        for (final assetId in assetIds) {
+          await _waitForRemoteAssetState(
+            tester,
+            container,
+            assetId,
+            (asset) => asset.visibility == AssetVisibility.timeline && !asset.isTrashed,
+            reason: 'Expected uploaded album candidate $assetId to sync locally',
+          );
+          expect(await _remoteAssetRowCountById(drift, assetId), 1);
+        }
+
+        final albumName = 'immich-e2e-album-024-${baseCreatedAt.microsecondsSinceEpoch}';
+        final createdAlbum = await albumsApi.createAlbum(
+          api.CreateAlbumDto(albumName: albumName, assetIds: api.Optional.present(assetIds.take(2).toList())),
+        );
+        expect(createdAlbum, isNotNull);
+        albumId = createdAlbum!.id;
+
+        await _waitForAlbumInfoState(
+          tester,
+          albumsApi,
+          albumId,
+          (album) => album.albumName == albumName && album.assetCount == 2,
+          reason: 'Expected created album to contain the first two assets on the server',
+        );
+
+        final duplicateAdd = await albumsApi.addAssetsToAlbum(albumId, api.BulkIdsDto(ids: assetIds.take(2).toList()));
+        _expectBulkResultsAcceptedOrDuplicate(
+          duplicateAdd,
+          assetIds.take(2).toSet(),
+          reason: 'Repeated album add should be idempotent for existing assets',
+        );
+        await _waitForAlbumInfoState(
+          tester,
+          albumsApi,
+          albumId,
+          (album) => album.assetCount == 2,
+          reason: 'Repeated album add should not duplicate membership on the server',
+        );
+
+        final addThird = await albumsApi.addAssetsToAlbum(albumId, api.BulkIdsDto(ids: [assetIds[2]]));
+        _expectBulkSuccess(addThird, {assetIds[2]}, reason: 'Expected third asset to be added to album');
+
+        await _waitForAlbumInfoState(
+          tester,
+          albumsApi,
+          albumId,
+          (album) => album.assetCount == 3,
+          reason: 'Expected album to contain three assets after adding the third asset',
+        );
+
+        final coverUpdate = await albumsApi.updateAlbumInfo(
+          albumId,
+          api.UpdateAlbumDto(albumThumbnailAssetId: api.Optional.present(assetIds[2])),
+        );
+        expect(coverUpdate, isNotNull);
+        expect(coverUpdate!.albumThumbnailAssetId, assetIds[2]);
+
+        final removeSecond = await albumsApi.removeAssetFromAlbum(albumId, api.BulkIdsDto(ids: [assetIds[1]]));
+        _expectBulkSuccess(removeSecond, {assetIds[1]}, reason: 'Expected second asset to be removed from album');
+
+        await _waitForAlbumInfoState(
+          tester,
+          albumsApi,
+          albumId,
+          (album) => album.assetCount == 2 && album.albumThumbnailAssetId == assetIds[2],
+          reason: 'Expected removed asset to leave album count at two while preserving cover',
+        );
+        final removedAssetInfo = await assetsApi.getAssetInfo(assetIds[1]);
+        expect(removedAssetInfo, isNotNull);
+        expect(removedAssetInfo!.isTrashed, isFalse, reason: 'Removing from album must not trash the source asset');
+
+        final albumSyncSuccess = await container.read(syncStreamServiceProvider).sync();
+        expect(albumSyncSuccess, isTrue);
+
+        await _waitForRemoteAlbumState(
+          tester,
+          container,
+          albumId,
+          (album) => album.name == albumName && album.assetCount == 2 && album.thumbnailAssetId == assetIds[2],
+          reason: 'Expected local album to converge after cross-client album changes',
+        );
+        await _waitForRemoteAlbumAssetIds(
+          tester,
+          container,
+          albumId,
+          includes: {assetIds[0], assetIds[2]},
+          excludes: {assetIds[1]},
+          reason: 'Expected local album membership to include first and third assets only',
+        );
+        expect(await _remoteAlbumRowCountById(drift, albumId), 1);
+        expect(await _remoteAlbumAssetRowCountByAlbumId(drift, albumId), 2);
+        expect(await _remoteAssetRowCountById(drift, assetIds[1]), 1);
+
+        final rowsAfterAlbumSync = await _remoteSyncRowCounts(drift);
+        final secondSyncSuccess = await container.read(syncStreamServiceProvider).sync();
+        expect(secondSyncSuccess, isTrue);
+        expect(
+          await _remoteSyncRowCounts(drift),
+          rowsAfterAlbumSync,
+          reason: 'Second sync after album changes should not duplicate local rows',
+        );
+      },
+    );
+
     if (_selectedCaseId.isNotEmpty && !_registeredSelectedCase) {
       test(_selectedCaseId, () => fail('No real stack auth test registered for $_selectedCaseId'));
     }
@@ -2232,6 +2381,14 @@ Future<void> _deleteTestAssetBestEffort(api.AssetsApi assetsApi, String remoteAs
   }
 }
 
+Future<void> _deleteAlbumBestEffort(api.AlbumsApi albumsApi, String albumId) async {
+  try {
+    await albumsApi.deleteAlbum(albumId);
+  } catch (_) {
+    // Best-effort cleanup for a test-created album.
+  }
+}
+
 Uint8List _generatedJpegBytes(int seed) {
   const onePixelJpeg =
       '/9j/2wBDAAgEBAQEBAUFBQUFBQYGBgYGBgYGBgYGBgYHBwcICAgHBwcGBgcHCAgICAkJCQgICAgJCQoKCgwMCwsODg4RERT/xABNAAEBAAAAAAAAAAAAAAAAAAAABwEBAQEAAAAAAAAAAAAAAAAAAAIDEAEAAAAAAAAAAAAAAAAAAAAAEQEAAAAAAAAAAAAAAAAAAAAA/8AAEQgAUAB4AwEiAAIRAAMRAP/aAAwDAQACEQMRAD8AvADRIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD/2Q==';
@@ -2319,6 +2476,100 @@ Future<List<BaseAsset>> _expectTimelineAssetSet(
   fail('$reason; latest timeline ids=${latestIds.join(', ')}');
 }
 
+Future<api.AlbumResponseDto> _waitForAlbumInfoState(
+  WidgetTester tester,
+  api.AlbumsApi albumsApi,
+  String albumId,
+  bool Function(api.AlbumResponseDto album) matches, {
+  required String reason,
+}) async {
+  api.AlbumResponseDto? latest;
+  Object? lastError;
+  final end = DateTime.now().add(const Duration(seconds: 60));
+  while (DateTime.now().isBefore(end)) {
+    try {
+      latest = await albumsApi.getAlbumInfo(albumId);
+      if (latest != null && matches(latest)) {
+        return latest;
+      }
+    } catch (error) {
+      lastError = error;
+    }
+    await _pumpFor(tester, const Duration(milliseconds: 500));
+  }
+
+  fail('$reason; latest server album=$latest; last error=$lastError');
+}
+
+Future<RemoteAlbum> _waitForRemoteAlbumState(
+  WidgetTester tester,
+  ProviderContainer container,
+  String albumId,
+  bool Function(RemoteAlbum album) matches, {
+  required String reason,
+}) async {
+  RemoteAlbum? latest;
+  final end = DateTime.now().add(const Duration(seconds: 60));
+  while (DateTime.now().isBefore(end)) {
+    latest = await container.read(remoteAlbumServiceProvider).get(albumId);
+    if (latest != null && matches(latest)) {
+      return latest;
+    }
+    await _pumpFor(tester, const Duration(milliseconds: 500));
+  }
+
+  fail('$reason; latest local album=$latest');
+}
+
+Future<Set<String>> _waitForRemoteAlbumAssetIds(
+  WidgetTester tester,
+  ProviderContainer container,
+  String albumId, {
+  required Set<String> includes,
+  required Set<String> excludes,
+  required String reason,
+}) async {
+  var latestIds = const <String>{};
+  final end = DateTime.now().add(const Duration(seconds: 60));
+  while (DateTime.now().isBefore(end)) {
+    final assets = await container.read(remoteAlbumServiceProvider).getAssets(albumId);
+    latestIds = assets.map((asset) => asset.remoteId).whereType<String>().toSet();
+    final hasExpected = includes.every(latestIds.contains);
+    final hasNoUnexpected = excludes.every((assetId) => !latestIds.contains(assetId));
+    if (hasExpected && hasNoUnexpected) {
+      return latestIds;
+    }
+    await _pumpFor(tester, const Duration(milliseconds: 500));
+  }
+
+  final sorted = latestIds.toList()..sort();
+  fail('$reason; latest album asset ids=${sorted.join(', ')}');
+}
+
+void _expectBulkSuccess(List<api.BulkIdResponseDto>? response, Set<String> ids, {required String reason}) {
+  expect(response, isNotNull, reason: reason);
+  final byId = {for (final result in response!) result.id: result};
+  expect(byId.keys, containsAll(ids), reason: reason);
+  for (final id in ids) {
+    expect(byId[id]!.success, isTrue, reason: '$reason; result=${byId[id]}');
+  }
+}
+
+void _expectBulkResultsAcceptedOrDuplicate(
+  List<api.BulkIdResponseDto>? response,
+  Set<String> ids, {
+  required String reason,
+}) {
+  expect(response, isNotNull, reason: reason);
+  final byId = {for (final result in response!) result.id: result};
+  expect(byId.keys, containsAll(ids), reason: reason);
+  for (final id in ids) {
+    final result = byId[id]!;
+    final isDuplicate = !result.success && result.error.orElse(null) == api.BulkIdErrorReason.duplicate;
+    expect(result.success || isDuplicate, isTrue, reason: '$reason; result=$result');
+  }
+}
+
 Future<void> _waitForRemoteAssetGoneOrTrashed(
   WidgetTester tester,
   ProviderContainer container,
@@ -2343,6 +2594,26 @@ Future<int> _remoteAssetRowCountById(Drift drift, String remoteAssetId) async {
       .customSelect(
         'SELECT COUNT(*) AS count FROM remote_asset_entity WHERE id = ?',
         variables: [Variable.withString(remoteAssetId)],
+      )
+      .getSingle();
+  return row.read<int>('count');
+}
+
+Future<int> _remoteAlbumRowCountById(Drift drift, String albumId) async {
+  final row = await drift
+      .customSelect(
+        'SELECT COUNT(*) AS count FROM remote_album_entity WHERE id = ?',
+        variables: [Variable.withString(albumId)],
+      )
+      .getSingle();
+  return row.read<int>('count');
+}
+
+Future<int> _remoteAlbumAssetRowCountByAlbumId(Drift drift, String albumId) async {
+  final row = await drift
+      .customSelect(
+        'SELECT COUNT(*) AS count FROM remote_album_asset_entity WHERE album_id = ?',
+        variables: [Variable.withString(albumId)],
       )
       .getSingle();
   return row.read<int>('count');
