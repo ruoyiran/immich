@@ -114,6 +114,7 @@ const _metadataNoExifAssetName = String.fromEnvironment(
 const _timelineMinimumAssetCount = int.fromEnvironment('IMMICH_E2E_TIMELINE_MIN_ASSET_COUNT', defaultValue: 24);
 const _timelinePageSize = int.fromEnvironment('IMMICH_E2E_TIMELINE_PAGE_SIZE', defaultValue: 8);
 const _assetViewerImageCount = int.fromEnvironment('IMMICH_E2E_VIEWER_IMAGE_COUNT', defaultValue: 3);
+const _serverRestartReadyMarker = 'MOB-REAL-030:READY_FOR_SERVER_RESTART';
 
 var _registeredSelectedCase = false;
 
@@ -2554,6 +2555,170 @@ void main() async {
       },
     );
 
+    _realStackSessionTest('MOB-REAL-030-$_caseSuffix', 'recovers session upload and sync after a real server restart', (
+      tester,
+    ) async {
+      await _loadAuthenticatedApp(tester, overrideCancellation: true, closeDriftOnDispose: false);
+      var container = _containerOfApp(tester);
+      var drift = container.read(driftProvider);
+      final realEndpoint = _apiEndpoint(_serverUrl);
+      final user = Store.tryGet(StoreKey.currentUser);
+      expect(user, isNotNull);
+
+      String? uploadedRemoteId;
+      addTearDown(() async {
+        await Store.put(StoreKey.serverEndpoint, realEndpoint);
+        await Store.put(StoreKey.serverUrl, realEndpoint);
+        final apiService = ApiService()..setEndpoint(realEndpoint);
+        await apiService.updateHeaders();
+        final assetId = uploadedRemoteId;
+        if (assetId != null) {
+          await _deleteTestAssetBestEffort(apiService.assetsApi, assetId);
+        }
+      });
+
+      await container.read(syncApiRepositoryProvider).deleteSyncAck(_allReplayableSyncAckTypes);
+      await Store.delete(StoreKey.syncMigrationStatus);
+      await container.read(syncStreamRepositoryProvider).reset();
+      final baselineSyncSuccess = await container.read(syncStreamServiceProvider).sync();
+      expect(baselineSyncSuccess, isTrue);
+      if (Store.tryGet(StoreKey.currentUser) == null) {
+        await Store.put(StoreKey.currentUser, user!);
+      }
+      final baselineRows = await _remoteSyncRowCounts(drift);
+
+      final asset = await _waitForLocalAssetByName(container, _resumableAssetName, tester);
+      final contentSize = asset.contentSize;
+      if (contentSize == null) {
+        fail('Server-restart upload asset $_resumableAssetName has no known content size');
+      }
+      expect(contentSize, greaterThan(_resumableCancelAfterBytes));
+      await _clearResumableStateFiles();
+
+      final firstProgress = <int>[];
+      String? firstUploadError;
+      var restartMarkerPrinted = false;
+      final firstUpload = container
+          .read(foregroundUploadServiceProvider)
+          .uploadSingleAsset(
+            asset,
+            null,
+            callbacks: UploadCallbacks(
+              onProgress: (_, _, bytes, totalBytes) {
+                firstProgress.add(bytes);
+                if (!restartMarkerPrinted && bytes > 0) {
+                  restartMarkerPrinted = true;
+                  debugPrint(_serverRestartReadyMarker);
+                }
+              },
+              onSuccess: (_, remoteId) => uploadedRemoteId = remoteId,
+              onError: (_, errorMessage) => firstUploadError = errorMessage,
+            ),
+          );
+
+      await _pumpUntil(
+        tester,
+        () => restartMarkerPrinted || uploadedRemoteId != null || firstUploadError != null,
+        timeout: const Duration(seconds: 90),
+      );
+      expect(
+        restartMarkerPrinted,
+        isTrue,
+        reason: 'Expected upload progress before asking the host harness to restart the server',
+      );
+
+      await _waitForServerReachability(tester, realEndpoint, reachable: false, timeout: const Duration(seconds: 30));
+      await _waitForServerReachability(tester, realEndpoint, reachable: true, timeout: const Duration(seconds: 90));
+
+      await firstUpload.timeout(
+        const Duration(seconds: 120),
+        onTimeout: () => fail('Timed out waiting for the in-flight upload to settle after server restart'),
+      );
+
+      if (uploadedRemoteId == null) {
+        expect(firstUploadError, isNotNull, reason: 'Expected the interrupted upload to report a recoverable error');
+        expect(await _resumableStateFiles(), isNotEmpty, reason: 'Interrupted upload should persist resumable state');
+
+        final retryProgress = <int>[];
+        String? retryError;
+        await container
+            .read(foregroundUploadServiceProvider)
+            .uploadSingleAsset(
+              asset,
+              null,
+              callbacks: UploadCallbacks(
+                onProgress: (_, _, bytes, totalBytes) => retryProgress.add(bytes),
+                onSuccess: (_, remoteId) => uploadedRemoteId = remoteId,
+                onError: (_, errorMessage) => retryError = errorMessage,
+              ),
+            )
+            .timeout(const Duration(seconds: 120));
+        expect(retryError, isNull);
+        expect(retryProgress, isNotEmpty);
+        expect(retryProgress.last, contentSize);
+      }
+
+      expect(uploadedRemoteId, isNotNull);
+      final uploadId = uploadedRemoteId!;
+      expect(firstProgress, isNotEmpty);
+
+      final postRestartSyncSuccess = await container.read(syncStreamServiceProvider).sync();
+      expect(postRestartSyncSuccess, isTrue);
+      await _waitForRemoteAssetState(
+        tester,
+        container,
+        uploadId,
+        (asset) => asset.visibility == AssetVisibility.timeline && !asset.isTrashed,
+        reason: 'Expected uploaded asset to sync locally after backend restart',
+      );
+      expect(await _remoteAssetRowCountById(drift, uploadId), 1);
+
+      await tester.pumpWidget(const SizedBox.shrink());
+      await _pumpFor(tester, const Duration(milliseconds: 500));
+      await _loadAppPreservingStore(tester, overrideCancellation: true, closeDriftOnDispose: false);
+      await _waitForAccessToken(tester);
+      await _waitForCurrentUser(_email, tester);
+      container = _containerOfApp(tester);
+      drift = container.read(driftProvider);
+
+      final resumedSyncSuccess = await container.read(syncStreamServiceProvider).sync();
+      expect(resumedSyncSuccess, isTrue);
+      final localAsset = await _waitForRemoteAssetState(
+        tester,
+        container,
+        uploadId,
+        (asset) => asset.visibility == AssetVisibility.timeline && !asset.isTrashed,
+        reason: 'Expected relaunched client to preserve the uploaded asset after server recovery',
+      );
+      expect(localAsset.ownerId, user!.id);
+      expect(await _remoteAssetRowCountById(drift, uploadId), 1);
+      final resumedRows = await _remoteSyncRowCounts(drift);
+      expect(resumedRows['remote_asset_entity'], greaterThanOrEqualTo(baselineRows['remote_asset_entity']! + 1));
+
+      final infoAfterRestart = await _waitForAssetInfoState(
+        tester,
+        container.read(apiServiceProvider).assetsApi,
+        uploadId,
+        (asset) => !asset.isTrashed && asset.originalPath.isNotEmpty,
+        reason: 'Expected session token to remain valid after backend restart',
+      );
+      expect(infoAfterRestart.originalFileName, _resumableAssetName);
+
+      final downloaded = await _waitForSuccessfulResponse(
+        tester,
+        () => container.read(assetApiRepositoryProvider).downloadAsset(uploadId, edited: false),
+      );
+      expect(downloaded.bodyBytes.length, contentSize);
+
+      final secondSyncSuccess = await container.read(syncStreamServiceProvider).sync();
+      expect(secondSyncSuccess, isTrue);
+      expect(
+        await _remoteSyncRowCounts(drift),
+        resumedRows,
+        reason: 'Second sync after server restart recovery should not duplicate local rows',
+      );
+    });
+
     if (_selectedCaseId.isNotEmpty && !_registeredSelectedCase) {
       test(_selectedCaseId, () => fail('No real stack auth test registered for $_selectedCaseId'));
     }
@@ -4193,6 +4358,44 @@ Future<Object?> _captureError(Future<void> Function() action) async {
   } catch (error) {
     return error;
   }
+}
+
+Future<void> _waitForServerReachability(
+  WidgetTester tester,
+  String apiEndpoint, {
+  required bool reachable,
+  required Duration timeout,
+}) async {
+  final pingUri = Uri.parse('$apiEndpoint/server/ping');
+  final end = DateTime.now().add(timeout);
+  Object? lastError;
+  int? lastStatus;
+
+  while (DateTime.now().isBefore(end)) {
+    try {
+      final response = await http.get(pingUri).timeout(const Duration(seconds: 2));
+      lastStatus = response.statusCode;
+      if (reachable && response.statusCode == 200) {
+        return;
+      }
+      if (!reachable && response.statusCode != 200) {
+        return;
+      }
+    } catch (error) {
+      lastError = error;
+      if (!reachable) {
+        return;
+      }
+    }
+
+    await _pumpFor(tester, const Duration(milliseconds: 500));
+  }
+
+  fail(
+    'Timed out waiting for server reachable=$reachable at $pingUri after $timeout; '
+    'lastStatus=$lastStatus lastError=$lastError. '
+    'Host harness must restart the server after $_serverRestartReadyMarker.',
+  );
 }
 
 Future<http.Response> _authenticatedApiGet(String path) {
