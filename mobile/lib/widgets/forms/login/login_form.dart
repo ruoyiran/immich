@@ -195,6 +195,14 @@ class LoginForm extends HookConsumerWidget {
       }
     }
 
+    void startPostLoginSyncFlow() {
+      unawaited(
+        handleSyncFlow().catchError((error, stack) {
+          log.warning('Failed post-login sync flow', error, stack);
+        }),
+      );
+    }
+
     Future<void> getManageMediaPermission() async {
       final hasPermission = await ref.read(permissionRepositoryProvider).hasManageMediaPermission();
       if (!context.mounted) {
@@ -278,7 +286,7 @@ class LoginForm extends HookConsumerWidget {
           if (isSyncRemoteDeletionsMode()) {
             await getManageMediaPermission();
           }
-          unawaited(handleSyncFlow());
+          startPostLoginSyncFlow();
           if (!context.mounted) {
             return;
           }
@@ -383,7 +391,7 @@ class LoginForm extends HookConsumerWidget {
             if (isSyncRemoteDeletionsMode()) {
               await getManageMediaPermission();
             }
-            unawaited(handleSyncFlow());
+            startPostLoginSyncFlow();
             if (!context.mounted) {
               return;
             }
