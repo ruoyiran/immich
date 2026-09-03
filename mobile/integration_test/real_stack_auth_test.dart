@@ -1898,6 +1898,271 @@ void main() async {
       expect(localPlaces.map((place) => place.$1), contains(city));
     });
 
+    _realStackSessionTest('MOB-REAL-027-$_caseSuffix', 'preserves assets and relations through trash restore', (
+      tester,
+    ) async {
+      await _loadAuthenticatedApp(tester, overrideCancellation: true);
+      final container = _containerOfApp(tester);
+      final drift = container.read(driftProvider);
+      final apiService = container.read(apiServiceProvider);
+      final assetsApi = apiService.assetsApi;
+      final albumsApi = apiService.albumsApi;
+      final assetService = container.read(assetServiceProvider);
+      final uploadedRemoteIds = <String>[];
+      String? albumId;
+
+      addTearDown(() async {
+        final id = albumId;
+        if (id != null) {
+          await _deleteAlbumBestEffort(albumsApi, id);
+        }
+        for (final assetId in uploadedRemoteIds) {
+          await _deleteTestAssetBestEffort(assetsApi, assetId);
+        }
+      });
+
+      await container.read(syncApiRepositoryProvider).deleteSyncAck(_allReplayableSyncAckTypes);
+      await Store.delete(StoreKey.syncMigrationStatus);
+      await container.read(syncStreamRepositoryProvider).reset();
+      final baselineSyncSuccess = await container.read(syncStreamServiceProvider).sync();
+      expect(baselineSyncSuccess, isTrue);
+
+      final user = Store.tryGet(StoreKey.currentUser);
+      expect(user, isNotNull);
+
+      final runToken = DateTime.now().toUtc().microsecondsSinceEpoch.toString();
+      final baseCreatedAt = DateTime.utc(2026, 1, 27, 12);
+      final normalId = await _uploadGeneratedJpegAsSecondClient(
+        'immich-e2e-trash-restore-027-normal-$runToken.jpg',
+        baseCreatedAt,
+      );
+      uploadedRemoteIds.add(normalId);
+      final favoriteId = await _uploadGeneratedJpegAsSecondClient(
+        'immich-e2e-trash-restore-027-favorite-$runToken.jpg',
+        baseCreatedAt.add(const Duration(minutes: 1)),
+        isFavorite: true,
+      );
+      uploadedRemoteIds.add(favoriteId);
+      final albumAssetId = await _uploadGeneratedJpegAsSecondClient(
+        'immich-e2e-trash-restore-027-album-$runToken.jpg',
+        baseCreatedAt.add(const Duration(minutes: 2)),
+      );
+      uploadedRemoteIds.add(albumAssetId);
+
+      final initialSyncSuccess = await container.read(syncStreamServiceProvider).sync();
+      expect(initialSyncSuccess, isTrue);
+
+      for (final assetId in uploadedRemoteIds) {
+        await _waitForRemoteAssetState(
+          tester,
+          container,
+          assetId,
+          (asset) => asset.visibility == AssetVisibility.timeline && !asset.isTrashed,
+          reason: 'Expected uploaded trash/restore candidate $assetId to sync locally',
+        );
+        expect(await _remoteAssetRowCountById(drift, assetId), 1);
+      }
+
+      final albumName = 'immich-e2e-trash-restore-027-$runToken';
+      final createdAlbum = await albumsApi.createAlbum(
+        api.CreateAlbumDto(albumName: albumName, assetIds: api.Optional.present([albumAssetId])),
+      );
+      expect(createdAlbum, isNotNull);
+      albumId = createdAlbum!.id;
+      await _waitForAlbumInfoState(
+        tester,
+        albumsApi,
+        albumId,
+        (album) => album.albumName == albumName && album.assetCount == 1,
+        reason: 'Expected server album to contain the album-scoped test asset before trash',
+      );
+
+      final albumSyncSuccess = await container.read(syncStreamServiceProvider).sync();
+      expect(albumSyncSuccess, isTrue);
+      await _waitForRemoteAlbumAssetIds(
+        tester,
+        container,
+        albumId,
+        includes: {albumAssetId},
+        excludes: const {},
+        reason: 'Expected local album membership before trash',
+      );
+      expect(await _remoteAlbumAssetRowCountByAlbumId(drift, albumId), 1);
+
+      final beforeInfos = <String, api.AssetResponseDto>{};
+      final beforeDownloads = <String, String>{};
+      for (final assetId in uploadedRemoteIds) {
+        final info = await _waitForAssetInfoState(
+          tester,
+          assetsApi,
+          assetId,
+          (asset) => !asset.isTrashed && asset.originalPath.isNotEmpty,
+          reason: 'Expected server asset $assetId to be active before trash',
+        );
+        beforeInfos[assetId] = info;
+        final download = await _waitForSuccessfulResponse(
+          tester,
+          () => container.read(assetApiRepositoryProvider).downloadAsset(assetId, edited: false),
+        );
+        beforeDownloads[assetId] = base64Encode(md5.convert(download.bodyBytes).bytes);
+        expect(beforeDownloads[assetId], info.checksum);
+      }
+
+      final timelineFactory = container.read(timelineFactoryProvider);
+      final mainTimeline = timelineFactory.main([user!.id]);
+      final favoriteTimeline = timelineFactory.favorite(user.id);
+      final trashTimeline = timelineFactory.trash(user.id);
+      addTearDown(mainTimeline.dispose);
+      addTearDown(favoriteTimeline.dispose);
+      addTearDown(trashTimeline.dispose);
+
+      await _expectTimelineAssetSet(
+        tester,
+        mainTimeline,
+        includes: {normalId, favoriteId, albumAssetId},
+        excludes: const {},
+        reason: 'Initial main timeline should include all trash/restore candidates',
+      );
+      await _expectTimelineAssetSet(
+        tester,
+        favoriteTimeline,
+        includes: {favoriteId},
+        excludes: {normalId, albumAssetId},
+        reason: 'Initial favorite timeline should contain only the favorited candidate',
+      );
+      await _expectTimelineAssetSet(
+        tester,
+        trashTimeline,
+        includes: const {},
+        excludes: {normalId, favoriteId, albumAssetId},
+        reason: 'Initial trash timeline should not contain active candidates',
+      );
+
+      await assetService.trash(uploadedRemoteIds);
+      for (final assetId in uploadedRemoteIds) {
+        await _waitForAssetInfoState(
+          tester,
+          assetsApi,
+          assetId,
+          (asset) => asset.isTrashed,
+          reason: 'Expected server asset $assetId to be logically trashed',
+        );
+        await _waitForRemoteAssetState(
+          tester,
+          container,
+          assetId,
+          (asset) => asset.isTrashed,
+          reason: 'Expected App-side trash action to mark local asset $assetId as trashed',
+        );
+      }
+
+      await _expectTimelineAssetSet(
+        tester,
+        mainTimeline,
+        includes: const {},
+        excludes: {normalId, favoriteId, albumAssetId},
+        reason: 'Main timeline should hide logically trashed assets',
+      );
+      await _expectTimelineAssetSet(
+        tester,
+        favoriteTimeline,
+        includes: const {},
+        excludes: {normalId, favoriteId, albumAssetId},
+        reason: 'Favorite timeline should hide logically trashed assets',
+      );
+      await _expectTimelineAssetSet(
+        tester,
+        trashTimeline,
+        includes: {normalId, favoriteId, albumAssetId},
+        excludes: const {},
+        reason: 'Trash timeline should expose logically trashed assets',
+      );
+
+      final trashSyncSuccess = await container.read(syncStreamServiceProvider).sync();
+      expect(trashSyncSuccess, isTrue);
+      expect(await _remoteAlbumAssetRowCountByAlbumId(drift, albumId), 1);
+
+      await assetService.restoreTrash(uploadedRemoteIds);
+      for (final assetId in uploadedRemoteIds) {
+        final restoredInfo = await _waitForAssetInfoState(
+          tester,
+          assetsApi,
+          assetId,
+          (asset) => !asset.isTrashed,
+          reason: 'Expected server asset $assetId to be restored',
+        );
+        _expectAssetInfoPreserved(restoredInfo, beforeInfos[assetId]!);
+      }
+
+      final restoreSyncSuccess = await container.read(syncStreamServiceProvider).sync();
+      expect(restoreSyncSuccess, isTrue);
+      for (final assetId in uploadedRemoteIds) {
+        final restoredAsset = await _waitForRemoteAssetState(
+          tester,
+          container,
+          assetId,
+          (asset) => !asset.isTrashed && asset.visibility == AssetVisibility.timeline,
+          reason: 'Expected restored asset $assetId to sync back into the local active set',
+        );
+        expect(restoredAsset.isFavorite, beforeInfos[assetId]!.isFavorite);
+        expect(await _remoteAssetRowCountById(drift, assetId), 1);
+
+        final download = await _waitForSuccessfulResponse(
+          tester,
+          () => container.read(assetApiRepositoryProvider).downloadAsset(assetId, edited: false),
+        );
+        expect(base64Encode(md5.convert(download.bodyBytes).bytes), beforeDownloads[assetId]);
+      }
+
+      await _expectTimelineAssetSet(
+        tester,
+        mainTimeline,
+        includes: {normalId, favoriteId, albumAssetId},
+        excludes: const {},
+        reason: 'Restored assets should return to the main timeline',
+      );
+      await _expectTimelineAssetSet(
+        tester,
+        favoriteTimeline,
+        includes: {favoriteId},
+        excludes: {normalId, albumAssetId},
+        reason: 'Restored favorite asset should keep favorite membership',
+      );
+      await _expectTimelineAssetSet(
+        tester,
+        trashTimeline,
+        includes: const {},
+        excludes: {normalId, favoriteId, albumAssetId},
+        reason: 'Trash timeline should be empty for restored candidates',
+      );
+
+      await _waitForAlbumInfoState(
+        tester,
+        albumsApi,
+        albumId,
+        (album) => album.assetCount == 1 && album.albumThumbnailAssetId == albumAssetId,
+        reason: 'Expected restored album asset to keep server album membership and cover',
+      );
+      await _waitForRemoteAlbumAssetIds(
+        tester,
+        container,
+        albumId,
+        includes: {albumAssetId},
+        excludes: {normalId, favoriteId},
+        reason: 'Expected restored album asset to keep local album membership',
+      );
+      expect(await _remoteAlbumAssetRowCountByAlbumId(drift, albumId), 1);
+
+      final rowsAfterRestore = await _remoteSyncRowCounts(drift);
+      final secondSyncSuccess = await container.read(syncStreamServiceProvider).sync();
+      expect(secondSyncSuccess, isTrue);
+      expect(
+        await _remoteSyncRowCounts(drift),
+        rowsAfterRestore,
+        reason: 'Second sync after trash restore should not duplicate local rows',
+      );
+    });
+
     if (_selectedCaseId.isNotEmpty && !_registeredSelectedCase) {
       test(_selectedCaseId, () => fail('No real stack auth test registered for $_selectedCaseId'));
     }
@@ -3404,6 +3669,17 @@ void _expectBulkResultsAcceptedOrDuplicate(
     final isDuplicate = !result.success && result.error.orElse(null) == api.BulkIdErrorReason.duplicate;
     expect(result.success || isDuplicate, isTrue, reason: '$reason; result=$result');
   }
+}
+
+void _expectAssetInfoPreserved(api.AssetResponseDto restored, api.AssetResponseDto beforeTrash) {
+  expect(restored.id, beforeTrash.id);
+  expect(restored.checksum, beforeTrash.checksum, reason: 'Restore must not rewrite asset bytes');
+  expect(restored.originalFileName, beforeTrash.originalFileName);
+  expect(restored.originalPath, beforeTrash.originalPath, reason: 'Restore must keep the original media path');
+  expect(restored.fileCreatedAt.toUtc(), beforeTrash.fileCreatedAt.toUtc());
+  expect(restored.fileModifiedAt.toUtc(), beforeTrash.fileModifiedAt.toUtc());
+  expect(restored.isFavorite, beforeTrash.isFavorite, reason: 'Restore must preserve favorite state');
+  expect(restored.visibility, beforeTrash.visibility, reason: 'Restore must preserve visibility');
 }
 
 Future<void> _waitForRemoteAssetGoneOrTrashed(
