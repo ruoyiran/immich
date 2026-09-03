@@ -1,5 +1,8 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/painting.dart';
+import 'package:flutter/services.dart';
 import 'package:immich_mobile/domain/models/asset/base_asset.model.dart';
 import 'package:immich_mobile/infrastructure/loaders/image_request.dart';
 import 'package:immich_mobile/infrastructure/repositories/settings.repository.dart';
@@ -11,20 +14,32 @@ import 'package:openapi/api.dart';
 
 class RemoteImageProvider extends CancellableImageProvider<RemoteImageProvider>
     with CancellableImageProviderMixin<RemoteImageProvider> {
+  static const _retryDelays = [
+    Duration(milliseconds: 500),
+    Duration(seconds: 1),
+    Duration(seconds: 2),
+    Duration(seconds: 4),
+    Duration(seconds: 8),
+    Duration(seconds: 16),
+    Duration(seconds: 32),
+  ];
+
   final String url;
   final bool edited;
+  final bool retryNotFound;
 
   /// Physical size to decode, or null for the source size.
   final Size? decodeSize;
 
-  RemoteImageProvider({required this.url, this.edited = true, this.decodeSize});
+  RemoteImageProvider({required this.url, this.edited = true, this.retryNotFound = false, this.decodeSize});
 
   RemoteImageProvider.thumbnail({
     required String assetId,
     required String thumbhash,
     this.edited = true,
     this.decodeSize,
-  }) : url = getThumbnailUrlForRemoteId(assetId, thumbhash: thumbhash, edited: edited);
+  }) : url = getThumbnailUrlForRemoteId(assetId, thumbhash: thumbhash, edited: edited),
+       retryNotFound = true;
 
   @override
   Future<RemoteImageProvider> obtainKey(ImageConfiguration configuration) {
@@ -44,8 +59,57 @@ class RemoteImageProvider extends CancellableImageProvider<RemoteImageProvider>
   }
 
   Stream<ImageInfo> _codec(RemoteImageProvider key, ImageDecoderCallback decode) {
-    final request = this.request = RemoteImageRequest(uri: key.url, decodeSize: key.decodeSize);
-    return loadRequest(request, decode, isFinal: true);
+    if (!key.retryNotFound) {
+      final request = this.request = RemoteImageRequest(uri: key.url, decodeSize: key.decodeSize);
+      return loadRequest(request, decode, isFinal: true);
+    }
+    return _loadThumbnailWithRetry(key, decode);
+  }
+
+  Stream<ImageInfo> _loadThumbnailWithRetry(RemoteImageProvider key, ImageDecoderCallback decode) async* {
+    for (var attempt = 0; attempt <= _retryDelays.length; attempt++) {
+      if (isCancelled) {
+        request = null;
+        return;
+      }
+
+      final currentRequest = request = RemoteImageRequest(uri: key.url, decodeSize: key.decodeSize);
+      try {
+        final image = await currentRequest.load(decode);
+        if (isCancelled || image == null) {
+          image?.dispose();
+          return;
+        }
+        isFinished = true;
+        yield image;
+        return;
+      } catch (error, stackTrace) {
+        if (isCancelled) {
+          return;
+        }
+        PaintingBinding.instance.imageCache.evict(this);
+        if (attempt >= _retryDelays.length || !_isRetriableThumbnailError(error)) {
+          isFinished = true;
+          Error.throwWithStackTrace(error, stackTrace);
+        }
+        if (request == currentRequest) {
+          request = null;
+        }
+        await Future<void>.delayed(_retryDelays[attempt]);
+      } finally {
+        if (request == currentRequest) {
+          request = null;
+        }
+      }
+    }
+  }
+
+  bool _isRetriableThumbnailError(Object error) {
+    final message = switch (error) {
+      PlatformException(:final code, :final message) => '$code ${message ?? ''}',
+      _ => error.toString(),
+    };
+    return message.contains('404') || message.contains('Not Found');
   }
 
   @override
@@ -54,13 +118,16 @@ class RemoteImageProvider extends CancellableImageProvider<RemoteImageProvider>
       return true;
     }
     if (other is RemoteImageProvider) {
-      return url == other.url && edited == other.edited && decodeSize == other.decodeSize;
+      return url == other.url &&
+          edited == other.edited &&
+          retryNotFound == other.retryNotFound &&
+          decodeSize == other.decodeSize;
     }
     return false;
   }
 
   @override
-  int get hashCode => url.hashCode ^ edited.hashCode ^ decodeSize.hashCode;
+  int get hashCode => url.hashCode ^ edited.hashCode ^ retryNotFound.hashCode ^ decodeSize.hashCode;
 }
 
 class RemoteFullImageProvider extends CancellableImageProvider<RemoteFullImageProvider>

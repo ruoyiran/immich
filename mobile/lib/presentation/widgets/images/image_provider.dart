@@ -205,7 +205,7 @@ ImageProvider? getThumbnailImageProvider(
   Size? remoteSize,
   bool edited = true,
 }) {
-  if (_shouldUseLocalAsset(asset)) {
+  if (_shouldUseLocalThumbnailAsset(asset)) {
     final id = asset is LocalAsset ? asset.id : (asset as RemoteAsset).localId!;
     return LocalThumbProvider(id: id, size: size, assetType: asset.type, checksum: asset.checksum);
   }
@@ -217,9 +217,17 @@ ImageProvider? getThumbnailImageProvider(
       : null;
 }
 
-bool _shouldUseLocalAsset(BaseAsset asset) =>
-    asset.hasLocal &&
-    (!asset.hasRemote || !SettingsRepository.instance.appConfig.image.preferRemote) &&
-    !asset.isEdited;
+bool _shouldUseLocalThumbnailAsset(BaseAsset asset) {
+  if (!asset.hasLocal || asset.isEdited) {
+    return false;
+  }
+  if (!asset.hasRemote || asset is LocalAsset) {
+    return true;
+  }
+  if (asset is RemoteAsset && (asset.thumbHash == null || asset.thumbHash!.isEmpty)) {
+    return true;
+  }
+  return !SettingsRepository.instance.appConfig.image.preferRemote;
+}
 
 bool _shouldUseLocalFullAsset(BaseAsset asset) => asset.hasLocal && !asset.isEdited;

@@ -114,4 +114,11 @@ void main() {
     expect(first, second);
     expect(first.hashCode, second.hashCode);
   });
+
+  test('uses the retry setting in the provider cache key', () {
+    final plain = RemoteImageProvider(url: 'https://example.test/thumbnail');
+    final retrying = RemoteImageProvider(url: 'https://example.test/thumbnail', retryNotFound: true);
+
+    expect(plain, isNot(retrying));
+  });
 }
