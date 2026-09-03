@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:crypto/crypto.dart';
 import 'package:easy_localization/easy_localization.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -10,15 +11,20 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:http/http.dart' as http;
 import 'package:immich_mobile/constants/enums.dart';
 import 'package:immich_mobile/domain/models/asset/base_asset.model.dart';
+import 'package:immich_mobile/domain/models/events.model.dart';
 import 'package:immich_mobile/domain/models/store.model.dart';
 import 'package:immich_mobile/domain/models/timeline.model.dart';
 import 'package:immich_mobile/domain/models/user.model.dart';
 import 'package:immich_mobile/domain/services/timeline.service.dart';
+import 'package:immich_mobile/domain/utils/event_stream.dart';
 import 'package:immich_mobile/entities/store.entity.dart';
 import 'package:immich_mobile/infrastructure/repositories/storage.repository.dart';
 import 'package:immich_mobile/main.dart' as app;
+import 'package:immich_mobile/presentation/widgets/asset_viewer/asset_viewer.page.dart';
+import 'package:immich_mobile/presentation/widgets/images/thumbnail_tile.widget.dart';
 import 'package:immich_mobile/presentation/widgets/timeline/timeline.widget.dart';
 import 'package:immich_mobile/providers/api.provider.dart';
+import 'package:immich_mobile/providers/asset_viewer/asset_viewer.provider.dart';
 import 'package:immich_mobile/providers/background_sync.provider.dart';
 import 'package:immich_mobile/providers/gallery_permission.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/album.provider.dart';
@@ -30,6 +36,7 @@ import 'package:immich_mobile/repositories/download.repository.dart';
 import 'package:immich_mobile/services/api.service.dart';
 import 'package:immich_mobile/services/foreground_upload.service.dart';
 import 'package:immich_mobile/utils/bootstrap.dart';
+import 'package:immich_mobile/widgets/photo_view/photo_view.dart';
 import 'package:openapi/api.dart' as api;
 import 'package:path_provider/path_provider.dart';
 import 'package:photo_manager/photo_manager.dart';
@@ -84,6 +91,7 @@ const _metadataNoExifAssetName = String.fromEnvironment(
 );
 const _timelineMinimumAssetCount = int.fromEnvironment('IMMICH_E2E_TIMELINE_MIN_ASSET_COUNT', defaultValue: 24);
 const _timelinePageSize = int.fromEnvironment('IMMICH_E2E_TIMELINE_PAGE_SIZE', defaultValue: 8);
+const _assetViewerImageCount = int.fromEnvironment('IMMICH_E2E_VIEWER_IMAGE_COUNT', defaultValue: 3);
 
 var _registeredSelectedCase = false;
 
@@ -602,6 +610,57 @@ void main() async {
       expect(_timelineAssetIds(firstPageAgain), _timelineAssetIds(firstPage));
     });
 
+    _realStackSessionTest('MOB-REAL-017-$_caseSuffix', 'opens remote image viewer and switches adjacent images', (
+      tester,
+    ) async {
+      await _loadAuthenticatedApp(tester);
+
+      final container = _containerOfApp(tester);
+      final syncSuccess = await container.read(backgroundSyncProvider).syncRemote();
+      expect(syncSuccess, isTrue);
+
+      final user = Store.tryGet(StoreKey.currentUser);
+      expect(user, isNotNull);
+
+      final timeline = container.read(timelineFactoryProvider).main([user!.id]);
+      addTearDown(timeline.dispose);
+
+      await _waitForTimelineBuckets(tester, timeline, minAssets: _timelineMinimumAssetCount);
+      final assets = await _loadAllTimelineAssets(timeline);
+      final startIndex = _findRemoteImageWindow(assets, _assetViewerImageCount);
+      expect(startIndex, greaterThanOrEqualTo(0), reason: 'Expected remote images in the real timeline');
+
+      final imageAssets = _remoteImagesFrom(assets, startIndex, _assetViewerImageCount);
+      await _expectRemoteImageMedia(container, tester, imageAssets.first);
+
+      await _openTimelineAsset(tester, imageAssets.first);
+      await pumpUntilFound(tester, find.byType(AssetViewer), timeout: const Duration(seconds: 60));
+      expect(container.read(assetViewerProvider).currentAsset?.remoteId, imageAssets[0].id);
+
+      final secondImage = await _swipeViewerToNextRemoteImage(tester, container, const Offset(-700, 0));
+      expect(secondImage.remoteId, isNot(imageAssets[0].id));
+      await _expectRemoteImageMedia(container, tester, secondImage);
+      final thirdImage = await _swipeViewerToNextRemoteImage(tester, container, const Offset(-700, 0));
+      expect(thirdImage.remoteId, isNot(anyOf(imageAssets[0].id, secondImage.remoteId)));
+      await _expectRemoteImageMedia(container, tester, thirdImage);
+
+      final previousImage = await _swipeViewerToNextRemoteImage(tester, container, const Offset(700, 0));
+      expect(previousImage.remoteId, secondImage.remoteId);
+
+      await _zoomViewerImage(tester, container);
+
+      EventStream.shared.emit(const ViewerShowDetailsEvent());
+      await _pumpFor(tester, const Duration(seconds: 1));
+      expect(container.read(assetViewerProvider).showingDetails, isTrue);
+
+      await tester.tap(find.byIcon(Icons.arrow_back_rounded).first);
+      await _pumpFor(tester, const Duration(seconds: 1));
+      expect(find.byType(Timeline), findsWidgets);
+
+      final firstPageAgain = await timeline.loadAssets(0, _timelineCountForPage(timeline.totalAssets, 0));
+      expect(firstPageAgain.any((asset) => asset.refersToSameAsset(imageAssets.first)), isTrue);
+    });
+
     if (_selectedCaseId.isNotEmpty && !_registeredSelectedCase) {
       test(_selectedCaseId, () => fail('No real stack auth test registered for $_selectedCaseId'));
     }
@@ -610,6 +669,7 @@ void main() async {
 
 Future<void> _exerciseTimelineUiPagination(WidgetTester tester) async {
   await pumpUntilFound(tester, find.byType(Timeline), timeout: const Duration(seconds: 60));
+  await _dismissFeatureMessageIfVisible(tester);
   final scrollable = find.descendant(of: find.byType(Timeline), matching: find.byType(Scrollable));
   expect(scrollable, findsWidgets);
 
@@ -622,6 +682,160 @@ Future<void> _exerciseTimelineUiPagination(WidgetTester tester) async {
     await tester.fling(scrollable.first, const Offset(0, 1200), 1500);
     await _pumpFor(tester, const Duration(milliseconds: 700));
   }
+}
+
+Future<List<BaseAsset>> _loadAllTimelineAssets(TimelineService timeline) async {
+  final assets = <BaseAsset>[];
+  for (var offset = 0; offset < timeline.totalAssets; offset += _timelinePageSize) {
+    final count = _timelineCountForPage(timeline.totalAssets, offset);
+    assets.addAll(await timeline.loadAssets(offset, count));
+  }
+  return assets;
+}
+
+int _findRemoteImageWindow(List<BaseAsset> assets, int count) {
+  for (var start = 0; start < assets.length; start++) {
+    if (_remoteImagesFrom(assets, start, count).length == count) {
+      return start;
+    }
+  }
+  return -1;
+}
+
+List<RemoteAsset> _remoteImagesFrom(List<BaseAsset> assets, int start, int count) =>
+    assets.skip(start).whereType<RemoteAsset>().where((asset) => asset.isImage).take(count).toList();
+
+Future<void> _expectRemoteImageMedia(ProviderContainer container, WidgetTester tester, RemoteAsset asset) async {
+  final assetsApi = container.read(apiServiceProvider).assetsApi;
+  final info = await _waitForBasicAssetInfo(tester, assetsApi, asset.id);
+  expect(info.type, api.AssetTypeEnum.IMAGE);
+  expect(info.originalFileName, isNotEmpty);
+  expect(info.fileCreatedAt.toUtc(), asset.createdAt.toUtc());
+
+  final thumbnail = await _waitForSuccessfulResponse(
+    tester,
+    () => assetsApi.viewAssetWithHttpInfo(asset.id, size: api.AssetMediaSize.thumbnail),
+  );
+  expect(thumbnail.bodyBytes, isNotEmpty);
+
+  final preview = await _waitForSuccessfulResponse(
+    tester,
+    () => assetsApi.viewAssetWithHttpInfo(asset.id, size: api.AssetMediaSize.preview),
+  );
+  expect(preview.bodyBytes, isNotEmpty);
+
+  final original = await _waitForSuccessfulResponse(
+    tester,
+    () => container.read(assetApiRepositoryProvider).downloadAsset(asset.id, edited: false),
+  );
+  expect(original.bodyBytes, isNotEmpty);
+  final checksum = asset.checksum;
+  expect(checksum, isNotNull);
+  expect(base64Encode(md5.convert(original.bodyBytes).bytes), checksum);
+}
+
+Future<api.AssetResponseDto> _waitForBasicAssetInfo(
+  WidgetTester tester,
+  api.AssetsApi assetsApi,
+  String remoteAssetId,
+) async {
+  api.AssetResponseDto? info;
+  Object? lastError;
+  for (var attempt = 0; attempt < 20; attempt++) {
+    try {
+      info = await assetsApi.getAssetInfo(remoteAssetId);
+      if (info != null) {
+        return info;
+      }
+    } catch (error) {
+      lastError = error;
+    }
+    await _pumpFor(tester, const Duration(seconds: 2));
+  }
+
+  fail('Asset $remoteAssetId was unavailable, last error: $lastError');
+}
+
+Finder _thumbnailTileForAsset(BaseAsset asset) {
+  return find.byWidgetPredicate(
+    (widget) => widget is ThumbnailTile && widget.asset != null && widget.asset!.refersToSameAsset(asset),
+  );
+}
+
+Future<void> _openTimelineAsset(WidgetTester tester, BaseAsset asset) async {
+  await pumpUntilFound(tester, find.byType(Timeline), timeout: const Duration(seconds: 60));
+  await _dismissFeatureMessageIfVisible(tester);
+
+  final tile = _thumbnailTileForAsset(asset);
+  final scrollable = find.descendant(of: find.byType(Timeline), matching: find.byType(Scrollable));
+  expect(scrollable, findsWidgets);
+
+  for (var attempt = 0; attempt < 20; attempt++) {
+    await _dismissFeatureMessageIfVisible(tester);
+    if (tester.any(tile)) {
+      await tester.ensureVisible(tile.first);
+      await _pumpFor(tester, const Duration(milliseconds: 300));
+      await tester.tap(tile.first, warnIfMissed: false);
+      await _pumpFor(tester, const Duration(seconds: 2));
+      if (tester.any(find.byType(AssetViewer))) {
+        return;
+      }
+    }
+
+    await tester.fling(scrollable.first, const Offset(0, -900), 1500);
+    await _pumpFor(tester, const Duration(milliseconds: 700));
+  }
+
+  fail('Could not open timeline asset ${asset.id}');
+}
+
+Future<void> _dismissFeatureMessageIfVisible(WidgetTester tester) async {
+  final skip = find.text('skip'.tr());
+  for (var attempt = 0; attempt < 10; attempt++) {
+    await tester.pump(const Duration(milliseconds: 100));
+    if (tester.any(skip)) {
+      await tester.tap(skip.last, warnIfMissed: false);
+      await _pumpFor(tester, const Duration(milliseconds: 500));
+      return;
+    }
+  }
+}
+
+Future<RemoteAsset> _swipeViewerToNextRemoteImage(
+  WidgetTester tester,
+  ProviderContainer container,
+  Offset gestureOffset,
+) async {
+  for (var attempt = 0; attempt < 8; attempt++) {
+    final current = await _swipeViewerPage(tester, container, gestureOffset);
+    if (current is RemoteAsset && current.isImage) {
+      return current;
+    }
+  }
+
+  final current = container.read(assetViewerProvider).currentAsset;
+  fail('Expected viewer to reach a remote image after swipe, got ${current?.remoteId ?? current?.id ?? 'none'}');
+}
+
+Future<BaseAsset> _swipeViewerPage(WidgetTester tester, ProviderContainer container, Offset gestureOffset) async {
+  final pageView = find.descendant(of: find.byType(AssetViewer), matching: find.byType(PageView));
+  await pumpUntilFound(tester, pageView, timeout: const Duration(seconds: 30));
+  final before = container.read(assetViewerProvider).currentAsset;
+  await tester.timedDrag(pageView.first, gestureOffset, const Duration(milliseconds: 450));
+  await _pumpUntil(tester, () {
+    final current = container.read(assetViewerProvider).currentAsset;
+    return current != null && (before == null || !current.refersToSameAsset(before));
+  }, timeout: const Duration(seconds: 20));
+  return container.read(assetViewerProvider).currentAsset!;
+}
+
+Future<void> _zoomViewerImage(WidgetTester tester, ProviderContainer container) async {
+  final photoView = find.byType(PhotoView);
+  await pumpUntilFound(tester, photoView, timeout: const Duration(seconds: 30));
+  await tester.tap(photoView.first, warnIfMissed: false);
+  await tester.pump(const Duration(milliseconds: 80));
+  await tester.tap(photoView.first, warnIfMissed: false);
+  await _pumpUntil(tester, () => container.read(assetViewerProvider).isZoomed, timeout: const Duration(seconds: 10));
 }
 
 void _realStackSessionTest(String caseId, String description, Future<void> Function(WidgetTester) body) {
@@ -693,6 +907,7 @@ Future<void> _loadAuthenticatedApp(WidgetTester tester) async {
   await _pumpFor(tester, const Duration(milliseconds: 500));
   await _waitForAccessToken(tester);
   await _waitForCurrentUser(_email, tester);
+  await _dismissFeatureMessageIfVisible(tester);
 }
 
 Future<void> _seedAuthenticatedStore() async {
