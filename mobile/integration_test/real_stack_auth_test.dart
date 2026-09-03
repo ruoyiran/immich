@@ -19,12 +19,14 @@ import 'package:immich_mobile/domain/models/store.model.dart';
 import 'package:immich_mobile/domain/models/sync_event.model.dart';
 import 'package:immich_mobile/domain/models/timeline.model.dart';
 import 'package:immich_mobile/domain/models/user.model.dart';
+import 'package:immich_mobile/domain/services/search.service.dart';
 import 'package:immich_mobile/domain/services/timeline.service.dart';
 import 'package:immich_mobile/domain/utils/event_stream.dart';
 import 'package:immich_mobile/entities/store.entity.dart';
 import 'package:immich_mobile/infrastructure/repositories/db.repository.dart';
 import 'package:immich_mobile/infrastructure/repositories/storage.repository.dart';
 import 'package:immich_mobile/main.dart' as app;
+import 'package:immich_mobile/models/search/search_filter.model.dart';
 import 'package:immich_mobile/presentation/widgets/asset_viewer/asset_viewer.page.dart';
 import 'package:immich_mobile/presentation/widgets/asset_viewer/video_viewer.widget.dart';
 import 'package:immich_mobile/presentation/widgets/images/thumbnail_tile.widget.dart';
@@ -38,6 +40,7 @@ import 'package:immich_mobile/providers/infrastructure/album.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/asset.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/cancel.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/db.provider.dart';
+import 'package:immich_mobile/providers/infrastructure/search.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/sync.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/timeline.provider.dart';
 import 'package:immich_mobile/providers/websocket.provider.dart';
@@ -52,7 +55,7 @@ import 'package:immich_mobile/widgets/asset_viewer/video_controls.dart';
 import 'package:immich_mobile/widgets/photo_view/photo_view.dart';
 import 'package:openapi/api.dart' as api;
 import 'package:path_provider/path_provider.dart';
-import 'package:photo_manager/photo_manager.dart';
+import 'package:photo_manager/photo_manager.dart' hide AssetType;
 
 import 'test_utils/general_helper.dart';
 
@@ -1418,6 +1421,321 @@ void main() async {
       },
     );
 
+    _realStackSessionTest('MOB-REAL-025-$_caseSuffix', 'matches server search results across text and filters', (
+      tester,
+    ) async {
+      await _loadAuthenticatedApp(tester, overrideCancellation: true);
+      final container = _containerOfApp(tester);
+      final apiService = container.read(apiServiceProvider);
+      final assetsApi = apiService.assetsApi;
+      final searchApi = apiService.searchApi;
+      final searchService = container.read(searchServiceProvider);
+      final uploadedRemoteIds = <String>[];
+
+      addTearDown(() async {
+        for (final assetId in uploadedRemoteIds) {
+          await _deleteTestAssetBestEffort(assetsApi, assetId);
+        }
+      });
+
+      await container.read(syncApiRepositoryProvider).deleteSyncAck(_allReplayableSyncAckTypes);
+      await Store.delete(StoreKey.syncMigrationStatus);
+      await container.read(syncStreamRepositoryProvider).reset();
+      final baselineSyncSuccess = await container.read(syncStreamServiceProvider).sync();
+      expect(baselineSyncSuccess, isTrue);
+
+      final runToken = DateTime.now().toUtc().microsecondsSinceEpoch.toString();
+      final sharedNeedle = 'search-025-$runToken';
+      const cameraMake = 'ImmichE2E';
+      const cameraModel = 'Search025';
+      final baseCreatedAt = DateTime.utc(2026, 1, 25, 12);
+      final timelineFavoriteCreatedAt = baseCreatedAt;
+      final timelinePlainCreatedAt = baseCreatedAt.subtract(const Duration(days: 10));
+      final archiveFavoriteCreatedAt = baseCreatedAt.add(const Duration(minutes: 1));
+      final hiddenCreatedAt = baseCreatedAt.add(const Duration(minutes: 2));
+
+      final timelineFavoriteName = 'immich-e2e-$sharedNeedle-snow-東京-favorite.jpg';
+      final timelineFavoriteId = await _uploadGeneratedJpegAsSecondClient(
+        timelineFavoriteName,
+        timelineFavoriteCreatedAt,
+        isFavorite: true,
+        sourceMetadata: {'device_make': cameraMake, 'device_model': cameraModel, 'width': 64, 'height': 64},
+      );
+      uploadedRemoteIds.add(timelineFavoriteId);
+
+      final timelinePlainId = await _uploadGeneratedJpegAsSecondClient(
+        'immich-e2e-$sharedNeedle-canyon-plain.jpg',
+        timelinePlainCreatedAt,
+        sourceMetadata: {'device_make': cameraMake, 'device_model': 'Search025Plain', 'width': 64, 'height': 64},
+      );
+      uploadedRemoteIds.add(timelinePlainId);
+
+      final archiveFavoriteId = await _uploadGeneratedJpegAsSecondClient(
+        'immich-e2e-$sharedNeedle-snow-archive.jpg',
+        archiveFavoriteCreatedAt,
+        isFavorite: true,
+        visibility: api.AssetVisibility.archive,
+        sourceMetadata: {'device_make': cameraMake, 'device_model': cameraModel, 'width': 64, 'height': 64},
+      );
+      uploadedRemoteIds.add(archiveFavoriteId);
+
+      final hiddenId = await _uploadGeneratedJpegAsSecondClient(
+        'immich-e2e-$sharedNeedle-snow-hidden.jpg',
+        hiddenCreatedAt,
+        visibility: api.AssetVisibility.hidden,
+        sourceMetadata: {'device_make': cameraMake, 'device_model': cameraModel, 'width': 64, 'height': 64},
+      );
+      uploadedRemoteIds.add(hiddenId);
+
+      final uploadSyncSuccess = await container.read(syncStreamServiceProvider).sync();
+      expect(uploadSyncSuccess, isTrue);
+
+      await _waitForRemoteAssetState(
+        tester,
+        container,
+        timelineFavoriteId,
+        (asset) => asset.visibility == AssetVisibility.timeline && asset.isFavorite && !asset.isTrashed,
+        reason: 'Expected searchable favorite asset to sync locally',
+      );
+      await _waitForRemoteAssetState(
+        tester,
+        container,
+        timelinePlainId,
+        (asset) => asset.visibility == AssetVisibility.timeline && !asset.isFavorite && !asset.isTrashed,
+        reason: 'Expected searchable plain asset to sync locally',
+      );
+      await _waitForRemoteAssetState(
+        tester,
+        container,
+        archiveFavoriteId,
+        (asset) => asset.visibility == AssetVisibility.archive && asset.isFavorite && !asset.isTrashed,
+        reason: 'Expected searchable archive asset to sync locally',
+      );
+      await _waitForRemoteAssetState(
+        tester,
+        container,
+        hiddenId,
+        (asset) => asset.visibility == AssetVisibility.hidden && !asset.isTrashed,
+        reason: 'Expected searchable hidden asset to sync locally',
+      );
+
+      final exactFilter = _searchFilter(filename: timelineFavoriteName, mediaType: AssetType.image);
+      final exactServer = await _waitForServerSearchResponse(
+        tester,
+        searchApi,
+        _metadataSearchDto(
+          filename: timelineFavoriteName,
+          type: api.AssetTypeEnum.IMAGE,
+          visibility: api.AssetVisibility.timeline,
+        ),
+        (response) => _serverSearchAssetIds(response).contains(timelineFavoriteId),
+        reason: 'Expected exact filename search to find the timeline favorite asset',
+      );
+      final exactAppIds = await _waitForSearchServiceAssetIds(
+        tester,
+        searchService,
+        exactFilter,
+        (ids) => ids.contains(timelineFavoriteId),
+        reason: 'Expected app exact filename search to find the same asset',
+      );
+      expect(exactAppIds, _serverSearchAssetIds(exactServer));
+      expect(exactAppIds, {timelineFavoriteId});
+
+      final partialFilter = _searchFilter(filename: sharedNeedle, mediaType: AssetType.image);
+      final partialServer = await _waitForServerSearchResponse(
+        tester,
+        searchApi,
+        _metadataSearchDto(
+          filename: sharedNeedle,
+          type: api.AssetTypeEnum.IMAGE,
+          visibility: api.AssetVisibility.timeline,
+        ),
+        (response) {
+          final ids = _serverSearchAssetIds(response);
+          return ids.containsAll({timelineFavoriteId, timelinePlainId}) &&
+              !ids.contains(archiveFavoriteId) &&
+              !ids.contains(hiddenId);
+        },
+        reason: 'Expected partial filename search to include timeline assets and exclude archive/hidden assets',
+      );
+      final partialAppIds = await _waitForSearchServiceAssetIds(
+        tester,
+        searchService,
+        partialFilter,
+        (ids) =>
+            ids.containsAll({timelineFavoriteId, timelinePlainId}) &&
+            !ids.contains(archiveFavoriteId) &&
+            !ids.contains(hiddenId),
+        reason: 'Expected app partial search to mirror server timeline visibility',
+      );
+      expect(partialAppIds, _serverSearchAssetIds(partialServer));
+
+      final unicodeNeedle = '$sharedNeedle-snow-東京';
+      final unicodeFilter = _searchFilter(filename: unicodeNeedle, mediaType: AssetType.image);
+      final unicodeServer = await _waitForServerSearchResponse(
+        tester,
+        searchApi,
+        _metadataSearchDto(
+          filename: unicodeNeedle,
+          type: api.AssetTypeEnum.IMAGE,
+          visibility: api.AssetVisibility.timeline,
+        ),
+        (response) => _serverSearchAssetIds(response).contains(timelineFavoriteId),
+        reason: 'Expected Unicode filename search to find the seeded asset',
+      );
+      final unicodeAppIds = await _waitForSearchServiceAssetIds(
+        tester,
+        searchService,
+        unicodeFilter,
+        (ids) => ids.contains(timelineFavoriteId),
+        reason: 'Expected app Unicode search to mirror server results',
+      );
+      expect(unicodeAppIds, _serverSearchAssetIds(unicodeServer));
+      expect(unicodeAppIds, contains(timelineFavoriteId));
+
+      final takenAfter = baseCreatedAt.subtract(const Duration(minutes: 1));
+      final takenBefore = baseCreatedAt.add(const Duration(minutes: 3));
+      final timelineComboFilter = _searchFilter(
+        filename: sharedNeedle,
+        takenAfter: takenAfter,
+        takenBefore: takenBefore,
+        isFavorite: true,
+        mediaType: AssetType.image,
+        make: cameraMake,
+        model: cameraModel,
+      );
+      final timelineComboServer = await _waitForServerSearchResponse(
+        tester,
+        searchApi,
+        _metadataSearchDto(
+          filename: sharedNeedle,
+          takenAfter: takenAfter,
+          takenBefore: takenBefore,
+          isFavorite: true,
+          type: api.AssetTypeEnum.IMAGE,
+          visibility: api.AssetVisibility.timeline,
+          make: cameraMake,
+          model: cameraModel,
+        ),
+        (response) => _serverSearchAssetIds(response).contains(timelineFavoriteId),
+        reason: 'Expected combined timeline filters to find only the matching favorite image',
+      );
+      final timelineComboAppIds = await _waitForSearchServiceAssetIds(
+        tester,
+        searchService,
+        timelineComboFilter,
+        (ids) => ids.contains(timelineFavoriteId),
+        reason: 'Expected app combined timeline search to mirror server results',
+      );
+      expect(timelineComboAppIds, _serverSearchAssetIds(timelineComboServer));
+      expect(timelineComboAppIds, {timelineFavoriteId});
+
+      final archiveComboFilter = _searchFilter(
+        filename: sharedNeedle,
+        takenAfter: takenAfter,
+        takenBefore: takenBefore,
+        isFavorite: true,
+        isArchive: true,
+        mediaType: AssetType.image,
+        make: cameraMake,
+        model: cameraModel,
+      );
+      final archiveComboServer = await _waitForServerSearchResponse(
+        tester,
+        searchApi,
+        _metadataSearchDto(
+          filename: sharedNeedle,
+          takenAfter: takenAfter,
+          takenBefore: takenBefore,
+          isFavorite: true,
+          type: api.AssetTypeEnum.IMAGE,
+          visibility: api.AssetVisibility.archive,
+          make: cameraMake,
+          model: cameraModel,
+        ),
+        (response) => _serverSearchAssetIds(response).contains(archiveFavoriteId),
+        reason: 'Expected combined archive filters to find the archived favorite image',
+      );
+      final archiveComboAppIds = await _waitForSearchServiceAssetIds(
+        tester,
+        searchService,
+        archiveComboFilter,
+        (ids) => ids.contains(archiveFavoriteId),
+        reason: 'Expected app archive-filtered search to mirror server results',
+      );
+      expect(archiveComboAppIds, _serverSearchAssetIds(archiveComboServer));
+      expect(archiveComboAppIds, {archiveFavoriteId});
+
+      final hiddenServer = await _waitForServerSearchResponse(
+        tester,
+        searchApi,
+        _metadataSearchDto(
+          filename: sharedNeedle,
+          type: api.AssetTypeEnum.IMAGE,
+          visibility: api.AssetVisibility.hidden,
+        ),
+        (response) => _serverSearchAssetIds(response).contains(hiddenId),
+        reason: 'Expected explicit hidden search to prove the hidden asset exists',
+      );
+      expect(_serverSearchAssetIds(hiddenServer), contains(hiddenId));
+      expect(partialAppIds, isNot(contains(hiddenId)), reason: 'Timeline search must not leak hidden assets');
+
+      final emptyFilter = _searchFilter(filename: 'immich-e2e-$sharedNeedle-no-result', mediaType: AssetType.image);
+      final emptyServer = await _waitForServerSearchResponse(
+        tester,
+        searchApi,
+        _metadataSearchDto(
+          filename: 'immich-e2e-$sharedNeedle-no-result',
+          type: api.AssetTypeEnum.IMAGE,
+          visibility: api.AssetVisibility.timeline,
+        ),
+        (response) => response.assets.total == 0 && response.assets.items.isEmpty,
+        reason: 'Expected no-result search to return an empty server page',
+      );
+      expect(_serverSearchAssetIds(emptyServer), isEmpty);
+      final emptyAppIds = await _waitForSearchServiceAssetIds(
+        tester,
+        searchService,
+        emptyFilter,
+        (ids) => ids.isEmpty,
+        reason: 'Expected app no-result search to return no assets',
+      );
+      expect(emptyAppIds, isEmpty);
+
+      final pageOne = await _waitForServerSearchResponse(
+        tester,
+        searchApi,
+        _metadataSearchDto(
+          filename: sharedNeedle,
+          page: 1,
+          size: 1,
+          type: api.AssetTypeEnum.IMAGE,
+          visibility: api.AssetVisibility.timeline,
+        ),
+        (response) => response.assets.total >= 2 && response.assets.items.length == 1,
+        reason: 'Expected first server search page to contain one timeline asset',
+      );
+      final pageTwo = await _waitForServerSearchResponse(
+        tester,
+        searchApi,
+        _metadataSearchDto(
+          filename: sharedNeedle,
+          page: 2,
+          size: 1,
+          type: api.AssetTypeEnum.IMAGE,
+          visibility: api.AssetVisibility.timeline,
+        ),
+        (response) => response.assets.total == pageOne.assets.total && response.assets.items.length == 1,
+        reason: 'Expected second server search page to be stable',
+      );
+      expect(pageOne.assets.nextPage, '2');
+      expect(_serverSearchAssetIds(pageOne).intersection(_serverSearchAssetIds(pageTwo)), isEmpty);
+      expect(_serverSearchAssetIds(pageOne).union(_serverSearchAssetIds(pageTwo)), {
+        timelineFavoriteId,
+        timelinePlainId,
+      });
+    });
+
     if (_selectedCaseId.isNotEmpty && !_registeredSelectedCase) {
       test(_selectedCaseId, () => fail('No real stack auth test registered for $_selectedCaseId'));
     }
@@ -2342,6 +2660,7 @@ Future<String> _uploadGeneratedJpegAsSecondClient(
   DateTime createdAt, {
   bool isFavorite = false,
   api.AssetVisibility? visibility,
+  Map<String, Object>? sourceMetadata,
 }) async {
   final bytes = _generatedJpegBytes(createdAt.microsecondsSinceEpoch);
   final request = http.MultipartRequest('POST', Uri.parse('${Store.get(StoreKey.serverEndpoint)}/assets'))
@@ -2363,7 +2682,40 @@ Future<String> _uploadGeneratedJpegAsSecondClient(
   expect(response.statusCode, inInclusiveRange(200, 299), reason: response.body);
   final payload = jsonDecode(response.body) as Map<String, dynamic>;
   expect(payload['status'], 'created', reason: response.body);
-  return payload['id'] as String;
+  final assetId = payload['id'] as String;
+  if (sourceMetadata != null && sourceMetadata.isNotEmpty) {
+    await _updateTestAssetSourceMetadata(assetId, fileName, createdAt, sourceMetadata);
+  }
+  return assetId;
+}
+
+Future<void> _updateTestAssetSourceMetadata(
+  String remoteAssetId,
+  String fileName,
+  DateTime createdAt,
+  Map<String, Object> sourceMetadata,
+) async {
+  final utcCreatedAt = createdAt.toUtc();
+  final mergedSourceMetadata = <String, Object>{'uploaded_original_name': fileName, ...sourceMetadata};
+  final metadata = <String, Object>{
+    'original_created_unix_nano': utcCreatedAt.microsecondsSinceEpoch * 1000,
+    'original_modified_unix_nano': utcCreatedAt.microsecondsSinceEpoch * 1000,
+    'source_metadata': mergedSourceMetadata,
+  };
+  final request = http.Request('POST', Uri.parse('${Store.get(StoreKey.serverEndpoint)}/assets/bulk-metadata'))
+    ..headers.addAll({
+      ...ApiService.getRequestHeaders(),
+      'Authorization': 'Bearer ${Store.get(StoreKey.accessToken)}',
+      HttpHeaders.contentTypeHeader: 'application/json',
+    })
+    ..body = jsonEncode({
+      'assets': [
+        {'assetId': remoteAssetId, 'metadata': metadata},
+      ],
+    });
+
+  final response = await http.Response.fromStream(await request.send());
+  expect(response.statusCode, 200, reason: response.body);
 }
 
 Future<void> _deleteTestAssetBestEffort(api.AssetsApi assetsApi, String remoteAssetId) async {
@@ -2388,6 +2740,112 @@ Future<void> _deleteAlbumBestEffort(api.AlbumsApi albumsApi, String albumId) asy
     // Best-effort cleanup for a test-created album.
   }
 }
+
+SearchFilter _searchFilter({
+  String? filename,
+  DateTime? takenAfter,
+  DateTime? takenBefore,
+  bool isFavorite = false,
+  bool isArchive = false,
+  bool isNotInAlbum = false,
+  AssetType mediaType = AssetType.other,
+  String? make,
+  String? model,
+}) {
+  return SearchFilter(
+    filename: filename,
+    people: {},
+    location: SearchLocationFilter(),
+    camera: SearchCameraFilter(make: make, model: model),
+    date: SearchDateFilter(takenAfter: takenAfter, takenBefore: takenBefore),
+    display: SearchDisplayFilters(isNotInAlbum: isNotInAlbum, isArchive: isArchive, isFavorite: isFavorite),
+    rating: SearchRatingFilter(),
+    mediaType: mediaType,
+  );
+}
+
+api.MetadataSearchDto _metadataSearchDto({
+  String? filename,
+  DateTime? takenAfter,
+  DateTime? takenBefore,
+  bool? isFavorite,
+  int page = 1,
+  int size = 1000,
+  api.AssetTypeEnum? type,
+  api.AssetVisibility? visibility,
+  String? make,
+  String? model,
+}) {
+  return api.MetadataSearchDto(
+    originalFileName: filename == null ? const api.Optional.absent() : api.Optional.present(filename),
+    takenAfter: takenAfter == null ? const api.Optional.absent() : api.Optional.present(takenAfter),
+    takenBefore: takenBefore == null ? const api.Optional.absent() : api.Optional.present(takenBefore),
+    isFavorite: isFavorite == null ? const api.Optional.absent() : api.Optional.present(isFavorite),
+    page: api.Optional.present(page),
+    size: api.Optional.present(size),
+    type: type == null ? const api.Optional.absent() : api.Optional.present(type),
+    visibility: visibility == null ? const api.Optional.absent() : api.Optional.present(visibility),
+    make: make == null ? const api.Optional.absent() : api.Optional.present(make),
+    model: model == null ? const api.Optional.absent() : api.Optional.present(model),
+  );
+}
+
+Future<api.SearchResponseDto> _waitForServerSearchResponse(
+  WidgetTester tester,
+  api.SearchApi searchApi,
+  api.MetadataSearchDto dto,
+  bool Function(api.SearchResponseDto response) matches, {
+  required String reason,
+}) async {
+  api.SearchResponseDto? latest;
+  Object? lastError;
+  final end = DateTime.now().add(const Duration(seconds: 60));
+  while (DateTime.now().isBefore(end)) {
+    try {
+      latest = await searchApi.searchAssets(dto);
+      if (latest != null && matches(latest)) {
+        return latest;
+      }
+    } catch (error) {
+      lastError = error;
+    }
+    await _pumpFor(tester, const Duration(milliseconds: 500));
+  }
+
+  fail('$reason; latest server search=$latest; last error=$lastError');
+}
+
+Future<Set<String>> _waitForSearchServiceAssetIds(
+  WidgetTester tester,
+  SearchService searchService,
+  SearchFilter filter,
+  bool Function(Set<String> ids) matches, {
+  required String reason,
+}) async {
+  var latest = const <String>{};
+  Object? lastError;
+  final end = DateTime.now().add(const Duration(seconds: 60));
+  while (DateTime.now().isBefore(end)) {
+    try {
+      final result = await searchService.search(filter, 1);
+      latest = {
+        for (final asset in result?.assets ?? const <BaseAsset>[])
+          if (asset.remoteId != null) asset.remoteId!,
+      };
+      if (matches(latest)) {
+        return latest;
+      }
+    } catch (error) {
+      lastError = error;
+    }
+    await _pumpFor(tester, const Duration(milliseconds: 500));
+  }
+
+  fail('$reason; latest app search ids=${latest.toList()..sort()}; last error=$lastError');
+}
+
+Set<String> _serverSearchAssetIds(api.SearchResponseDto response) =>
+    response.assets.items.map((asset) => asset.id).toSet();
 
 Uint8List _generatedJpegBytes(int seed) {
   const onePixelJpeg =
