@@ -55,6 +55,7 @@ import 'package:immich_mobile/repositories/download.repository.dart';
 import 'package:immich_mobile/services/api.service.dart';
 import 'package:immich_mobile/services/foreground_upload.service.dart';
 import 'package:immich_mobile/utils/bootstrap.dart';
+import 'package:immich_mobile/utils/option.dart';
 import 'package:immich_mobile/utils/semver.dart';
 import 'package:immich_mobile/widgets/asset_viewer/video_controls.dart';
 import 'package:immich_mobile/widgets/photo_view/photo_view.dart';
@@ -2383,6 +2384,176 @@ void main() async {
       );
     });
 
+    _realStackSessionTest(
+      'MOB-REAL-029-$_caseSuffix',
+      'browses cached assets across offline cold start and reconnect',
+      (tester) async {
+        await _loadAuthenticatedApp(tester, overrideCancellation: true, closeDriftOnDispose: false);
+        var container = _containerOfApp(tester);
+        var drift = container.read(driftProvider);
+        final realEndpoint = _apiEndpoint(_serverUrl);
+        final offlineEndpoint = _apiEndpoint(_badServerUrl);
+        final uploadedRemoteIds = <String>[];
+        final user = Store.tryGet(StoreKey.currentUser);
+        expect(user, isNotNull);
+
+        addTearDown(() async {
+          await Store.put(StoreKey.serverEndpoint, realEndpoint);
+          await Store.put(StoreKey.serverUrl, realEndpoint);
+          final apiService = ApiService()..setEndpoint(realEndpoint);
+          await apiService.updateHeaders();
+          for (final assetId in uploadedRemoteIds) {
+            await _deleteTestAssetBestEffort(apiService.assetsApi, assetId);
+          }
+        });
+
+        await container.read(syncApiRepositoryProvider).deleteSyncAck(_allReplayableSyncAckTypes);
+        await Store.delete(StoreKey.syncMigrationStatus);
+        await container.read(syncStreamRepositoryProvider).reset();
+        final baselineSyncSuccess = await container.read(syncStreamServiceProvider).sync();
+        expect(baselineSyncSuccess, isTrue);
+        if (Store.tryGet(StoreKey.currentUser) == null) {
+          await Store.put(StoreKey.currentUser, user!);
+        }
+
+        final runToken = DateTime.now().toUtc().microsecondsSinceEpoch.toString();
+        final createdAt = DateTime.utc(
+          2026,
+          1,
+          29,
+          12,
+        ).add(Duration(microseconds: int.parse(runToken) % Duration.microsecondsPerDay));
+        final cachedAssetId = await _uploadGeneratedJpegAsSecondClient(
+          'immich-e2e-offline-recovery-029-cached-$runToken.jpg',
+          createdAt,
+        );
+        uploadedRemoteIds.add(cachedAssetId);
+
+        final uploadSyncSuccess = await container.read(syncStreamServiceProvider).sync();
+        expect(uploadSyncSuccess, isTrue);
+        final cachedBeforeOffline = await _waitForRemoteAssetState(
+          tester,
+          container,
+          cachedAssetId,
+          (asset) => asset.visibility == AssetVisibility.timeline && !asset.isTrashed && !asset.isFavorite,
+          reason: 'Expected uploaded offline-recovery asset to sync locally before disconnect',
+        );
+
+        final assetsApi = container.read(apiServiceProvider).assetsApi;
+        final infoBeforeOffline = await _waitForAssetInfoState(
+          tester,
+          assetsApi,
+          cachedAssetId,
+          (asset) => !asset.isTrashed && asset.originalPath.isNotEmpty,
+          reason: 'Expected server metadata before offline cold start',
+        );
+        final originalBeforeOffline = await _waitForSuccessfulResponse(
+          tester,
+          () => container.read(assetApiRepositoryProvider).downloadAsset(cachedAssetId, edited: false),
+        );
+        expect(base64Encode(md5.convert(originalBeforeOffline.bodyBytes).bytes), infoBeforeOffline.checksum);
+        await _waitForSuccessfulResponse(
+          tester,
+          () => assetsApi.viewAssetWithHttpInfo(cachedAssetId, size: api.AssetMediaSize.thumbnail),
+        );
+
+        final onlineTimeline = container.read(timelineFactoryProvider).main([user!.id]);
+        await _expectTimelineAssetSet(
+          tester,
+          onlineTimeline,
+          includes: {cachedAssetId},
+          excludes: const {},
+          reason: 'Expected online timeline to include the cached offline-recovery asset',
+        );
+        await onlineTimeline.dispose();
+        final rowsBeforeOffline = await _remoteSyncRowCounts(drift);
+
+        await Store.put(StoreKey.serverEndpoint, offlineEndpoint);
+        await Store.put(StoreKey.serverUrl, offlineEndpoint);
+        final onlineApiService = container.read(apiServiceProvider);
+        onlineApiService.setEndpoint(offlineEndpoint);
+        await onlineApiService.updateHeaders();
+        container.read(websocketProvider.notifier).disconnect();
+        await tester.pumpWidget(const SizedBox.shrink());
+        await _pumpFor(tester, const Duration(milliseconds: 500));
+
+        await _loadAppPreservingStore(tester, overrideCancellation: true, closeDriftOnDispose: false);
+        await _waitForAccessToken(tester);
+        await _waitForCurrentUser(_email, tester);
+        container = _containerOfApp(tester);
+        drift = container.read(driftProvider);
+
+        final cachedAfterColdStart = await _waitForRemoteAssetState(
+          tester,
+          container,
+          cachedAssetId,
+          (asset) =>
+              !asset.isTrashed && !asset.isFavorite && asset.createdAt.toUtc() == cachedBeforeOffline.createdAt.toUtc(),
+          reason: 'Expected offline cold start to keep the cached remote asset readable from Drift',
+        );
+        expect(cachedAfterColdStart.checksum, cachedBeforeOffline.checksum);
+
+        final offlineTimeline = container.read(timelineFactoryProvider).main([user.id]);
+        await _expectTimelineAssetSet(
+          tester,
+          offlineTimeline,
+          includes: {cachedAssetId},
+          excludes: const {},
+          reason: 'Expected offline timeline browsing to use cached remote rows',
+        );
+        await offlineTimeline.dispose();
+        expect(await _remoteSyncRowCounts(drift), rowsBeforeOffline);
+
+        final offlineWriteError = await _captureError(
+          () => container.read(assetServiceProvider).update([cachedAssetId], isFavorite: const Option.some(true)),
+        );
+        expect(offlineWriteError, isNotNull, reason: 'Expected offline favorite write to fail explicitly');
+        expect(offlineWriteError.toString(), isNotEmpty);
+        final assetAfterOfflineWrite = await container.read(remoteAssetRepositoryProvider).get(cachedAssetId);
+        expect(assetAfterOfflineWrite, isNotNull);
+        expect(assetAfterOfflineWrite!.isFavorite, isFalse, reason: 'Failed offline write must not mutate local state');
+
+        await Store.put(StoreKey.serverEndpoint, realEndpoint);
+        await Store.put(StoreKey.serverUrl, realEndpoint);
+        final recoveredApiService = container.read(apiServiceProvider);
+        recoveredApiService.setEndpoint(realEndpoint);
+        await recoveredApiService.updateHeaders();
+
+        final reconnectSyncSuccess = await container.read(syncStreamServiceProvider).sync();
+        expect(reconnectSyncSuccess, isTrue);
+        await _waitForRemoteAssetState(
+          tester,
+          container,
+          cachedAssetId,
+          (asset) => !asset.isTrashed && !asset.isFavorite,
+          reason: 'Expected reconnect sync to preserve the server truth after rejected offline write',
+        );
+        expect(await _remoteAssetRowCountById(drift, cachedAssetId), 1);
+        expect(
+          await _remoteSyncRowCounts(drift),
+          rowsBeforeOffline,
+          reason: 'Reconnect sync after offline cold start should not duplicate cached rows',
+        );
+
+        final infoAfterReconnect = await _waitForAssetInfoState(
+          tester,
+          recoveredApiService.assetsApi,
+          cachedAssetId,
+          (asset) => !asset.isTrashed && !asset.isFavorite,
+          reason: 'Expected restored network access to read server metadata again',
+        );
+        _expectAssetInfoPreserved(infoAfterReconnect, infoBeforeOffline);
+
+        final secondSyncSuccess = await container.read(syncStreamServiceProvider).sync();
+        expect(secondSyncSuccess, isTrue);
+        expect(
+          await _remoteSyncRowCounts(drift),
+          rowsBeforeOffline,
+          reason: 'Second sync after offline recovery should not duplicate cached rows',
+        );
+      },
+    );
+
     if (_selectedCaseId.isNotEmpty && !_registeredSelectedCase) {
       test(_selectedCaseId, () => fail('No real stack auth test registered for $_selectedCaseId'));
     }
@@ -3113,16 +3284,30 @@ Future<void> _login(
   await _tapTranslatedButton(tester, 'login');
 }
 
-Future<void> _loadAppPreservingStore(WidgetTester tester) async {
+Future<void> _loadAppPreservingStore(
+  WidgetTester tester, {
+  bool overrideCancellation = false,
+  bool closeDriftOnDispose = true,
+}) async {
   await EasyLocalization.ensureInitialized();
   final (drift, _) = await Bootstrap.initDomain();
   await tester.pumpWidget(
-    ProviderScope(overrides: [driftProvider.overrideWith(driftOverride(drift))], child: const app.MainWidget()),
+    ProviderScope(
+      overrides: [
+        driftProvider.overrideWith(_driftOverrideForTest(drift, closeOnDispose: closeDriftOnDispose)),
+        if (overrideCancellation) cancellationProvider.overrideWithValue(Completer()),
+      ],
+      child: const app.MainWidget(),
+    ),
   );
   await EasyLocalization.ensureInitialized();
 }
 
-Future<void> _loadAuthenticatedApp(WidgetTester tester, {bool overrideCancellation = false}) async {
+Future<void> _loadAuthenticatedApp(
+  WidgetTester tester, {
+  bool overrideCancellation = false,
+  bool closeDriftOnDispose = true,
+}) async {
   await EasyLocalization.ensureInitialized();
   final (drift, _) = await Bootstrap.initDomain();
   await Store.clear();
@@ -3132,7 +3317,7 @@ Future<void> _loadAuthenticatedApp(WidgetTester tester, {bool overrideCancellati
   await tester.pumpWidget(
     ProviderScope(
       overrides: [
-        driftProvider.overrideWith(driftOverride(drift)),
+        driftProvider.overrideWith(_driftOverrideForTest(drift, closeOnDispose: closeDriftOnDispose)),
         if (overrideCancellation) cancellationProvider.overrideWithValue(Completer()),
       ],
       child: const app.MainWidget(),
@@ -3144,6 +3329,14 @@ Future<void> _loadAuthenticatedApp(WidgetTester tester, {bool overrideCancellati
   await _waitForCurrentUser(_email, tester);
   await _dismissFeatureMessageIfVisible(tester);
 }
+
+Drift Function(Ref ref) _driftOverrideForTest(Drift drift, {required bool closeOnDispose}) => (ref) {
+  if (closeOnDispose) {
+    ref.onDispose(() => unawaited(drift.close()));
+  }
+  ref.keepAlive();
+  return drift;
+};
 
 Future<(ProviderContainer, Drift)> _loadAuthenticatedSyncContainer() async {
   await EasyLocalization.ensureInitialized();
@@ -3992,6 +4185,15 @@ Future<void> _waitForRejectedResponse(
 }
 
 bool _isMissingAssetError(Object error) => error is api.ApiException && (error.code == 404 || error.code == 410);
+
+Future<Object?> _captureError(Future<void> Function() action) async {
+  try {
+    await action();
+    return null;
+  } catch (error) {
+    return error;
+  }
+}
 
 Future<http.Response> _authenticatedApiGet(String path) {
   final endpoint = Store.get(StoreKey.serverEndpoint);
