@@ -12,7 +12,17 @@ class ImmichToast {
     ToastGravity gravity = ToastGravity.BOTTOM,
     int durationInSecond = 3,
   }) {
+    if (!context.mounted) {
+      return;
+    }
+
+    final overlay = Overlay.maybeOf(context, rootOverlay: true);
+    if (overlay == null || !overlay.mounted) {
+      return;
+    }
+
     final fToast = FToast();
+    fToast.removeQueuedCustomToasts();
     fToast.init(context);
 
     Color getColor(ToastType type, BuildContext context) => switch (type) {

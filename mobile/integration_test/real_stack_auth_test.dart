@@ -50,13 +50,16 @@ import 'package:immich_mobile/presentation/pages/drift_asset_selection_timeline.
 import 'package:immich_mobile/presentation/pages/drift_favorite.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_library.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_locked_folder.page.dart';
+import 'package:immich_mobile/presentation/pages/drift_remote_album.page.dart';
 import 'package:immich_mobile/presentation/pages/search/drift_search.page.dart';
+import 'package:immich_mobile/presentation/widgets/album/album_selector.widget.dart';
 import 'package:immich_mobile/presentation/widgets/asset_viewer/asset_viewer.page.dart';
 import 'package:immich_mobile/presentation/widgets/asset_viewer/video_viewer.widget.dart';
 import 'package:immich_mobile/presentation/widgets/backup/backup_toggle_button.widget.dart';
 import 'package:immich_mobile/presentation/widgets/bottom_sheet/archive_bottom_sheet.widget.dart';
 import 'package:immich_mobile/presentation/widgets/bottom_sheet/favorite_bottom_sheet.widget.dart';
 import 'package:immich_mobile/presentation/widgets/bottom_sheet/general_bottom_sheet.widget.dart';
+import 'package:immich_mobile/presentation/widgets/bottom_sheet/remote_album_bottom_sheet.widget.dart';
 import 'package:immich_mobile/presentation/widgets/images/thumbnail_tile.widget.dart';
 import 'package:immich_mobile/presentation/widgets/timeline/header.widget.dart';
 import 'package:immich_mobile/presentation/widgets/timeline/timeline.widget.dart';
@@ -4100,6 +4103,221 @@ void main() async {
       );
     });
 
+    _realStackSessionTest('MOB-UI-040-$_caseSuffix', 'supports bulk album add, create, and remove flows', (
+      tester,
+    ) async {
+      tester.view.devicePixelRatio = 1.0;
+      tester.view.physicalSize = const Size(430, 932);
+      addTearDown(tester.view.reset);
+
+      await _loadAuthenticatedApp(tester, overrideCancellation: true);
+      final container = _containerOfApp(tester);
+      final drift = container.read(driftProvider);
+      final router = container.read(appRouterProvider);
+      final apiService = container.read(apiServiceProvider);
+      final albumsApi = apiService.albumsApi;
+      final assetsApi = apiService.assetsApi;
+      final createdRemoteAssetIds = <String>[];
+      String? existingAlbumId;
+      String? newAlbumId;
+      final user = Store.tryGet(StoreKey.currentUser);
+      expect(user, isNotNull);
+      final originalAlbumIsGrid = SettingsRepository.instance.appConfig.album.isGrid;
+
+      addTearDown(() async {
+        try {
+          await SettingsRepository.instance.write(SettingsKey.albumIsGrid, originalAlbumIsGrid);
+          container.read(multiSelectProvider.notifier).reset();
+        } catch (_) {
+          // ProviderScope may already be disposed when an earlier expectation fails.
+        }
+        for (final albumId in [newAlbumId, existingAlbumId]) {
+          if (albumId != null) {
+            await _deleteAlbumBestEffort(albumsApi, albumId);
+          }
+        }
+        for (final assetId in createdRemoteAssetIds) {
+          await _deleteTestAssetBestEffort(assetsApi, assetId);
+        }
+      });
+
+      await container.read(syncApiRepositoryProvider).deleteSyncAck(_allReplayableSyncAckTypes);
+      await Store.delete(StoreKey.syncMigrationStatus);
+      await container.read(syncStreamRepositoryProvider).reset();
+      final baselineSyncSuccess = await container.read(syncStreamServiceProvider).sync();
+      expect(baselineSyncSuccess, isTrue);
+
+      final runToken = DateTime.now().toUtc().microsecondsSinceEpoch.toString();
+      final baseCreatedAt = DateTime.now().toUtc();
+      final assetIds = <String>[];
+      for (var index = 0; index < 6; index++) {
+        final assetId = await _uploadGeneratedJpegAsSecondClient(
+          'immich-e2e-album-actions-040-$index-$runToken.jpg',
+          baseCreatedAt.subtract(Duration(seconds: 6 - index)),
+        );
+        createdRemoteAssetIds.add(assetId);
+        assetIds.add(assetId);
+      }
+
+      for (final assetId in assetIds) {
+        await _waitForSuccessfulResponse(
+          tester,
+          () => _authenticatedApiGet('/assets/$assetId/thumbnail?size=thumbnail&edited=false&c=$runToken'),
+          timeout: const Duration(minutes: 3),
+        );
+      }
+
+      final existingAlbumName = 'immich-e2e-album-actions-040-existing-$runToken';
+      final existingAlbum = await albumsApi.createAlbum(
+        api.CreateAlbumDto(albumName: existingAlbumName, assetIds: api.Optional.present([assetIds[0]])),
+      );
+      expect(existingAlbum, isNotNull);
+      existingAlbumId = existingAlbum!.id;
+
+      await _waitForAlbumInfoState(
+        tester,
+        albumsApi,
+        existingAlbumId,
+        (album) => album.albumName == existingAlbumName && album.assetCount == 1,
+        reason: 'Expected existing 040 album to start with one member',
+      );
+
+      final initialSyncSuccess = await container.read(syncStreamServiceProvider).sync();
+      expect(initialSyncSuccess, isTrue);
+      await _pumpFor(tester, const Duration(seconds: 2));
+      await pumpUntilFound(tester, find.byType(Timeline), timeout: const Duration(seconds: 60));
+
+      for (final assetId in assetIds) {
+        await _waitForRemoteAssetState(
+          tester,
+          container,
+          assetId,
+          (asset) => asset.visibility == AssetVisibility.timeline && !asset.isTrashed,
+          reason: 'Expected 040 asset $assetId to sync locally before album actions',
+        );
+      }
+      await _waitForRemoteAlbumAssetIds(
+        tester,
+        container,
+        existingAlbumId,
+        includes: {assetIds[0]},
+        excludes: {assetIds[1], assetIds[2], assetIds[3], assetIds[4], assetIds[5]},
+        reason: 'Expected existing 040 album local membership before UI add',
+      );
+
+      await SettingsRepository.instance.write(SettingsKey.albumIsGrid, false);
+      await _selectTimelineAssetsById(tester, container, [assetIds[0], assetIds[1]]);
+      await _tapAlbumInSelector(tester, GeneralBottomSheet, existingAlbumName);
+      await _waitForMultiSelectCount(tester, container, 0, timeout: const Duration(seconds: 30));
+      await _waitForAlbumInfoState(
+        tester,
+        albumsApi,
+        existingAlbumId,
+        (album) => album.assetCount == 2,
+        reason: 'Expected UI add to existing album to add only the missing asset',
+      );
+      await _waitForRemoteAlbumAssetIds(
+        tester,
+        container,
+        existingAlbumId,
+        includes: {assetIds[0], assetIds[1]},
+        excludes: {assetIds[2], assetIds[3], assetIds[4], assetIds[5]},
+        reason: 'Expected local existing album to contain first two assets after UI add',
+      );
+
+      await _selectTimelineAssetsById(tester, container, [assetIds[0], assetIds[1]]);
+      await _tapAlbumInSelector(tester, GeneralBottomSheet, existingAlbumName);
+      await _waitForMultiSelectCount(tester, container, 0, timeout: const Duration(seconds: 30));
+      await _waitForAlbumInfoState(
+        tester,
+        albumsApi,
+        existingAlbumId,
+        (album) => album.assetCount == 2,
+        reason: 'Expected repeated UI add to existing album to avoid duplicate members',
+      );
+      expect(await _remoteAlbumAssetRowCountByAlbumId(drift, existingAlbumId), 2);
+
+      final newAlbumName = 'immich-e2e-album-actions-040-new-$runToken';
+      await _selectTimelineAssetsById(tester, container, [assetIds[2], assetIds[3], assetIds[4]]);
+      await _createAlbumFromBottomSheet(tester, newAlbumName);
+      await pumpUntilFound(tester, find.byType(RemoteAlbumPage), timeout: const Duration(seconds: 30));
+
+      final newAlbumIds = await _waitForServerAlbumIdsByName(
+        tester,
+        albumsApi,
+        newAlbumName,
+        (ids) => ids.length == 1,
+        reason: 'Expected bottom-sheet album creation to create one server album named $newAlbumName',
+      );
+      newAlbumId = newAlbumIds.single;
+      await _waitForAlbumInfoState(
+        tester,
+        albumsApi,
+        newAlbumId,
+        (album) => album.assetCount == 3,
+        reason: 'Expected newly created album to contain the selected assets',
+      );
+      await _waitForRemoteAlbumAssetIds(
+        tester,
+        container,
+        newAlbumId,
+        includes: {assetIds[2], assetIds[3], assetIds[4]},
+        excludes: {assetIds[0], assetIds[1], assetIds[5]},
+        reason: 'Expected local new album membership after create flow',
+      );
+
+      final albumContainer = ProviderScope.containerOf(tester.element(find.byType(Timeline).last), listen: false);
+      await _selectTimelineAssetsById(tester, albumContainer, [assetIds[2], assetIds[3]]);
+      expect(_bottomSheetIcon(RemoteAlbumBottomSheet, Icons.remove_circle_outline), findsOneWidget);
+      await _tapBottomSheetAction(tester, RemoteAlbumBottomSheet, Icons.remove_circle_outline);
+      await _waitForMultiSelectCount(tester, albumContainer, 0, timeout: const Duration(seconds: 30));
+      await _waitForAlbumInfoState(
+        tester,
+        albumsApi,
+        newAlbumId,
+        (album) => album.assetCount == 1,
+        reason: 'Expected removing selected assets from new album to leave one member',
+      );
+      await _waitForRemoteAlbumAssetIds(
+        tester,
+        container,
+        newAlbumId,
+        includes: {assetIds[4]},
+        excludes: {assetIds[0], assetIds[1], assetIds[2], assetIds[3], assetIds[5]},
+        reason: 'Expected local new album membership to retain only the unselected asset',
+      );
+
+      for (final assetId in [assetIds[2], assetIds[3]]) {
+        final assetInfo = await assetsApi.getAssetInfo(assetId);
+        expect(assetInfo, isNotNull);
+        expect(assetInfo!.isTrashed, isFalse, reason: 'Removing $assetId from an album must not delete the asset');
+      }
+
+      await router.maybePop();
+      await _pumpUntil(
+        tester,
+        () => find.byType(RemoteAlbumPage).evaluate().isEmpty,
+        timeout: const Duration(seconds: 30),
+      );
+      await pumpUntilFound(tester, find.byType(MainTimelinePage), timeout: const Duration(seconds: 30));
+      final refreshSyncSuccess = await container.read(syncStreamServiceProvider).sync();
+      expect(refreshSyncSuccess, isTrue);
+
+      final mainTimeline = container.read(timelineFactoryProvider).main([user!.id]);
+      addTearDown(mainTimeline.dispose);
+      await _expectTimelineAssetSet(
+        tester,
+        mainTimeline,
+        includes: assetIds.toSet(),
+        excludes: const {},
+        reason: 'Album add/remove actions should not remove assets from the main timeline',
+      );
+      expect(await _remoteAlbumRowCountById(drift, existingAlbumId), 1);
+      expect(await _remoteAlbumRowCountById(drift, newAlbumId), 1);
+      expect(await _remoteAlbumAssetRowCountByAlbumId(drift, existingAlbumId), 2);
+      expect(await _remoteAlbumAssetRowCountByAlbumId(drift, newAlbumId), 1);
+    });
+
     if (_selectedCaseId.isNotEmpty && !_registeredSelectedCase) {
       test(_selectedCaseId, () => fail('No real stack auth test registered for $_selectedCaseId'));
     }
@@ -5432,16 +5650,106 @@ Future<void> _tapBottomSheetAction(WidgetTester tester, Type bottomSheetType, Ic
   await pumpUntilFound(tester, actionIcon, timeout: const Duration(seconds: 30));
 
   final actionScroll = find.descendant(of: find.byType(bottomSheetType), matching: find.byType(SingleChildScrollView));
-  for (var attempt = 0; attempt < 8 && actionIcon.hitTestable().evaluate().isEmpty; attempt++) {
+  await tester.ensureVisible(actionIcon.last);
+  await _pumpFor(tester, const Duration(milliseconds: 200));
+  for (var attempt = 0; attempt < 16 && actionIcon.hitTestable().evaluate().isEmpty; attempt++) {
     if (actionScroll.evaluate().isEmpty) {
       break;
     }
-    await tester.drag(actionScroll.first, const Offset(-240, 0));
+    await tester.drag(actionScroll.first, const Offset(-520, 0));
     await _pumpFor(tester, const Duration(milliseconds: 200));
   }
 
   expect(actionIcon.hitTestable(), findsWidgets, reason: 'Expected action icon $icon to be tappable');
   await tester.tap(actionIcon.hitTestable().first);
+  await _pumpFor(tester, const Duration(milliseconds: 500));
+}
+
+Future<void> _expandBottomSheet(WidgetTester tester, Type bottomSheetType) async {
+  await pumpUntilFound(tester, find.byType(bottomSheetType), timeout: const Duration(seconds: 30));
+
+  final sheet = find.descendant(of: find.byType(bottomSheetType), matching: find.byType(DraggableScrollableSheet));
+  final dragTarget = sheet.evaluate().isNotEmpty ? sheet.last : find.byType(bottomSheetType).last;
+  await tester.drag(dragTarget, const Offset(0, -520), warnIfMissed: false);
+  await _pumpFor(tester, const Duration(milliseconds: 400));
+}
+
+Future<void> _tapAlbumInSelector(WidgetTester tester, Type bottomSheetType, String albumName) async {
+  await _expandBottomSheet(tester, bottomSheetType);
+  await pumpUntilFound(tester, find.byType(AlbumSelector), timeout: const Duration(seconds: 30));
+
+  final selector = find.byType(AlbumSelector);
+  final searchField = find.descendant(of: selector, matching: find.byType(TextField));
+  await pumpUntilFound(tester, searchField, timeout: const Duration(seconds: 30));
+  await tester.tap(searchField.first, warnIfMissed: false);
+  await tester.enterText(searchField.first, albumName);
+  await _pumpFor(tester, const Duration(milliseconds: 500));
+  await tester.testTextInput.receiveAction(TextInputAction.done);
+  await _pumpFor(tester, const Duration(milliseconds: 300));
+
+  final albumText = find.descendant(
+    of: selector,
+    matching: find.byWidgetPredicate((widget) => widget is Text && widget.data == albumName),
+  );
+  final scrollable = find.descendant(of: find.byType(bottomSheetType), matching: find.byType(Scrollable));
+
+  await _pumpUntil(tester, () => albumText.evaluate().isNotEmpty, timeout: const Duration(seconds: 30));
+
+  for (var attempt = 0; attempt < 8 && albumText.hitTestable().evaluate().isEmpty; attempt++) {
+    if (scrollable.evaluate().isEmpty) {
+      break;
+    }
+    await tester.drag(scrollable.last, const Offset(0, -360), warnIfMissed: false);
+    await _pumpFor(tester, const Duration(milliseconds: 200));
+  }
+
+  expect(albumText.hitTestable(), findsWidgets, reason: 'Expected album "$albumName" to be tappable in selector');
+  final inkWell = find.ancestor(of: albumText, matching: find.byType(InkWell)).hitTestable();
+  final gestureDetector = find.ancestor(of: albumText, matching: find.byType(GestureDetector)).hitTestable();
+  if (inkWell.evaluate().isNotEmpty) {
+    await tester.tap(inkWell.first, warnIfMissed: false);
+  } else if (gestureDetector.evaluate().isNotEmpty) {
+    await tester.tap(gestureDetector.last, warnIfMissed: false);
+  } else {
+    await tester.tap(albumText.hitTestable().first, warnIfMissed: false);
+  }
+  await _pumpFor(tester, const Duration(milliseconds: 500));
+}
+
+Future<void> _createAlbumFromBottomSheet(WidgetTester tester, String albumName) async {
+  await _expandBottomSheet(tester, GeneralBottomSheet);
+  await pumpUntilFound(tester, find.byType(AddToAlbumHeader), timeout: const Duration(seconds: 30));
+
+  final createButton = find.descendant(
+    of: find.byType(AddToAlbumHeader),
+    matching: find.widgetWithText(TextButton, 'common_create_new_album'.tr()),
+  );
+  await pumpUntilFound(tester, createButton, timeout: const Duration(seconds: 30));
+  for (var attempt = 0; attempt < 4 && createButton.hitTestable().evaluate().isEmpty; attempt++) {
+    await _expandBottomSheet(tester, GeneralBottomSheet);
+  }
+  expect(
+    createButton.hitTestable(),
+    findsWidgets,
+    reason: 'Expected the create-new-album button to be tappable in the bottom sheet',
+  );
+  await tester.tap(createButton.hitTestable().last, warnIfMissed: false);
+
+  await pumpUntilFound(tester, find.byType(AlertDialog), timeout: const Duration(seconds: 30));
+  final nameField = find.descendant(of: find.byType(AlertDialog), matching: find.byType(TextFormField));
+  await pumpUntilFound(tester, nameField, timeout: const Duration(seconds: 30));
+  await tester.enterText(nameField.first, albumName);
+  await _pumpFor(tester, const Duration(milliseconds: 200));
+  FocusManager.instance.primaryFocus?.unfocus();
+  await _pumpFor(tester, const Duration(milliseconds: 300));
+
+  final dialogCreate = find.descendant(
+    of: find.byType(AlertDialog),
+    matching: find.widgetWithText(TextButton, 'create_album'.tr()),
+  );
+  await pumpUntilFound(tester, dialogCreate, timeout: const Duration(seconds: 30));
+  expect(dialogCreate.hitTestable(), findsWidgets, reason: 'Expected the dialog create-album button to be tappable');
+  await tester.tap(dialogCreate.hitTestable().last, warnIfMissed: false);
   await _pumpFor(tester, const Duration(milliseconds: 500));
 }
 
@@ -5857,6 +6165,33 @@ Future<Set<String>> _serverAlbumIdsByName(api.AlbumsApi albumsApi, String albumN
   return albums!.where((album) => album.albumName == albumName).map((album) => album.id).toSet();
 }
 
+Future<Set<String>> _waitForServerAlbumIdsByName(
+  WidgetTester tester,
+  api.AlbumsApi albumsApi,
+  String albumName,
+  bool Function(Set<String> ids) matches, {
+  required String reason,
+  Duration timeout = const Duration(seconds: 60),
+}) async {
+  var latest = const <String>{};
+  Object? lastError;
+  final end = DateTime.now().add(timeout);
+  while (DateTime.now().isBefore(end)) {
+    try {
+      latest = await _serverAlbumIdsByName(albumsApi, albumName);
+      if (matches(latest)) {
+        return latest;
+      }
+    } catch (error) {
+      lastError = error;
+    }
+    await _pumpFor(tester, const Duration(seconds: 1));
+  }
+
+  final sorted = latest.toList()..sort();
+  fail('$reason; latest server album ids=${sorted.join(', ')}; last error=$lastError');
+}
+
 Future<Set<String>> _waitForServerAssetIdsByOriginalFilename(
   WidgetTester tester,
   api.SearchApi searchApi,
@@ -5910,13 +6245,17 @@ Future<http.Response> _waitForSuccessfulResponse(
   WidgetTester tester,
   Future<http.Response> Function() request, {
   Set<int> acceptedStatusCodes = const {200},
+  Set<int> acceptedEmptyBodyStatusCodes = const {},
+  Duration timeout = const Duration(seconds: 40),
 }) async {
   http.Response? lastResponse;
   Object? lastError;
-  for (var attempt = 0; attempt < 20; attempt++) {
+  final end = DateTime.now().add(timeout);
+  while (DateTime.now().isBefore(end)) {
     try {
       final response = await request();
-      if (acceptedStatusCodes.contains(response.statusCode) && response.bodyBytes.isNotEmpty) {
+      final acceptsEmptyBody = acceptedEmptyBodyStatusCodes.contains(response.statusCode);
+      if (acceptedStatusCodes.contains(response.statusCode) && (response.bodyBytes.isNotEmpty || acceptsEmptyBody)) {
         return response;
       }
       lastResponse = response;
