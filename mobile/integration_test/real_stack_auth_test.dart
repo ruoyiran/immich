@@ -35,10 +35,13 @@ import 'package:immich_mobile/infrastructure/repositories/settings.repository.da
 import 'package:immich_mobile/infrastructure/repositories/storage.repository.dart';
 import 'package:immich_mobile/main.dart' as app;
 import 'package:immich_mobile/models/search/search_filter.model.dart';
+import 'package:immich_mobile/pages/library/locked/pin_auth.page.dart';
+import 'package:immich_mobile/pages/login/login.page.dart';
 import 'package:immich_mobile/presentation/pages/dev/main_timeline.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_album.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_favorite.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_library.page.dart';
+import 'package:immich_mobile/presentation/pages/drift_locked_folder.page.dart';
 import 'package:immich_mobile/presentation/pages/search/drift_search.page.dart';
 import 'package:immich_mobile/presentation/widgets/asset_viewer/asset_viewer.page.dart';
 import 'package:immich_mobile/presentation/widgets/asset_viewer/video_viewer.widget.dart';
@@ -63,6 +66,7 @@ import 'package:immich_mobile/providers/websocket.provider.dart';
 import 'package:immich_mobile/repositories/asset_api.repository.dart';
 import 'package:immich_mobile/repositories/auth_api.repository.dart';
 import 'package:immich_mobile/repositories/download.repository.dart';
+import 'package:immich_mobile/routing/router.dart';
 import 'package:immich_mobile/services/api.service.dart';
 import 'package:immich_mobile/services/background_upload.service.dart';
 import 'package:immich_mobile/services/foreground_upload.service.dart';
@@ -2979,6 +2983,121 @@ void main() async {
       );
     });
 
+    _realStackSessionTest(
+      'MOB-UI-034-$_caseSuffix',
+      'returns guarded deep links after login and avoids bad route stacks',
+      (tester) async {
+        tester.view.devicePixelRatio = 1.0;
+        tester.view.physicalSize = const Size(430, 932);
+        addTearDown(tester.view.reset);
+
+        await _loadUnauthenticatedApp(tester, overrideCancellation: true);
+        var container = _containerOfApp(tester);
+        var router = container.read(appRouterProvider);
+
+        unawaited(router.push(const TabShellRoute(children: [DriftLibraryRoute()])));
+        await _pumpUntil(
+          tester,
+          () => find.byType(LoginPage).evaluate().isNotEmpty,
+          timeout: const Duration(seconds: 30),
+        );
+        expect(Store.tryGet(StoreKey.accessToken), isNull);
+
+        await _login(tester, serverUrl: _serverUrl, email: _email, password: _password);
+        await _waitForAccessToken(tester);
+        await _waitForCurrentUser(_email, tester);
+        await _expectPrimaryNavigationState(
+          tester,
+          container,
+          tab: TabEnum.library,
+          selectedIndex: kLibraryTabIndex,
+          pageType: DriftLibraryPage,
+          expectedNavigationType: NavigationBar,
+        );
+        _expectRouteCount(router, DriftLibraryRoute.name, 1);
+
+        unawaited(router.push(const DriftFavoriteRoute()));
+        await _pumpUntil(
+          tester,
+          () => find.byType(DriftFavoritePage).evaluate().isNotEmpty,
+          timeout: const Duration(seconds: 30),
+        );
+        final favoriteRouteCount = _currentRouteCount(router, DriftFavoriteRoute.name);
+        expect(favoriteRouteCount, 1);
+
+        unawaited(router.push(const DriftFavoriteRoute()));
+        await _pumpFor(tester, const Duration(milliseconds: 800));
+        expect(find.byType(DriftFavoritePage), findsOneWidget);
+        expect(_currentRouteCount(router, DriftFavoriteRoute.name), favoriteRouteCount);
+
+        await tester.binding.handlePopRoute();
+        await _pumpFor(tester, const Duration(milliseconds: 800));
+        await _expectPrimaryNavigationState(
+          tester,
+          container,
+          tab: TabEnum.library,
+          selectedIndex: kLibraryTabIndex,
+          pageType: DriftLibraryPage,
+          expectedNavigationType: NavigationBar,
+        );
+
+        unawaited(router.push(const DriftLockedFolderRoute()));
+        await _pumpUntil(
+          tester,
+          () => find.byType(PinAuthPage).evaluate().isNotEmpty,
+          timeout: const Duration(seconds: 30),
+        );
+        expect(find.byType(DriftLockedFolderPage), findsNothing);
+        expect(_currentRouteCount(router, PinAuthRoute.name), 1);
+        expect(
+          find.text('setup_pin_code'.tr()).evaluate().isNotEmpty ||
+              find.text('enter_your_pin_code_subtitle'.tr()).evaluate().isNotEmpty,
+          isTrue,
+        );
+
+        await router.replaceAll([
+          const TabShellRoute(children: [MainTimelineRoute()]),
+        ]);
+        await _pumpFor(tester, const Duration(milliseconds: 800));
+        await _expectPrimaryNavigationState(
+          tester,
+          container,
+          tab: TabEnum.home,
+          selectedIndex: kPhotoTabIndex,
+          pageType: MainTimelinePage,
+          expectedNavigationType: NavigationBar,
+        );
+
+        unawaited(router.pushPath('/missing-mobile-route-034'));
+        await _pumpFor(tester, const Duration(seconds: 1));
+        await _expectPrimaryNavigationState(
+          tester,
+          container,
+          tab: TabEnum.home,
+          selectedIndex: kPhotoTabIndex,
+          pageType: MainTimelinePage,
+          expectedNavigationType: NavigationBar,
+        );
+        expect(find.byType(LoginPage), findsNothing);
+        expect(_currentRouteCount(router, MainTimelineRoute.name), 1);
+
+        await tester.binding.handlePopRoute();
+        await _pumpFor(tester, const Duration(milliseconds: 800));
+        container = _containerOfApp(tester);
+        router = container.read(appRouterProvider);
+        expect(Store.tryGet(StoreKey.accessToken), isNotNull);
+        await _expectPrimaryNavigationState(
+          tester,
+          container,
+          tab: TabEnum.home,
+          selectedIndex: kPhotoTabIndex,
+          pageType: MainTimelinePage,
+          expectedNavigationType: NavigationBar,
+        );
+        expect(_currentRouteCount(router, MainTimelineRoute.name), 1);
+      },
+    );
+
     if (_selectedCaseId.isNotEmpty && !_registeredSelectedCase) {
       test(_selectedCaseId, () => fail('No real stack auth test registered for $_selectedCaseId'));
     }
@@ -3755,6 +3874,28 @@ Future<void> _loadAuthenticatedApp(
   await _dismissFeatureMessageIfVisible(tester);
 }
 
+Future<void> _loadUnauthenticatedApp(
+  WidgetTester tester, {
+  bool overrideCancellation = false,
+  bool closeDriftOnDispose = true,
+}) async {
+  await EasyLocalization.ensureInitialized();
+  final (drift, _) = await Bootstrap.initDomain();
+  await Store.clear();
+
+  await tester.pumpWidget(
+    ProviderScope(
+      overrides: [
+        driftProvider.overrideWith(_driftOverrideForTest(drift, closeOnDispose: closeDriftOnDispose)),
+        if (overrideCancellation) cancellationProvider.overrideWithValue(Completer()),
+      ],
+      child: const app.MainWidget(),
+    ),
+  );
+  await EasyLocalization.ensureInitialized();
+  await _pumpFor(tester, const Duration(milliseconds: 500));
+}
+
 Drift Function(Ref ref) _driftOverrideForTest(Drift drift, {required bool closeOnDispose}) => (ref) {
   if (closeOnDispose) {
     ref.onDispose(() => unawaited(drift.close()));
@@ -4059,7 +4200,17 @@ Future<void> _expectPrimaryNavigationState(
   required Type pageType,
   required Type expectedNavigationType,
 }) async {
-  await _pumpUntil(tester, () => find.byType(pageType).evaluate().isNotEmpty, timeout: const Duration(seconds: 30));
+  try {
+    await _pumpUntil(tester, () => find.byType(pageType).evaluate().isNotEmpty, timeout: const Duration(seconds: 30));
+  } on TimeoutException catch (_) {
+    fail(
+      'Timed out waiting for $pageType. Current route stack: ${_routeStackDescription(container.read(appRouterProvider))}. '
+      'visible=$pageType:${find.byType(pageType).evaluate().length}, '
+      'offstage=$pageType:${find.byType(pageType, skipOffstage: false).evaluate().length}, '
+      'NavigationBar:${find.byType(NavigationBar, skipOffstage: false).evaluate().length}, '
+      'NavigationRail:${find.byType(NavigationRail, skipOffstage: false).evaluate().length}',
+    );
+  }
   expect(container.read(tabProvider), tab);
 
   if (expectedNavigationType == NavigationRail) {
@@ -4135,6 +4286,22 @@ Future<void> _setTestViewport(WidgetTester tester, Size size) async {
   tester.view.devicePixelRatio = 1.0;
   await tester.pump();
   await _pumpFor(tester, const Duration(milliseconds: 800));
+}
+
+int _currentRouteCount(AppRouter router, String routeName) {
+  return router.currentSegments.where((route) => route.name == routeName).length;
+}
+
+void _expectRouteCount(AppRouter router, String routeName, int count) {
+  expect(
+    _currentRouteCount(router, routeName),
+    count,
+    reason: 'Current route stack: ${router.currentSegments.map((route) => route.name).join(' > ')}',
+  );
+}
+
+String _routeStackDescription(AppRouter router) {
+  return router.currentSegments.map((route) => route.name).join(' > ');
 }
 
 Future<void> _runAndroidBackgroundUploadOnce() async {

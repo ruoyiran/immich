@@ -39,9 +39,10 @@ import 'package:openapi/api.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 
 class LoginForm extends HookConsumerWidget {
-  LoginForm({super.key});
+  LoginForm({super.key, this.onResult});
 
   final log = Logger('LoginForm');
+  final void Function(bool)? onResult;
 
   String? _validateUrl(String? url) => normalizeAndValidateServerUrl(url) ? null : 'login_form_err_invalid_url'.tr();
 
@@ -247,6 +248,16 @@ class LoginForm extends HookConsumerWidget {
 
     bool isSyncRemoteDeletionsMode() => Platform.isAndroid && Store.get(StoreKey.manageLocalMediaAndroid, false);
 
+    void finishSuccessfulLogin() {
+      final resultHandler = onResult;
+      if (resultHandler != null) {
+        resultHandler(true);
+        return;
+      }
+
+      unawaited(context.router.replaceAll([const TabShellRoute()]));
+    }
+
     Future<void> login() async {
       TextInput.finishAutofillContext();
 
@@ -278,7 +289,7 @@ class LoginForm extends HookConsumerWidget {
             return;
           }
 
-          unawaited(context.router.replaceAll([const TabShellRoute()]));
+          finishSuccessfulLogin();
           return;
         }
       } catch (error) {
@@ -378,7 +389,7 @@ class LoginForm extends HookConsumerWidget {
             }
 
             unawaited(ref.read(featureMessageServiceProvider).markSeen());
-            unawaited(context.router.replaceAll([const TabShellRoute()]));
+            finishSuccessfulLogin();
             return;
           }
         } catch (error, stack) {
