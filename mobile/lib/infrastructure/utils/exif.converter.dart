@@ -10,6 +10,7 @@ abstract final class ExifDtoConverter {
       orientation: dto.orientation.orElse(null),
       timeZone: dto.timeZone.orElse(null),
       dateTimeOriginal: dto.dateTimeOriginal.orElse(null),
+      rating: dto.rating.orElse(null),
       isFlipped: isOrientationFlipped(dto.orientation.orElse(null)),
       latitude: dto.latitude.orElse(null)?.toDouble(),
       longitude: dto.longitude.orElse(null)?.toDouble(),
