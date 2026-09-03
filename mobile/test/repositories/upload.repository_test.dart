@@ -293,7 +293,7 @@ void main() {
     expect(progress.last, bytes.length);
   });
 
-  test('resumable upload polls queued finalization without reporting 100 percent early', () async {
+  test('resumable upload only reports processing after queued finalization response', () async {
     final root = await Directory.systemTemp.createTemp('resumable-processing-test-');
     addTearDown(() => root.delete(recursive: true));
     final bytes = utf8.encode('queued');
@@ -383,7 +383,7 @@ void main() {
     expect(fullProgressAfterTerminal, [isTrue]);
     expect(processingBeforeTerminal, isNotEmpty);
     expect(processingBeforeTerminal, everyElement(isTrue));
-    expect(processingBeforePutResponse.first, isTrue);
+    expect(processingBeforePutResponse, everyElement(isFalse));
   });
 
   test('resumable upload rejects an unsafe server chunk recommendation', () async {

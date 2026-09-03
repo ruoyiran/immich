@@ -653,7 +653,6 @@ class UploadRepository {
                   uploadedOffset: offset,
                   totalBytes: size,
                   onProgress: onProgress,
-                  onBodyComplete: offset + length >= size ? onProcessing : null,
                 )
                 ..headers.addAll(_requestHeaders)
                 ..headers['Content-Type'] = 'application/octet-stream'
@@ -1060,7 +1059,6 @@ class _ProgressBytesRequest extends BaseRequest {
   final int uploadedOffset;
   final int totalBytes;
   final void Function(int bytes, int totalBytes)? onProgress;
-  final void Function()? onBodyComplete;
 
   _ProgressBytesRequest(
     super.method,
@@ -1069,7 +1067,6 @@ class _ProgressBytesRequest extends BaseRequest {
     required this.uploadedOffset,
     required this.totalBytes,
     required this.onProgress,
-    required this.onBodyComplete,
   }) : _body = body is Uint8List ? body : Uint8List.fromList(body) {
     contentLength = _body.length;
   }
@@ -1087,7 +1084,6 @@ class _ProgressBytesRequest extends BaseRequest {
       final uploaded = uploadedOffset + end;
       onProgress?.call(totalBytes > 0 && uploaded >= totalBytes ? totalBytes - 1 : uploaded, totalBytes);
     }
-    onBodyComplete?.call();
   }
 }
 

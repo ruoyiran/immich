@@ -2,9 +2,13 @@ import 'package:flutter/painting.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:immich_mobile/domain/models/asset/base_asset.model.dart';
 import 'package:immich_mobile/domain/models/settings_key.dart';
+import 'package:immich_mobile/domain/models/store.model.dart';
+import 'package:immich_mobile/domain/services/store.service.dart';
 import 'package:immich_mobile/infrastructure/repositories/settings.repository.dart';
+import 'package:immich_mobile/infrastructure/repositories/store.repository.dart';
 import 'package:immich_mobile/presentation/widgets/images/image_provider.dart';
 import 'package:immich_mobile/presentation/widgets/images/local_image_provider.dart';
+import 'package:immich_mobile/presentation/widgets/images/remote_image_provider.dart';
 
 import '../../../medium/repository_context.dart';
 import '../../../unit/factories/local_asset_factory.dart';
@@ -113,6 +117,42 @@ void main() {
       final provider = getThumbnailImageProvider(asset)! as LocalThumbProvider;
 
       expect(provider.checksum, 'abc');
+    });
+  });
+
+  group('thumbnail source selection', () {
+    late MediumRepositoryContext ctx;
+    late SettingsRepository settings;
+
+    setUp(() async {
+      ctx = MediumRepositoryContext();
+      await StoreService.init(storeRepository: DriftStoreRepository(ctx.db), listenUpdates: false);
+      await StoreService.I.put(StoreKey.serverEndpoint, 'http://localhost:3000');
+      settings = await SettingsRepository.ensureInitialized(ctx.db);
+      await settings.write(SettingsKey.imagePreferRemote, true);
+    });
+
+    tearDown(() async {
+      await SettingsRepository.reset();
+      await StoreService.I.dispose();
+      await ctx.dispose();
+    });
+
+    test('uses the local thumbnail for a remote asset with local original available', () {
+      final asset = RemoteAssetFactory.create(localId: 'local-asset-1');
+
+      final provider = getThumbnailImageProvider(asset)!;
+
+      expect(provider, isA<LocalThumbProvider>());
+      expect((provider as LocalThumbProvider).id, 'local-asset-1');
+    });
+
+    test('keeps preferring remote thumbnails when the remote thumbnail is materialized', () {
+      final asset = RemoteAssetFactory.create(localId: 'local-asset-1').copyWith(thumbHash: 'thumbhash-ready');
+
+      final provider = getThumbnailImageProvider(asset)!;
+
+      expect(provider, isA<RemoteImageProvider>());
     });
   });
 
