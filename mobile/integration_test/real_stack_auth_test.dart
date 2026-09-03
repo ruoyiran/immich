@@ -36,7 +36,9 @@ import 'package:immich_mobile/infrastructure/repositories/settings.repository.da
 import 'package:immich_mobile/infrastructure/repositories/storage.repository.dart';
 import 'package:immich_mobile/main.dart' as app;
 import 'package:immich_mobile/models/search/search_filter.model.dart';
+import 'package:immich_mobile/pages/backup/drift_backup.page.dart';
 import 'package:immich_mobile/pages/backup/drift_backup_album_selection.page.dart';
+import 'package:immich_mobile/pages/backup/drift_backup_options.page.dart';
 import 'package:immich_mobile/pages/library/locked/pin_auth.page.dart';
 import 'package:immich_mobile/pages/login/login.page.dart';
 import 'package:immich_mobile/presentation/pages/dev/main_timeline.page.dart';
@@ -47,6 +49,7 @@ import 'package:immich_mobile/presentation/pages/drift_locked_folder.page.dart';
 import 'package:immich_mobile/presentation/pages/search/drift_search.page.dart';
 import 'package:immich_mobile/presentation/widgets/asset_viewer/asset_viewer.page.dart';
 import 'package:immich_mobile/presentation/widgets/asset_viewer/video_viewer.widget.dart';
+import 'package:immich_mobile/presentation/widgets/backup/backup_toggle_button.widget.dart';
 import 'package:immich_mobile/presentation/widgets/images/thumbnail_tile.widget.dart';
 import 'package:immich_mobile/presentation/widgets/timeline/timeline.widget.dart';
 import 'package:immich_mobile/providers/api.provider.dart';
@@ -54,6 +57,7 @@ import 'package:immich_mobile/providers/asset_viewer/asset_viewer.provider.dart'
 import 'package:immich_mobile/providers/asset_viewer/video_player_provider.dart';
 import 'package:immich_mobile/providers/background_sync.provider.dart';
 import 'package:immich_mobile/providers/backup/backup_album.provider.dart';
+import 'package:immich_mobile/providers/backup/drift_backup.provider.dart';
 import 'package:immich_mobile/providers/gallery_permission.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/album.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/asset.provider.dart';
@@ -79,6 +83,7 @@ import 'package:immich_mobile/utils/semver.dart';
 import 'package:immich_mobile/widgets/asset_viewer/video_controls.dart';
 import 'package:immich_mobile/widgets/backup/drift_album_info_list_tile.dart';
 import 'package:immich_mobile/widgets/photo_view/photo_view.dart';
+import 'package:immich_mobile/widgets/settings/setting_list_tile.dart';
 import 'package:openapi/api.dart' as api;
 import 'package:path_provider/path_provider.dart';
 import 'package:photo_manager/photo_manager.dart' hide AssetType;
@@ -153,6 +158,14 @@ const _backupAlbumSelectionCameraAlbum = 'Camera';
 const _backupAlbumSelectionScreenshotsAlbum = 'Screenshots';
 const _backupAlbumSelectionDownloadAlbum = 'Download';
 const _backupAlbumSelectionDuplicateAlbum = 'ImmichE2ESameName035';
+const _backupSettingsAlbumName = String.fromEnvironment(
+  'IMMICH_E2E_BACKUP_SETTINGS_ALBUM_NAME',
+  defaultValue: 'ImmichE2EBackupSettings036',
+);
+const _backupSettingsAssetName = String.fromEnvironment(
+  'IMMICH_E2E_BACKUP_SETTINGS_ASSET_NAME',
+  defaultValue: 'immich-e2e-backup-settings-036.jpg',
+);
 
 var _registeredSelectedCase = false;
 
@@ -3232,6 +3245,197 @@ void main() async {
       },
     );
 
+    _realStackSessionTest(
+      'MOB-UI-036-$_caseSuffix',
+      'preserves backup toggles, network, charging, and background options',
+      (tester) async {
+        tester.view.devicePixelRatio = 1.0;
+        tester.view.physicalSize = const Size(430, 932);
+        addTearDown(tester.view.reset);
+
+        await _loadAuthenticatedApp(tester, overrideCancellation: true, closeDriftOnDispose: false);
+        final container = _containerOfApp(tester);
+        final drift = container.read(driftProvider);
+        final albumRepository = container.read(localAlbumRepository);
+        final router = container.read(appRouterProvider);
+        final apiService = container.read(apiServiceProvider);
+        final user = Store.tryGet(StoreKey.currentUser);
+        expect(user, isNotNull);
+
+        final originalSelections = await _albumBackupSelections(container);
+        final originalBackupEnabled = SettingsRepository.instance.appConfig.backup.enabled;
+        final originalCellularPhotos = SettingsRepository.instance.appConfig.backup.useCellularForPhotos;
+        final originalCellularVideos = SettingsRepository.instance.appConfig.backup.useCellularForVideos;
+        final originalRequireCharging = SettingsRepository.instance.appConfig.backup.requireCharging;
+        final originalTriggerDelay = SettingsRepository.instance.appConfig.backup.triggerDelay;
+        final originalSyncAlbums = SettingsRepository.instance.appConfig.backup.syncAlbums;
+        final beforeServerIds = await _serverAssetIdsByOriginalFilename(
+          apiService.searchApi,
+          _backupSettingsAssetName,
+        ).timeout(const Duration(seconds: 30));
+        final beforeServerAlbumIds = await _serverAlbumIdsByName(
+          apiService.albumsApi,
+          _backupSettingsAlbumName,
+        ).timeout(const Duration(seconds: 30));
+
+        addTearDown(() async {
+          try {
+            container.read(driftBackupProvider.notifier).stopForegroundBackup(reason: 'MOB-UI-036 cleanup');
+          } catch (_) {
+            // The ProviderScope may already have disposed the notifier.
+          }
+          await SettingsRepository.instance.write(SettingsKey.backupEnabled, originalBackupEnabled);
+          await SettingsRepository.instance.write(SettingsKey.backupUseCellularForPhotos, originalCellularPhotos);
+          await SettingsRepository.instance.write(SettingsKey.backupUseCellularForVideos, originalCellularVideos);
+          await SettingsRepository.instance.write(SettingsKey.backupRequireCharging, originalRequireCharging);
+          await SettingsRepository.instance.write(SettingsKey.backupTriggerDelay, originalTriggerDelay);
+          await SettingsRepository.instance.write(SettingsKey.backupSyncAlbums, originalSyncAlbums);
+          await _restoreAlbumBackupSelections(albumRepository, originalSelections);
+
+          final afterServerIds = await _serverAssetIdsByOriginalFilename(
+            apiService.searchApi,
+            _backupSettingsAssetName,
+          );
+          for (final remoteId in afterServerIds.difference(beforeServerIds)) {
+            await _deleteTestAssetBestEffort(apiService.assetsApi, remoteId);
+          }
+          final afterServerAlbumIds = await _serverAlbumIdsByName(apiService.albumsApi, _backupSettingsAlbumName);
+          for (final albumId in afterServerAlbumIds.difference(beforeServerAlbumIds)) {
+            await _deleteAlbumBestEffort(apiService.albumsApi, albumId);
+          }
+          await drift.close();
+        });
+
+        await SettingsRepository.instance.write(SettingsKey.backupEnabled, false);
+        await SettingsRepository.instance.write(SettingsKey.backupUseCellularForPhotos, false);
+        await SettingsRepository.instance.write(SettingsKey.backupUseCellularForVideos, false);
+        await SettingsRepository.instance.write(SettingsKey.backupRequireCharging, false);
+        await SettingsRepository.instance.write(SettingsKey.backupTriggerDelay, 5);
+        await SettingsRepository.instance.write(SettingsKey.backupSyncAlbums, false);
+        await _clearAlbumBackupSelections(container);
+
+        final albums = await _waitForBackupAlbumFixtures(tester, container, requiredNames: {_backupSettingsAlbumName});
+        final settingsAlbum = _singleAlbumNamed(albums, _backupSettingsAlbumName);
+        await albumRepository.upsert(settingsAlbum.copyWith(backupSelection: BackupSelection.selected));
+        await container.read(backupAlbumProvider.notifier).getAll();
+
+        final initialCounts = await container.read(foregroundUploadServiceProvider).getBackupCounts(user!.id);
+        expect(
+          initialCounts.total,
+          greaterThanOrEqualTo(1),
+          reason: 'Expected the settings fixture album to be in scope',
+        );
+        expect(await container.read(backgroundUploadServiceProvider).getActiveTasks(kBackupGroup), isEmpty);
+
+        unawaited(router.push(const DriftBackupRoute()));
+        await _pumpUntil(
+          tester,
+          () => find.byType(DriftBackupPage).evaluate().isNotEmpty,
+          timeout: const Duration(seconds: 30),
+        );
+        await pumpUntilFound(tester, find.byType(BackupToggleButton), timeout: const Duration(seconds: 30));
+        expect(find.textContaining(_backupSettingsAlbumName), findsWidgets);
+        _expectBackupPageSwitchValue(tester, false);
+
+        await _setBackupPageSwitch(tester, true);
+        await _waitForBackupSetting(tester, SettingsKey.backupEnabled, true);
+        _expectBackupPageSwitchValue(tester, true);
+
+        tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+        tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+        await _pumpFor(tester, const Duration(milliseconds: 500));
+        expect(SettingsRepository.instance.appConfig.backup.enabled, isTrue);
+        await _setBackupPageSwitch(tester, false);
+        await _waitForBackupSetting(tester, SettingsKey.backupEnabled, false);
+        expect(container.read(driftBackupProvider).uploadItems, isEmpty);
+
+        await _openDriftBackupOptionsPage(tester);
+        await _expectBackupOptionSwitch(tester, titleKey: 'videos', expected: false);
+        await _expectBackupOptionSwitch(tester, titleKey: 'photos', expected: false);
+        await _expectBackupOptionSwitch(tester, titleKey: 'charging', expected: false);
+        await _expectBackupOptionSwitch(tester, titleKey: 'sync_albums', expected: false);
+        expect(find.text('network_requirement_videos_upload'.tr()), findsWidgets);
+        expect(find.text('network_requirement_photos_upload'.tr()), findsWidgets);
+        expect(find.text('charging_requirement_mobile_backup'.tr()), findsWidgets);
+
+        await _setBackupOptionSwitch(
+          tester,
+          titleKey: 'videos',
+          settingKey: SettingsKey.backupUseCellularForVideos,
+          expected: true,
+        );
+        await _setBackupOptionSwitch(
+          tester,
+          titleKey: 'photos',
+          settingKey: SettingsKey.backupUseCellularForPhotos,
+          expected: true,
+        );
+        await _setBackupOptionSwitch(
+          tester,
+          titleKey: 'charging',
+          settingKey: SettingsKey.backupRequireCharging,
+          expected: true,
+        );
+        await _setBackupDelaySlider(tester, 2);
+        await _waitForBackupSetting(tester, SettingsKey.backupTriggerDelay, 120);
+
+        await _setBackupOptionSwitch(
+          tester,
+          titleKey: 'sync_albums',
+          settingKey: SettingsKey.backupSyncAlbums,
+          expected: true,
+        );
+        await _ensureBackupOptionTextVisible(tester, 'organize_into_albums');
+        expect(find.text('organize_into_albums'.tr()), findsWidgets);
+        await _setBackupOptionSwitch(
+          tester,
+          titleKey: 'sync_albums',
+          settingKey: SettingsKey.backupSyncAlbums,
+          expected: false,
+        );
+        await _pumpUntil(
+          tester,
+          () => find.text('organize_into_albums'.tr()).evaluate().isEmpty,
+          timeout: const Duration(seconds: 10),
+        );
+        await _setBackupOptionSwitch(
+          tester,
+          titleKey: 'sync_albums',
+          settingKey: SettingsKey.backupSyncAlbums,
+          expected: true,
+        );
+
+        await router.maybePop();
+        await _pumpUntil(
+          tester,
+          () => find.byType(DriftBackupOptionsPage).evaluate().isEmpty,
+          timeout: const Duration(seconds: 30),
+        );
+        await _openDriftBackupOptionsPage(tester);
+        await _expectBackupOptionSwitch(tester, titleKey: 'videos', expected: true);
+        await _expectBackupOptionSwitch(tester, titleKey: 'photos', expected: true);
+        await _expectBackupOptionSwitch(tester, titleKey: 'charging', expected: true);
+        await _expectBackupOptionSwitch(tester, titleKey: 'sync_albums', expected: true);
+        expect(SettingsRepository.instance.appConfig.backup.triggerDelay, 120);
+
+        await router.maybePop();
+        await _pumpUntil(
+          tester,
+          () => find.byType(DriftBackupOptionsPage).evaluate().isEmpty,
+          timeout: const Duration(seconds: 30),
+        );
+        await _setBackupPageSwitch(tester, true);
+        await _waitForBackupSetting(tester, SettingsKey.backupEnabled, true);
+        expect(SettingsRepository.instance.appConfig.backup.useCellularForPhotos, isTrue);
+        expect(SettingsRepository.instance.appConfig.backup.useCellularForVideos, isTrue);
+        expect(SettingsRepository.instance.appConfig.backup.requireCharging, isTrue);
+        expect(SettingsRepository.instance.appConfig.backup.syncAlbums, isTrue);
+        expect(SettingsRepository.instance.appConfig.backup.triggerDelay, 120);
+        await _setBackupPageSwitch(tester, false);
+        await _waitForBackupSetting(tester, SettingsKey.backupEnabled, false);
+      },
+    );
+
     if (_selectedCaseId.isNotEmpty && !_registeredSelectedCase) {
       test(_selectedCaseId, () => fail('No real stack auth test registered for $_selectedCaseId'));
     }
@@ -4174,7 +4378,7 @@ Future<List<LocalAlbum>> _waitForBackupAlbumFixtures(
   WidgetTester tester,
   ProviderContainer container, {
   required Set<String> requiredNames,
-  required String duplicatedName,
+  String? duplicatedName,
 }) async {
   var albums = <LocalAlbum>[];
   for (var attempt = 0; attempt < 12; attempt++) {
@@ -4183,18 +4387,17 @@ Future<List<LocalAlbum>> _waitForBackupAlbumFixtures(
     albums = await container.read(localAlbumServiceProvider).getAll();
     final names = albums.map((album) => album.name).toSet();
     final hasRequired = requiredNames.every(names.contains);
-    final duplicateCount = albums.where((album) => album.name == duplicatedName).length;
-    if (hasRequired && duplicateCount >= 2) {
+    final hasDuplicatedName =
+        duplicatedName == null || albums.where((album) => album.name == duplicatedName).length >= 2;
+    if (hasRequired && hasDuplicatedName) {
       return albums;
     }
     await _pumpFor(tester, const Duration(seconds: 2));
   }
 
   final seenNames = albums.map((album) => album.name).toSet().toList()..sort();
-  fail(
-    'Expected backup album fixtures $requiredNames and two "$duplicatedName" albums; '
-    'saw ${seenNames.join(', ')}',
-  );
+  final duplicateExpectation = duplicatedName == null ? '' : ' and two "$duplicatedName" albums';
+  fail('Expected backup album fixtures $requiredNames$duplicateExpectation; saw ${seenNames.join(', ')}');
 }
 
 LocalAlbum _singleAlbumNamed(List<LocalAlbum> albums, String name) {
@@ -4334,6 +4537,105 @@ Future<void> _popBackupAlbumSelectionPage(WidgetTester tester) async {
     tester,
     () => find.byType(DriftBackupAlbumSelectionPage).evaluate().isEmpty,
     timeout: const Duration(seconds: 30),
+  );
+}
+
+Finder _backupPageSwitchFinder() {
+  return find.descendant(of: find.byType(BackupToggleButton), matching: find.byType(Switch));
+}
+
+void _expectBackupPageSwitchValue(WidgetTester tester, bool expected) {
+  final switchFinder = _backupPageSwitchFinder();
+  expect(switchFinder, findsOneWidget);
+  expect(tester.widget<Switch>(switchFinder).value, expected);
+}
+
+Future<void> _setBackupPageSwitch(WidgetTester tester, bool expected) async {
+  final switchFinder = _backupPageSwitchFinder();
+  expect(switchFinder, findsOneWidget);
+  if (tester.widget<Switch>(switchFinder).value == expected) {
+    return;
+  }
+
+  await tester.tap(switchFinder);
+  await _pumpFor(tester, const Duration(milliseconds: 500));
+  _expectBackupPageSwitchValue(tester, expected);
+}
+
+Future<void> _openDriftBackupOptionsPage(WidgetTester tester) async {
+  final settingsButton = find.descendant(
+    of: find.byType(DriftBackupPage),
+    matching: find.byIcon(Icons.settings_outlined),
+  );
+  await pumpUntilFound(tester, settingsButton, timeout: const Duration(seconds: 30));
+  await tester.tap(settingsButton.last);
+  await _pumpUntil(
+    tester,
+    () => find.byType(DriftBackupOptionsPage).evaluate().isNotEmpty,
+    timeout: const Duration(seconds: 30),
+  );
+}
+
+Future<void> _ensureBackupOptionTextVisible(WidgetTester tester, String titleKey) async {
+  final text = find.text(titleKey.tr());
+  if (text.evaluate().isNotEmpty) {
+    await tester.ensureVisible(text.first);
+    await _pumpFor(tester, const Duration(milliseconds: 200));
+    return;
+  }
+
+  final scrollable = find.descendant(of: find.byType(DriftBackupOptionsPage), matching: find.byType(Scrollable));
+  expect(scrollable, findsWidgets, reason: 'Expected backup options to be scrollable before looking for $titleKey');
+  try {
+    await tester.scrollUntilVisible(text, 450, scrollable: scrollable.first, maxScrolls: 20);
+  } catch (_) {
+    await tester.scrollUntilVisible(text, -450, scrollable: scrollable.first, maxScrolls: 20);
+  }
+  await _pumpFor(tester, const Duration(milliseconds: 200));
+}
+
+Finder _backupOptionSwitchFinder(String titleKey) {
+  final tile = find.ancestor(of: find.text(titleKey.tr()), matching: find.byType(SettingListTile));
+  return find.descendant(of: tile, matching: find.byType(Switch));
+}
+
+Future<void> _expectBackupOptionSwitch(WidgetTester tester, {required String titleKey, required bool expected}) async {
+  await _ensureBackupOptionTextVisible(tester, titleKey);
+  final switchFinder = _backupOptionSwitchFinder(titleKey);
+  expect(switchFinder, findsOneWidget);
+  expect(tester.widget<Switch>(switchFinder).value, expected, reason: 'Unexpected value for ${titleKey.tr()}');
+}
+
+Future<void> _setBackupOptionSwitch(
+  WidgetTester tester, {
+  required String titleKey,
+  required SettingsKey<bool> settingKey,
+  required bool expected,
+}) async {
+  await _ensureBackupOptionTextVisible(tester, titleKey);
+  final switchFinder = _backupOptionSwitchFinder(titleKey);
+  expect(switchFinder, findsOneWidget);
+  if (tester.widget<Switch>(switchFinder).value != expected) {
+    await tester.tap(switchFinder);
+    await _waitForBackupSetting(tester, settingKey, expected);
+  }
+  await _expectBackupOptionSwitch(tester, titleKey: titleKey, expected: expected);
+}
+
+Future<void> _setBackupDelaySlider(WidgetTester tester, int expectedSliderValue) async {
+  await _ensureBackupOptionTextVisible(tester, 'charging');
+  final slider = find.descendant(of: find.byType(DriftBackupOptionsPage), matching: find.byType(Slider));
+  expect(slider, findsOneWidget);
+  final rect = tester.getRect(slider);
+  await tester.tapAt(Offset(rect.left + rect.width * (expectedSliderValue / 3), rect.center.dy));
+  await _pumpFor(tester, const Duration(milliseconds: 500));
+}
+
+Future<void> _waitForBackupSetting<T>(WidgetTester tester, SettingsKey<T> settingKey, T expected) async {
+  await _pumpUntil(
+    tester,
+    () => SettingsRepository.instance.appConfig.read(settingKey) == expected,
+    timeout: const Duration(seconds: 10),
   );
 }
 
@@ -4669,6 +4971,12 @@ Future<Set<String>> _serverAssetIdsByOriginalFilename(api.SearchApi searchApi, S
   final response = await searchApi.searchAssets(_metadataSearchDto(filename: filename, type: api.AssetTypeEnum.IMAGE));
   expect(response, isNotNull, reason: 'Expected search response for $filename');
   return _serverSearchAssetIds(response!);
+}
+
+Future<Set<String>> _serverAlbumIdsByName(api.AlbumsApi albumsApi, String albumName) async {
+  final albums = await albumsApi.getAllAlbums(name: albumName, isOwned: true);
+  expect(albums, isNotNull, reason: 'Expected album search response for $albumName');
+  return albums!.where((album) => album.albumName == albumName).map((album) => album.id).toSet();
 }
 
 Future<Set<String>> _waitForServerAssetIdsByOriginalFilename(
