@@ -9,15 +9,18 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:http/http.dart' as http;
+import 'package:immich_mobile/constants/constants.dart';
 import 'package:immich_mobile/constants/enums.dart';
 import 'package:immich_mobile/domain/models/asset/base_asset.model.dart';
 import 'package:immich_mobile/domain/models/events.model.dart';
 import 'package:immich_mobile/domain/models/store.model.dart';
+import 'package:immich_mobile/domain/models/sync_event.model.dart';
 import 'package:immich_mobile/domain/models/timeline.model.dart';
 import 'package:immich_mobile/domain/models/user.model.dart';
 import 'package:immich_mobile/domain/services/timeline.service.dart';
 import 'package:immich_mobile/domain/utils/event_stream.dart';
 import 'package:immich_mobile/entities/store.entity.dart';
+import 'package:immich_mobile/infrastructure/repositories/db.repository.dart';
 import 'package:immich_mobile/infrastructure/repositories/storage.repository.dart';
 import 'package:immich_mobile/main.dart' as app;
 import 'package:immich_mobile/presentation/widgets/asset_viewer/asset_viewer.page.dart';
@@ -30,7 +33,9 @@ import 'package:immich_mobile/providers/asset_viewer/video_player_provider.dart'
 import 'package:immich_mobile/providers/background_sync.provider.dart';
 import 'package:immich_mobile/providers/gallery_permission.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/album.provider.dart';
+import 'package:immich_mobile/providers/infrastructure/cancel.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/db.provider.dart';
+import 'package:immich_mobile/providers/infrastructure/sync.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/timeline.provider.dart';
 import 'package:immich_mobile/repositories/asset_api.repository.dart';
 import 'package:immich_mobile/repositories/auth_api.repository.dart';
@@ -38,6 +43,7 @@ import 'package:immich_mobile/repositories/download.repository.dart';
 import 'package:immich_mobile/services/api.service.dart';
 import 'package:immich_mobile/services/foreground_upload.service.dart';
 import 'package:immich_mobile/utils/bootstrap.dart';
+import 'package:immich_mobile/utils/semver.dart';
 import 'package:immich_mobile/widgets/asset_viewer/video_controls.dart';
 import 'package:immich_mobile/widgets/photo_view/photo_view.dart';
 import 'package:openapi/api.dart' as api;
@@ -747,6 +753,50 @@ void main() async {
       await _waitForVideoPositionAfter(tester, container, video.id, tailPosition);
     });
 
+    _realStackSessionTest('MOB-REAL-019-$_caseSuffix', 'applies full sync stream and persists acknowledgements', (
+      tester,
+    ) async {
+      final (container, drift) = await _loadAuthenticatedSyncContainer();
+      addTearDown(container.dispose);
+
+      await container.read(syncApiRepositoryProvider).deleteSyncAck(_allReplayableSyncAckTypes);
+      await Store.delete(StoreKey.syncMigrationStatus);
+      await container.read(syncStreamRepositoryProvider).reset();
+
+      final emptyCounts = await _remoteSyncRowCounts(drift);
+      expect(
+        emptyCounts.values.every((count) => count == 0),
+        isTrue,
+        reason: 'Expected a fresh local remote-sync database, got $emptyCounts',
+      );
+
+      final expectedEvents = await _collectSyncStreamEvents(container);
+      expect(expectedEvents, isNotEmpty, reason: 'Expected the real sync stream to return backfill events');
+      _expectRealSyncCoverage(expectedEvents);
+
+      final expectedRows = _expectedRemoteSyncRowCounts(expectedEvents);
+      expect(expectedRows['remote_asset_entity'], greaterThanOrEqualTo(_timelineMinimumAssetCount));
+      expect(expectedRows['remote_exif_entity'], greaterThan(0));
+
+      final syncSuccess = await container.read(syncStreamServiceProvider).sync();
+      expect(syncSuccess, isTrue);
+
+      final firstRows = await _remoteSyncRowCounts(drift);
+      _expectRemoteSyncRows(firstRows, expectedRows, label: 'first sync');
+
+      final firstAckSet = await _syncAckSet(container);
+      _expectAckCoverage(firstAckSet, expectedEvents);
+
+      final secondSyncSuccess = await container.read(syncStreamServiceProvider).sync();
+      expect(secondSyncSuccess, isTrue);
+
+      final secondRows = await _remoteSyncRowCounts(drift);
+      expect(secondRows, firstRows, reason: 'Second sync should not duplicate Drift rows');
+
+      final secondAckSet = await _syncAckSet(container);
+      expect(secondAckSet, containsAll(firstAckSet), reason: 'ACKs from the first sync should remain persisted');
+    });
+
     if (_selectedCaseId.isNotEmpty && !_registeredSelectedCase) {
       test(_selectedCaseId, () => fail('No real stack auth test registered for $_selectedCaseId'));
     }
@@ -767,6 +817,300 @@ Future<void> _exerciseTimelineUiPagination(WidgetTester tester) async {
   for (var i = 0; i < 4; i++) {
     await tester.fling(scrollable.first, const Offset(0, 1200), 1500);
     await _pumpFor(tester, const Duration(milliseconds: 700));
+  }
+}
+
+final _allReplayableSyncAckTypes = api.SyncEntityType.values.toList(growable: false);
+
+const _remoteSyncTableNames = [
+  'auth_user_entity',
+  'user_entity',
+  'partner_entity',
+  'remote_asset_entity',
+  'remote_exif_entity',
+  'remote_asset_cloud_id_entity',
+  'asset_edit_entity',
+  'remote_album_entity',
+  'remote_album_user_entity',
+  'remote_album_asset_entity',
+  'memory_entity',
+  'memory_asset_entity',
+  'stack_entity',
+  'user_metadata_entity',
+  'person_entity',
+  'asset_face_entity',
+  'asset_ocr_entity',
+];
+
+const _assetUpsertSyncTypes = {
+  api.SyncEntityType.assetV1,
+  api.SyncEntityType.assetV2,
+  api.SyncEntityType.partnerAssetV1,
+  api.SyncEntityType.partnerAssetV2,
+  api.SyncEntityType.partnerAssetBackfillV1,
+  api.SyncEntityType.partnerAssetBackfillV2,
+  api.SyncEntityType.albumAssetCreateV1,
+  api.SyncEntityType.albumAssetCreateV2,
+  api.SyncEntityType.albumAssetUpdateV1,
+  api.SyncEntityType.albumAssetUpdateV2,
+  api.SyncEntityType.albumAssetBackfillV1,
+  api.SyncEntityType.albumAssetBackfillV2,
+};
+
+const _assetDeleteSyncTypes = {api.SyncEntityType.assetDeleteV1, api.SyncEntityType.partnerAssetDeleteV1};
+
+const _exifUpsertSyncTypes = {
+  api.SyncEntityType.assetExifV1,
+  api.SyncEntityType.partnerAssetExifV1,
+  api.SyncEntityType.partnerAssetExifBackfillV1,
+  api.SyncEntityType.albumAssetExifCreateV1,
+  api.SyncEntityType.albumAssetExifUpdateV1,
+  api.SyncEntityType.albumAssetExifBackfillV1,
+};
+
+const _albumUpsertSyncTypes = {api.SyncEntityType.albumV1, api.SyncEntityType.albumV2};
+
+const _albumAssetUpsertSyncTypes = {api.SyncEntityType.albumToAssetV1, api.SyncEntityType.albumToAssetBackfillV1};
+
+const _stackUpsertSyncTypes = {
+  api.SyncEntityType.stackV1,
+  api.SyncEntityType.partnerStackV1,
+  api.SyncEntityType.partnerStackBackfillV1,
+};
+
+const _stackDeleteSyncTypes = {api.SyncEntityType.stackDeleteV1, api.SyncEntityType.partnerStackDeleteV1};
+
+const _assetFaceUpsertSyncTypes = {api.SyncEntityType.assetFaceV1, api.SyncEntityType.assetFaceV2};
+
+Future<List<SyncEvent>> _collectSyncStreamEvents(ProviderContainer container) async {
+  final apiService = container.read(apiServiceProvider);
+  final serverVersion = await apiService.serverInfoApi.getServerVersion();
+  expect(serverVersion, isNotNull);
+
+  final events = <SyncEvent>[];
+  await container
+      .read(syncApiRepositoryProvider)
+      .streamChanges(
+        (batch, _, _) async {
+          events.addAll(batch);
+        },
+        serverVersion: SemVer(major: serverVersion!.major, minor: serverVersion.minor, patch: serverVersion.patch_),
+        initialBatchSize: 25,
+        batchSize: 50,
+      );
+  return events;
+}
+
+void _expectRealSyncCoverage(List<SyncEvent> events) {
+  final eventTypes = events.map((event) => event.type).toSet();
+  final logicalTypes = _logicalSyncTypes(events);
+  expect(logicalTypes, containsAll([api.SyncEntityType.authUserV1, api.SyncEntityType.userV1]));
+  expect(eventTypes.intersection(_assetUpsertSyncTypes), isNotEmpty, reason: 'Expected asset sync events');
+  expect(eventTypes, contains(api.SyncEntityType.assetExifV1));
+  expect(
+    logicalTypes.intersection(_albumUpsertSyncTypes),
+    isNotEmpty,
+    reason: 'Expected album sync events or checkpoints',
+  );
+  expect(
+    logicalTypes.intersection(_assetFaceUpsertSyncTypes),
+    isNotEmpty,
+    reason: 'Expected face sync events or checkpoints',
+  );
+  expect(logicalTypes, containsAll([api.SyncEntityType.personV1, api.SyncEntityType.syncCompleteV1]));
+
+  final syncedMediaTypes = events
+      .where((event) => _assetUpsertSyncTypes.contains(event.type))
+      .map((event) => (event.data as dynamic).type)
+      .toSet();
+  expect(syncedMediaTypes, containsAll([api.AssetTypeEnum.IMAGE, api.AssetTypeEnum.VIDEO]));
+}
+
+Set<api.SyncEntityType> _logicalSyncTypes(List<SyncEvent> events) {
+  final types = <api.SyncEntityType>{};
+  for (final event in events) {
+    if (event.type == api.SyncEntityType.syncAckV1) {
+      final ackType = _syncEntityTypeFromAck(event.ack);
+      if (ackType != null) {
+        types.add(ackType);
+      }
+    } else {
+      types.add(event.type);
+    }
+  }
+  return types;
+}
+
+api.SyncEntityType? _syncEntityTypeFromAck(String ack) {
+  final separator = ack.indexOf('|');
+  final value = separator < 0 ? ack : ack.substring(0, separator);
+  return api.SyncEntityType.fromJson(value);
+}
+
+Map<String, int> _expectedRemoteSyncRowCounts(List<SyncEvent> events) {
+  final authUsers = <String>{};
+  final users = <String>{};
+  final partners = <String>{};
+  final assets = <String>{};
+  final exifs = <String>{};
+  final cloudIds = <String>{};
+  final assetEdits = <String>{};
+  final albums = <String>{};
+  final albumUsers = <String>{};
+  final albumAssets = <String>{};
+  final memories = <String>{};
+  final memoryAssets = <String>{};
+  final stacks = <String>{};
+  final userMetadata = <String>{};
+  final people = <String>{};
+  final faces = <String>{};
+  final ocrRows = <String>{};
+
+  for (final event in events) {
+    final data = event.data as dynamic;
+    switch (event.type) {
+      case api.SyncEntityType.authUserV1:
+        authUsers.add(data.id as String);
+      case api.SyncEntityType.userV1:
+        users.add(data.id as String);
+      case api.SyncEntityType.userDeleteV1:
+        users.remove(data.userId as String);
+      case api.SyncEntityType.partnerV1:
+        partners.add('${data.sharedById}|${data.sharedWithId}');
+      case api.SyncEntityType.partnerDeleteV1:
+        partners.remove('${data.sharedById}|${data.sharedWithId}');
+      case final type when _assetUpsertSyncTypes.contains(type):
+        assets.add(data.id as String);
+      case final type when _assetDeleteSyncTypes.contains(type):
+        assets.remove(data.assetId as String);
+      case final type when _exifUpsertSyncTypes.contains(type):
+        exifs.add(data.assetId as String);
+      case api.SyncEntityType.assetMetadataV1:
+        if (data.key == kMobileMetadataKey) {
+          cloudIds.add(data.assetId as String);
+        }
+      case api.SyncEntityType.assetMetadataDeleteV1:
+        if (data.key == kMobileMetadataKey) {
+          cloudIds.remove(data.assetId as String);
+        }
+      case api.SyncEntityType.assetEditV1:
+        assetEdits.add(data.id as String);
+      case api.SyncEntityType.assetEditDeleteV1:
+        assetEdits.remove(data.editId as String);
+      case api.SyncEntityType.albumV1:
+        albums.add(data.id as String);
+        albumUsers.add('${data.id}|${data.ownerId}');
+      case api.SyncEntityType.albumV2:
+        albums.add(data.id as String);
+      case api.SyncEntityType.albumDeleteV1:
+        albums.remove(data.albumId as String);
+      case api.SyncEntityType.albumUserV1:
+      case api.SyncEntityType.albumUserBackfillV1:
+        albumUsers.add('${data.albumId}|${data.userId}');
+      case api.SyncEntityType.albumUserDeleteV1:
+        albumUsers.remove('${data.albumId}|${data.userId}');
+      case final type when _albumAssetUpsertSyncTypes.contains(type):
+        albumAssets.add('${data.albumId}|${data.assetId}');
+      case api.SyncEntityType.albumToAssetDeleteV1:
+        albumAssets.remove('${data.albumId}|${data.assetId}');
+      case api.SyncEntityType.memoryV1:
+        memories.add(data.id as String);
+      case api.SyncEntityType.memoryDeleteV1:
+        memories.remove(data.memoryId as String);
+      case api.SyncEntityType.memoryToAssetV1:
+        memoryAssets.add('${data.memoryId}|${data.assetId}');
+      case api.SyncEntityType.memoryToAssetDeleteV1:
+        memoryAssets.remove('${data.memoryId}|${data.assetId}');
+      case final type when _stackUpsertSyncTypes.contains(type):
+        stacks.add(data.id as String);
+      case final type when _stackDeleteSyncTypes.contains(type):
+        stacks.remove(data.stackId as String);
+      case api.SyncEntityType.userMetadataV1:
+        userMetadata.add('${data.userId}|${data.key}');
+      case api.SyncEntityType.userMetadataDeleteV1:
+        userMetadata.remove('${data.userId}|${data.key}');
+      case api.SyncEntityType.personV1:
+        people.add(data.id as String);
+      case api.SyncEntityType.personDeleteV1:
+        people.remove(data.personId as String);
+      case final type when _assetFaceUpsertSyncTypes.contains(type):
+        faces.add(data.id as String);
+      case api.SyncEntityType.assetFaceDeleteV1:
+        faces.remove(data.assetFaceId as String);
+      case api.SyncEntityType.assetOcrV1:
+        ocrRows.add(data.id as String);
+      case api.SyncEntityType.assetOcrDeleteV1:
+        ocrRows.remove(data.id as String);
+      case api.SyncEntityType.syncAckV1:
+      case api.SyncEntityType.syncResetV1:
+      case api.SyncEntityType.syncCompleteV1:
+      case _:
+        break;
+    }
+  }
+
+  return {
+    'auth_user_entity': authUsers.length,
+    'user_entity': users.length,
+    'partner_entity': partners.length,
+    'remote_asset_entity': assets.length,
+    'remote_exif_entity': exifs.length,
+    'remote_asset_cloud_id_entity': cloudIds.length,
+    'asset_edit_entity': assetEdits.length,
+    'remote_album_entity': albums.length,
+    'remote_album_user_entity': albumUsers.length,
+    'remote_album_asset_entity': albumAssets.length,
+    'memory_entity': memories.length,
+    'memory_asset_entity': memoryAssets.length,
+    'stack_entity': stacks.length,
+    'user_metadata_entity': userMetadata.length,
+    'person_entity': people.length,
+    'asset_face_entity': faces.length,
+    'asset_ocr_entity': ocrRows.length,
+  };
+}
+
+Future<Map<String, int>> _remoteSyncRowCounts(Drift drift) async {
+  final counts = <String, int>{};
+  for (final table in _remoteSyncTableNames) {
+    counts[table] = await _rowCount(drift, table);
+  }
+  return counts;
+}
+
+Future<int> _rowCount(Drift drift, String table) async {
+  final row = await drift.customSelect('SELECT COUNT(*) AS count FROM $table').getSingle();
+  return row.read<int>('count');
+}
+
+void _expectRemoteSyncRows(Map<String, int> actualRows, Map<String, int> expectedRows, {required String label}) {
+  for (final entry in expectedRows.entries) {
+    expect(
+      actualRows[entry.key],
+      entry.value,
+      reason: '$label row mismatch for ${entry.key}: expected $expectedRows, got $actualRows',
+    );
+  }
+}
+
+Future<Set<String>> _syncAckSet(ProviderContainer container) async {
+  final syncAcks = await container.read(apiServiceProvider).syncApi.getSyncAck();
+  return {for (final ack in syncAcks ?? <api.SyncAckDto>[]) '${ack.type.toJson()}\t${ack.ack}'};
+}
+
+void _expectAckCoverage(Set<String> ackSet, List<SyncEvent> expectedEvents) {
+  final ackedTypes = {
+    for (final ack in ackSet) api.SyncEntityType.fromJson(ack.split('\t').first),
+  }.whereType<api.SyncEntityType>().toSet();
+
+  final expectedTypes = _logicalSyncTypes(expectedEvents);
+  final requiredTypes = {
+    for (final type in expectedTypes)
+      if (type != api.SyncEntityType.syncAckV1 && type != api.SyncEntityType.syncResetV1) type,
+  };
+
+  for (final type in requiredTypes) {
+    expect(ackedTypes, contains(type), reason: 'Expected persisted sync ACK for ${type.toJson()} in $ackSet');
   }
 }
 
@@ -1174,6 +1518,22 @@ Future<void> _loadAuthenticatedApp(WidgetTester tester) async {
   await _waitForAccessToken(tester);
   await _waitForCurrentUser(_email, tester);
   await _dismissFeatureMessageIfVisible(tester);
+}
+
+Future<(ProviderContainer, Drift)> _loadAuthenticatedSyncContainer() async {
+  await EasyLocalization.ensureInitialized();
+  final (drift, _) = await Bootstrap.initDomain();
+  await Store.clear();
+  await _seedAuthenticatedStore();
+  return (
+    ProviderContainer(
+      overrides: [
+        driftProvider.overrideWith(driftOverride(drift)),
+        cancellationProvider.overrideWithValue(Completer()),
+      ],
+    ),
+    drift,
+  );
 }
 
 Future<void> _seedAuthenticatedStore() async {
