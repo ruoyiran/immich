@@ -27,6 +27,8 @@ class TabShellPage extends ConsumerStatefulWidget {
 }
 
 class _TabShellPageState extends ConsumerState<TabShellPage> {
+  int? _lastSyncedTabIndex;
+
   @override
   Widget build(BuildContext context) {
     final isScreenLandscape = context.orientation == Orientation.landscape;
@@ -83,6 +85,7 @@ class _TabShellPageState extends ConsumerState<TabShellPage> {
       transitionBuilder: (context, child, animation) => FadeTransition(opacity: animation, child: child),
       builder: (context, child) {
         final tabsRouter = AutoTabsRouter.of(context);
+        _syncActiveTab(tabsRouter.activeIndex);
         return PopScope(
           canPop: tabsRouter.activeIndex == 0,
           onPopInvokedWithResult: (didPop, _) => !didPop ? tabsRouter.setActiveIndex(0) : null,
@@ -102,6 +105,21 @@ class _TabShellPageState extends ConsumerState<TabShellPage> {
         );
       },
     );
+  }
+
+  void _syncActiveTab(int activeIndex) {
+    if (activeIndex < 0 || activeIndex >= TabEnum.values.length || _lastSyncedTabIndex == activeIndex) {
+      return;
+    }
+
+    _lastSyncedTabIndex = activeIndex;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) {
+        return;
+      }
+
+      ref.read(tabProvider.notifier).state = TabEnum.values[activeIndex];
+    });
   }
 }
 

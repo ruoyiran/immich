@@ -11,7 +11,9 @@ import 'package:package_info_plus/package_info_plus.dart';
 
 @RoutePage()
 class LoginPage extends HookWidget {
-  const LoginPage({super.key});
+  const LoginPage({super.key, this.onResult});
+
+  final void Function(bool)? onResult;
 
   @override
   Widget build(BuildContext context) {
@@ -28,7 +30,7 @@ class LoginPage extends HookWidget {
     });
 
     return Scaffold(
-      body: LoginForm(),
+      body: LoginForm(onResult: onResult),
       bottomNavigationBar: SafeArea(
         child: Padding(
           padding: const EdgeInsets.only(bottom: 16.0),

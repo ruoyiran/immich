@@ -349,14 +349,14 @@ class SplashScreenPageState extends ConsumerState<SplashScreenPage> {
                 }
 
                 unawaited(ref.read(authProvider.notifier).logout());
-                unawaited(context.router.replaceAll([const LoginRoute()]));
+                unawaited(context.router.replaceAll([LoginRoute()]));
               },
             ),
       );
     } else {
       log.severe('Missing crucial offline login info - Logging out completely');
       unawaited(ref.read(authProvider.notifier).logout());
-      unawaited(context.router.replaceAll([const LoginRoute()]));
+      unawaited(context.router.replaceAll([LoginRoute()]));
       return;
     }
 
