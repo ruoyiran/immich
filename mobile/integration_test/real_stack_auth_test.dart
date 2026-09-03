@@ -11,15 +11,19 @@ import 'package:http/http.dart' as http;
 import 'package:immich_mobile/constants/enums.dart';
 import 'package:immich_mobile/domain/models/asset/base_asset.model.dart';
 import 'package:immich_mobile/domain/models/store.model.dart';
+import 'package:immich_mobile/domain/models/timeline.model.dart';
 import 'package:immich_mobile/domain/models/user.model.dart';
+import 'package:immich_mobile/domain/services/timeline.service.dart';
 import 'package:immich_mobile/entities/store.entity.dart';
 import 'package:immich_mobile/infrastructure/repositories/storage.repository.dart';
 import 'package:immich_mobile/main.dart' as app;
+import 'package:immich_mobile/presentation/widgets/timeline/timeline.widget.dart';
 import 'package:immich_mobile/providers/api.provider.dart';
 import 'package:immich_mobile/providers/background_sync.provider.dart';
 import 'package:immich_mobile/providers/gallery_permission.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/album.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/db.provider.dart';
+import 'package:immich_mobile/providers/infrastructure/timeline.provider.dart';
 import 'package:immich_mobile/repositories/asset_api.repository.dart';
 import 'package:immich_mobile/repositories/auth_api.repository.dart';
 import 'package:immich_mobile/repositories/download.repository.dart';
@@ -78,6 +82,8 @@ const _metadataNoExifAssetName = String.fromEnvironment(
   'IMMICH_E2E_METADATA_NO_EXIF_ASSET_NAME',
   defaultValue: 'immich-e2e-metadata-015-no-exif.jpg',
 );
+const _timelineMinimumAssetCount = int.fromEnvironment('IMMICH_E2E_TIMELINE_MIN_ASSET_COUNT', defaultValue: 24);
+const _timelinePageSize = int.fromEnvironment('IMMICH_E2E_TIMELINE_PAGE_SIZE', defaultValue: 8);
 
 var _registeredSelectedCase = false;
 
@@ -549,10 +555,73 @@ void main() async {
       expect(noExif.longitude.orElse(null), isNull);
     });
 
+    _realStackSessionTest('MOB-REAL-016-$_caseSuffix', 'loads timeline first page, pagination, and date buckets', (
+      tester,
+    ) async {
+      await _loadAuthenticatedApp(tester);
+
+      final container = _containerOfApp(tester);
+      final syncSuccess = await container.read(backgroundSyncProvider).syncRemote();
+      expect(syncSuccess, isTrue);
+
+      final user = Store.tryGet(StoreKey.currentUser);
+      expect(user, isNotNull);
+
+      final timeline = container.read(timelineFactoryProvider).main([user!.id]);
+      addTearDown(timeline.dispose);
+
+      final buckets = await _waitForTimelineBuckets(tester, timeline, minAssets: _timelineMinimumAssetCount);
+      expect(timeline.totalAssets, greaterThanOrEqualTo(_timelineMinimumAssetCount));
+      expect(buckets.length, greaterThanOrEqualTo(2), reason: 'Expected cross-month seed data in the real timeline');
+
+      final totalFromBuckets = buckets.fold<int>(0, (total, bucket) => total + bucket.assetCount);
+      expect(totalFromBuckets, timeline.totalAssets);
+      _expectTimelineBucketsDescending(buckets);
+      expect(_spansMultipleMonths(buckets), isTrue);
+
+      await _exerciseTimelineUiPagination(tester);
+
+      final firstPageCount = _timelineCountForPage(timeline.totalAssets, 0);
+      final firstPage = await timeline.loadAssets(0, firstPageCount);
+      expect(firstPage.length, firstPageCount);
+
+      final assets = <BaseAsset>[];
+      for (var offset = 0; offset < timeline.totalAssets; offset += _timelinePageSize) {
+        final count = _timelineCountForPage(timeline.totalAssets, offset);
+        final page = await timeline.loadAssets(offset, count);
+        expect(page.length, count);
+        assets.addAll(page);
+      }
+
+      expect(assets.length, timeline.totalAssets);
+      expect(_timelineAssetIds(assets).length, assets.length);
+      _expectTimelineAssetsDescending(assets);
+      expect(_hasSharedTimestamp(assets), isTrue, reason: 'Expected same-timestamp assets in the real timeline');
+
+      final firstPageAgain = await timeline.loadAssets(0, firstPageCount);
+      expect(_timelineAssetIds(firstPageAgain), _timelineAssetIds(firstPage));
+    });
+
     if (_selectedCaseId.isNotEmpty && !_registeredSelectedCase) {
       test(_selectedCaseId, () => fail('No real stack auth test registered for $_selectedCaseId'));
     }
   });
+}
+
+Future<void> _exerciseTimelineUiPagination(WidgetTester tester) async {
+  await pumpUntilFound(tester, find.byType(Timeline), timeout: const Duration(seconds: 60));
+  final scrollable = find.descendant(of: find.byType(Timeline), matching: find.byType(Scrollable));
+  expect(scrollable, findsWidgets);
+
+  for (var i = 0; i < 4; i++) {
+    await tester.fling(scrollable.first, const Offset(0, -1200), 1500);
+    await _pumpFor(tester, const Duration(milliseconds: 700));
+  }
+
+  for (var i = 0; i < 4; i++) {
+    await tester.fling(scrollable.first, const Offset(0, 1200), 1500);
+    await _pumpFor(tester, const Duration(milliseconds: 700));
+  }
 }
 
 void _realStackSessionTest(String caseId, String description, Future<void> Function(WidgetTester) body) {
@@ -790,6 +859,91 @@ Future<api.AssetResponseDto> _waitForAssetInfo(
     fail('Asset $remoteAssetId did not expose metadata: $info');
   }
   fail('Asset $remoteAssetId metadata was unavailable, last error: $lastError');
+}
+
+Future<List<TimeBucket>> _waitForTimelineBuckets(
+  WidgetTester tester,
+  TimelineService timeline, {
+  required int minAssets,
+}) async {
+  var latest = const <Bucket>[];
+  Object? streamError;
+  final subscription = timeline.watchBuckets().listen((buckets) {
+    latest = buckets;
+  }, onError: (error) => streamError = error);
+
+  try {
+    final end = DateTime.now().add(const Duration(minutes: 2));
+    while (DateTime.now().isBefore(end)) {
+      if (streamError != null) {
+        fail('Timeline bucket stream failed: $streamError');
+      }
+
+      final timeBuckets = latest.whereType<TimeBucket>().toList();
+      final totalFromBuckets = latest.fold<int>(0, (total, bucket) => total + bucket.assetCount);
+      if (latest.isNotEmpty &&
+          timeBuckets.length == latest.length &&
+          timeBuckets.length >= 2 &&
+          totalFromBuckets >= minAssets &&
+          timeline.totalAssets == totalFromBuckets) {
+        return timeBuckets;
+      }
+      await _pumpFor(tester, const Duration(milliseconds: 500));
+    }
+
+    final totalFromBuckets = latest.fold<int>(0, (total, bucket) => total + bucket.assetCount);
+    fail(
+      'Timeline did not reach $minAssets assets and two time buckets; '
+      'bucket total=$totalFromBuckets, service total=${timeline.totalAssets}, buckets=${latest.length}',
+    );
+  } finally {
+    await subscription.cancel();
+  }
+}
+
+int _timelineCountForPage(int totalAssets, int offset) {
+  final remaining = totalAssets - offset;
+  if (remaining <= 0) {
+    return 0;
+  }
+  return remaining < _timelinePageSize ? remaining : _timelinePageSize;
+}
+
+Set<String> _timelineAssetIds(Iterable<BaseAsset> assets) {
+  return assets.map(_timelineAssetId).toSet();
+}
+
+String _timelineAssetId(BaseAsset asset) {
+  return asset.remoteId ??
+      asset.localId ??
+      '${asset.name}:${asset.createdAt.toUtc().microsecondsSinceEpoch}:${asset.checksum ?? ''}';
+}
+
+void _expectTimelineBucketsDescending(List<TimeBucket> buckets) {
+  for (var i = 1; i < buckets.length; i++) {
+    expect(buckets[i].date.isAfter(buckets[i - 1].date), isFalse);
+  }
+}
+
+bool _spansMultipleMonths(List<TimeBucket> buckets) {
+  return buckets.map((bucket) => '${bucket.date.year}-${bucket.date.month}').toSet().length > 1;
+}
+
+void _expectTimelineAssetsDescending(List<BaseAsset> assets) {
+  for (var i = 1; i < assets.length; i++) {
+    expect(assets[i].createdAt.isAfter(assets[i - 1].createdAt), isFalse);
+  }
+}
+
+bool _hasSharedTimestamp(List<BaseAsset> assets) {
+  final seen = <int>{};
+  for (final asset in assets) {
+    final timestamp = asset.createdAt.toUtc().microsecondsSinceEpoch;
+    if (!seen.add(timestamp)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 void _expectUtcDateTimeParts(DateTime value, int year, int month, int day, int hour, int minute) {
