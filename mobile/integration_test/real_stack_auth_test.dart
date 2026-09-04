@@ -15313,6 +15313,279 @@ void main() async {
       },
     );
 
+    _realStackSessionTest(
+      'MOB-MEDIA-073-$_caseSuffix',
+      'moves a video to trash without deleting playback files',
+      (tester) async {
+        await _loadAuthenticatedApp(
+          tester,
+          overrideCancellation: true,
+          closeDriftOnDispose: false,
+          resetSyncAcksBeforeStart: true,
+        );
+        final container = _containerOfApp(tester);
+        final drift = container.read(driftProvider);
+        final apiService = container.read(apiServiceProvider);
+        final assetsApi = apiService.assetsApi;
+        final searchApi = apiService.searchApi;
+        final assetService = container.read(assetServiceProvider);
+        final createdRemoteAssetIds = <String>{};
+        final createdLocalAssetIds = <String>{};
+
+        addTearDown(() async {
+          for (final assetId in createdRemoteAssetIds) {
+            await _deleteTestAssetBestEffort(assetsApi, assetId);
+          }
+          unawaited(_deleteLocalTestAssetsBestEffort(createdLocalAssetIds));
+        });
+
+        await _resetAndSyncRemoteState(tester, container);
+
+        final runToken = DateTime.now()
+            .toUtc()
+            .microsecondsSinceEpoch
+            .toString();
+        final localName = 'immich-e2e-trash-073-video-$runToken.mp4';
+        final sourceBytes = _generatedMp4Bytes(
+          'MOB-MEDIA-073-$_caseSuffix-$runToken',
+        );
+        expect(
+          await _serverAssetIdsByOriginalFilename(
+            searchApi,
+            localName,
+            type: api.AssetTypeEnum.VIDEO,
+          ),
+          isEmpty,
+          reason: 'The 073 trash video filename must be unique before upload',
+        );
+
+        final createdLocal = await _saveLocalTestVideo(
+          container,
+          createdLocalAssetIds,
+          title: localName,
+          relativePath: Platform.isAndroid ? 'Movies/ImmichE2E073' : null,
+          bytes: sourceBytes,
+        );
+        expect(createdLocal.id, isNotEmpty);
+
+        await container.read(backgroundSyncProvider).syncLocal(full: true);
+        final localVideoSource = await _waitForLocalAssetByNameState(
+          container,
+          localName,
+          tester,
+          (asset) =>
+              asset.isVideo &&
+              asset.isLocalOnly &&
+              asset.contentSize != null &&
+              asset.contentSize! > 0,
+          reason:
+              'Expected 073 gallery video fixture to sync with uploadable metadata',
+        );
+
+        final localFile = await container
+            .read(storageRepositoryProvider)
+            .getFileForAsset(localVideoSource.id);
+        expect(localFile, isNotNull);
+        final localBytes = await localFile!.readAsBytes();
+        final localMd5 = base64Encode(md5.convert(localBytes).bytes);
+        expect(localBytes.length, localVideoSource.contentSize);
+
+        final progressById = <String, List<double>>{};
+        String? remoteAssetId;
+        String? uploadError;
+        await container
+            .read(foregroundUploadServiceProvider)
+            .uploadSingleAsset(
+              localVideoSource,
+              Completer<void>(),
+              callbacks: UploadCallbacks(
+                onProgress: (id, _, bytes, totalBytes) {
+                  final progress = totalBytes > 0 ? bytes / totalBytes : 0.0;
+                  final assetProgress = progressById.putIfAbsent(id, () => []);
+                  expect(progress, inInclusiveRange(0.0, 1.0));
+                  if (assetProgress.isNotEmpty) {
+                    expect(progress, greaterThanOrEqualTo(assetProgress.last));
+                  }
+                  assetProgress.add(progress);
+                },
+                onSuccess: (_, remoteId) => remoteAssetId = remoteId,
+                onError: (_, errorMessage) => uploadError = errorMessage,
+              ),
+            );
+
+        expect(uploadError, isNull);
+        expect(remoteAssetId, isNotNull);
+        expect(progressById, contains(localVideoSource.id));
+        final videoId = remoteAssetId!;
+        createdRemoteAssetIds.add(videoId);
+
+        final serverIds = await _waitForServerAssetIdsByOriginalFilename(
+          tester,
+          searchApi,
+          localName,
+          (ids) => ids.length == 1 && ids.contains(videoId),
+          type: api.AssetTypeEnum.VIDEO,
+          reason: 'Expected 073 video to be discoverable before trash',
+        );
+        expect(serverIds, hasLength(1));
+
+        final beforeInfo = await _waitForAssetInfoState(
+          tester,
+          assetsApi,
+          videoId,
+          (asset) =>
+              asset.type == api.AssetTypeEnum.VIDEO &&
+              asset.originalFileName == localName &&
+              !asset.isTrashed &&
+              asset.duration != null &&
+              asset.duration! > 0 &&
+              asset.width != null &&
+              asset.height != null,
+          reason: 'Expected 073 server video to be active before trash',
+        );
+        expect(beforeInfo.checksum, localMd5);
+
+        final original = await _waitForSuccessfulResponse(
+          tester,
+          () => container
+              .read(assetApiRepositoryProvider)
+              .downloadAsset(videoId, edited: false),
+          timeout: const Duration(minutes: 3),
+        );
+        expect(original.bodyBytes.length, localBytes.length);
+        expect(base64Encode(md5.convert(original.bodyBytes).bytes), localMd5);
+
+        final playback = await _waitForSuccessfulResponse(
+          tester,
+          () => assetsApi.playAssetVideoWithHttpInfo(videoId),
+          acceptedStatusCodes: const {200, 206},
+          timeout: const Duration(minutes: 3),
+        );
+        expect(playback.bodyBytes, isNotEmpty);
+
+        await _resetAndSyncRemoteState(tester, container);
+        final syncedVideo = await _waitForRemoteAssetState(
+          tester,
+          container,
+          videoId,
+          (asset) =>
+              asset.isVideo &&
+              asset.hasLocal &&
+              asset.hasRemote &&
+              !asset.isTrashed &&
+              asset.checksum == localMd5 &&
+              asset.duration > Duration.zero,
+          reason: 'Expected 073 uploaded video to sync before trash',
+        );
+        expect(await _remoteAssetRowCountById(drift, videoId), 1);
+
+        final timelineFactory = container.read(timelineFactoryProvider);
+        final mainTimeline = timelineFactory.main([syncedVideo.ownerId]);
+        final videoTimeline = timelineFactory.video(syncedVideo.ownerId);
+        final trashTimeline = timelineFactory.trash(syncedVideo.ownerId);
+        addTearDown(mainTimeline.dispose);
+        addTearDown(videoTimeline.dispose);
+        addTearDown(trashTimeline.dispose);
+
+        await _expectTimelineAssetSet(
+          tester,
+          mainTimeline,
+          includes: {videoId},
+          excludes: const {},
+          reason: 'Expected 073 active video in the main timeline',
+        );
+        await _expectTimelineAssetSet(
+          tester,
+          videoTimeline,
+          includes: {videoId},
+          excludes: const {},
+          reason: 'Expected 073 active video in the video collection',
+        );
+        await _expectTimelineAssetSet(
+          tester,
+          trashTimeline,
+          includes: const {},
+          excludes: {videoId},
+          reason: 'Expected 073 active video to be absent from trash',
+        );
+
+        await assetService.trash([videoId]);
+        final trashedInfo = await _waitForAssetInfoState(
+          tester,
+          assetsApi,
+          videoId,
+          (asset) =>
+              asset.type == api.AssetTypeEnum.VIDEO &&
+              asset.isTrashed &&
+              asset.originalPath == beforeInfo.originalPath &&
+              asset.checksum == localMd5,
+          reason:
+              'Expected 073 server video to be logically trashed without file mutation',
+        );
+        expect(trashedInfo.duration, beforeInfo.duration);
+        expect(trashedInfo.originalFileName, beforeInfo.originalFileName);
+
+        final trashedLocalVideo = await _waitForRemoteAssetState(
+          tester,
+          container,
+          videoId,
+          (asset) =>
+              asset.hasRemote &&
+              asset.isVideo &&
+              asset.isTrashed &&
+              asset.checksum == localMd5,
+          reason: 'Expected 073 trash action to mark the local video as trashed',
+        );
+        expect(trashedLocalVideo.ownerId, syncedVideo.ownerId);
+        expect(await _remoteAssetRowCountById(drift, videoId), 1);
+
+        await _expectTimelineAssetSet(
+          tester,
+          mainTimeline,
+          includes: const {},
+          excludes: {videoId},
+          reason: 'Expected 073 trashed video to disappear from main timeline',
+        );
+        await _expectTimelineAssetSet(
+          tester,
+          videoTimeline,
+          includes: const {},
+          excludes: {videoId},
+          reason:
+              'Expected 073 trashed video to disappear from video collection',
+        );
+        await _expectTimelineAssetSet(
+          tester,
+          trashTimeline,
+          includes: {videoId},
+          excludes: const {},
+          reason: 'Expected 073 trashed video to appear in trash timeline',
+        );
+        await _waitForServerAssetIdsByOriginalFilename(
+          tester,
+          searchApi,
+          localName,
+          (ids) => !ids.contains(videoId),
+          type: api.AssetTypeEnum.VIDEO,
+          reason: 'Expected 073 active search to filter trashed video',
+        );
+
+        const markerCaseId = 'MOB-MEDIA-073-$_caseSuffix';
+        debugPrint(
+          '$markerCaseId:TRASHED ${jsonEncode({
+            'assetId': videoId,
+            'fileName': localName,
+            'checksum': localMd5,
+            'originalPath': beforeInfo.originalPath,
+            'downloadBytes': original.bodyBytes.length,
+            'playbackBytes': playback.bodyBytes.length,
+          })}',
+        );
+        await _pumpFor(tester, const Duration(seconds: 12));
+        expect(tester.takeException(), isNull);
+      },
+    );
+
     if (_selectedCaseId.isNotEmpty && !_registeredSelectedCase) {
       test(
         _selectedCaseId,
