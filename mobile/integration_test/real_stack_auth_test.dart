@@ -112,6 +112,7 @@ import 'package:immich_mobile/providers/infrastructure/memory.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/ocr.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/people.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/platform.provider.dart';
+import 'package:immich_mobile/providers/infrastructure/remote_album.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/search.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/sync.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/tag.provider.dart';
@@ -156,6 +157,26 @@ const _serverUrl = String.fromEnvironment('IMMICH_E2E_SERVER_URL');
 const _badServerUrl = String.fromEnvironment('IMMICH_E2E_BAD_SERVER_URL', defaultValue: 'http://10.0.2.2:9');
 const _email = String.fromEnvironment('IMMICH_E2E_EMAIL');
 const _password = String.fromEnvironment('IMMICH_E2E_PASSWORD');
+const _albumSharingCollaboratorId = String.fromEnvironment(
+  'IMMICH_E2E_ALBUM_SHARING_COLLABORATOR_ID',
+  defaultValue: 'a5400000-0000-4000-8000-000000000001',
+);
+const _albumSharingViewerId = String.fromEnvironment(
+  'IMMICH_E2E_ALBUM_SHARING_VIEWER_ID',
+  defaultValue: 'a5400000-0000-4000-8000-000000000002',
+);
+const _albumSharingCollaboratorEmail = String.fromEnvironment(
+  'IMMICH_E2E_ALBUM_SHARING_COLLABORATOR_EMAIL',
+  defaultValue: 'immich-e2e-054-collaborator@example.test',
+);
+const _albumSharingViewerEmail = String.fromEnvironment(
+  'IMMICH_E2E_ALBUM_SHARING_VIEWER_EMAIL',
+  defaultValue: 'immich-e2e-054-viewer@example.test',
+);
+const _albumSharingCollaboratorPasswordOverride = String.fromEnvironment(
+  'IMMICH_E2E_ALBUM_SHARING_COLLABORATOR_PASSWORD',
+);
+const _albumSharingViewerPasswordOverride = String.fromEnvironment('IMMICH_E2E_ALBUM_SHARING_VIEWER_PASSWORD');
 const _deviceId = String.fromEnvironment('IMMICH_E2E_DEVICE_ID', defaultValue: 'immich-mobile-e2e-device');
 const _uploadAssetName = String.fromEnvironment(
   'IMMICH_E2E_UPLOAD_ASSET_NAME',
@@ -246,6 +267,12 @@ const _multiSelectRemoteSeedPrefix = String.fromEnvironment(
 const _similarTargetAssetId = String.fromEnvironment('IMMICH_E2E_SIMILAR_TARGET_ASSET_ID');
 const _similarCandidateAssetId = String.fromEnvironment('IMMICH_E2E_SIMILAR_CANDIDATE_ASSET_ID');
 const _similarControlAssetId = String.fromEnvironment('IMMICH_E2E_SIMILAR_CONTROL_ASSET_ID');
+
+String get _albumSharingCollaboratorPassword =>
+    _albumSharingCollaboratorPasswordOverride.isEmpty ? _password : _albumSharingCollaboratorPasswordOverride;
+
+String get _albumSharingViewerPassword =>
+    _albumSharingViewerPasswordOverride.isEmpty ? _password : _albumSharingViewerPasswordOverride;
 const _lockedFolderPin = '123456';
 const _lockedFolderWrongPin = '000000';
 
@@ -7160,6 +7187,351 @@ void main() async {
       },
     );
 
+    _realStackSessionTest(
+      'MOB-UI-054-$_caseSuffix',
+      'selects members, presents roles, shares, removes, and leaves albums',
+      (tester) async {
+        tester.view.devicePixelRatio = 1.0;
+        tester.view.physicalSize = const Size(430, 932);
+        addTearDown(tester.view.reset);
+
+        final collaboratorPassword = _albumSharingCollaboratorPassword;
+        final viewerPassword = _albumSharingViewerPassword;
+        final collaboratorToken = await _loginForAccessToken(_albumSharingCollaboratorEmail, collaboratorPassword);
+        final viewerToken = await _loginForAccessToken(_albumSharingViewerEmail, viewerPassword);
+
+        await _loadAuthenticatedApp(tester, overrideCancellation: true, closeDriftOnDispose: false);
+        var container = _containerOfApp(tester);
+        var drift = container.read(driftProvider);
+        var albumsApi = container.read(apiServiceProvider).albumsApi;
+        final ownerToken = Store.get(StoreKey.accessToken);
+        final owner = Store.tryGet(StoreKey.currentUser);
+        expect(owner, isNotNull);
+        expect(owner!.id, isNot(anyOf(_albumSharingCollaboratorId, _albumSharingViewerId)));
+
+        final createdRemoteAssetIds = <String>[];
+        String? ownedAlbumId;
+        addTearDown(() async {
+          final albumId = ownedAlbumId;
+          if (albumId != null) {
+            await _deleteAlbumBestEffortWithToken(albumId, ownerToken);
+          }
+          for (final assetId in createdRemoteAssetIds) {
+            await _deleteTestAssetBestEffortWithToken(assetId, ownerToken);
+          }
+        });
+
+        await _resetAndSyncRemoteState(tester, container);
+
+        final runToken = DateTime.now().toUtc().microsecondsSinceEpoch.toString();
+        final shortToken = runToken.substring(runToken.length - 8);
+        final ownerAssetId = await _uploadGeneratedJpegAsSecondClient(
+          'immich-e2e-album-sharing-054-owner-$runToken.jpg',
+          DateTime.now().toUtc().add(const Duration(days: 3651)),
+        );
+        createdRemoteAssetIds.add(ownerAssetId);
+
+        final albumName = 'immich-e2e-album-sharing-054-$shortToken';
+        final createdAlbum = await albumsApi.createAlbum(
+          api.CreateAlbumDto(albumName: albumName, assetIds: api.Optional.present([ownerAssetId])),
+        );
+        expect(createdAlbum, isNotNull);
+        ownedAlbumId = createdAlbum!.id;
+
+        await _waitForAlbumInfoState(
+          tester,
+          albumsApi,
+          ownedAlbumId,
+          (album) =>
+              album.albumName == albumName &&
+              album.albumUsers.length == 1 &&
+              _albumHasUserRole(album, owner.id, api.AlbumUserRole.owner),
+          reason: 'Expected the 054 album to start owned by the login user only',
+        );
+
+        await container.read(syncStreamServiceProvider).sync();
+        final ownedAlbum = await _waitForRemoteAlbumState(
+          tester,
+          container,
+          ownedAlbumId,
+          (album) => album.name == albumName && album.ownerId == owner.id,
+          reason: 'Expected the 054 owner album to sync before member selection',
+        );
+
+        final ownerRouter = container.read(appRouterProvider);
+        unawaited(ownerRouter.push(RemoteAlbumRoute(album: ownedAlbum)));
+        await pumpUntilFound(tester, find.byType(RemoteAlbumPage), timeout: const Duration(seconds: 30));
+        await pumpUntilFound(tester, find.text(albumName), timeout: const Duration(seconds: 30));
+
+        await _tapRemoteAlbumMenuAction(tester, const Key('remote-album-add-users-action'));
+        await pumpUntilFound(
+          tester,
+          find.byKey(const Key('drift-user-selection-page')),
+          timeout: const Duration(seconds: 30),
+        );
+        final collaboratorTile = find.byKey(const Key('drift-user-selection-tile-$_albumSharingCollaboratorId'));
+        final viewerTile = find.byKey(const Key('drift-user-selection-tile-$_albumSharingViewerId'));
+        await pumpUntilFound(tester, collaboratorTile, timeout: const Duration(seconds: 30));
+        await pumpUntilFound(tester, viewerTile, timeout: const Duration(seconds: 30));
+        await tester.ensureVisible(collaboratorTile.first);
+        await tester.tap(collaboratorTile.first, warnIfMissed: false);
+        await pumpUntilFound(
+          tester,
+          find.byKey(const Key('drift-user-selection-chip-$_albumSharingCollaboratorId')),
+          timeout: const Duration(seconds: 30),
+        );
+        await tester.tap(find.byKey(const Key('drift-user-selection-add-action')), warnIfMissed: false);
+        await _pumpUntil(
+          tester,
+          () => find.byKey(const Key('drift-user-selection-page')).evaluate().isEmpty,
+          timeout: const Duration(seconds: 30),
+        );
+
+        await _waitForAlbumInfoState(
+          tester,
+          albumsApi,
+          ownedAlbumId,
+          (album) => _albumHasUserRole(album, _albumSharingCollaboratorId, api.AlbumUserRole.editor),
+          reason: 'Expected owner UI member selection to add the collaborator as an editor',
+        );
+
+        await _addAlbumUserViaApi(
+          tester,
+          ownedAlbumId,
+          userId: _albumSharingViewerId,
+          role: 'viewer',
+          accessToken: ownerToken,
+        );
+        await _waitForAlbumInfoState(
+          tester,
+          albumsApi,
+          ownedAlbumId,
+          (album) =>
+              album.albumUsers.length == 3 &&
+              _albumHasUserRole(album, _albumSharingCollaboratorId, api.AlbumUserRole.editor) &&
+              _albumHasUserRole(album, _albumSharingViewerId, api.AlbumUserRole.viewer),
+          reason: 'Expected the 054 album server membership list to contain owner, editor, and viewer',
+        );
+
+        await container.read(syncStreamServiceProvider).sync();
+        container.invalidate(remoteAlbumSharedUsersProvider(ownedAlbumId));
+        await _waitForRemoteAlbumSharedUsersState(
+          tester,
+          container,
+          ownedAlbumId,
+          (users) =>
+              users.map((user) => user.id).toSet().containsAll({_albumSharingCollaboratorId, _albumSharingViewerId}),
+          reason: 'Expected owner local shared-user list to contain the editor and viewer',
+        );
+
+        await _tapRemoteAlbumMenuAction(tester, const Key('remote-album-options-action'));
+        await pumpUntilFound(tester, find.byType(DriftAlbumOptionsPage), timeout: const Duration(seconds: 30));
+        await pumpUntilFound(
+          tester,
+          find.byKey(const Key('remote-album-options-owner-row')),
+          timeout: const Duration(seconds: 30),
+        );
+        await pumpUntilFound(
+          tester,
+          find.byKey(const Key('remote-album-options-shared-user-$_albumSharingCollaboratorId')),
+          timeout: const Duration(seconds: 30),
+        );
+        await pumpUntilFound(
+          tester,
+          find.byKey(const Key('remote-album-options-shared-user-$_albumSharingViewerId')),
+          timeout: const Duration(seconds: 30),
+        );
+        expect(find.byKey(const Key('remote-album-options-leave-album-action')), findsNothing);
+        await tester.binding.handlePopRoute();
+        await pumpUntilFound(tester, find.byType(RemoteAlbumPage), timeout: const Duration(seconds: 30));
+
+        container = await _restartAuthenticatedApp(
+          tester,
+          email: _albumSharingCollaboratorEmail,
+          password: collaboratorPassword,
+        );
+        drift = container.read(driftProvider);
+        await _resetAndSyncRemoteState(tester, container);
+        var sharedAlbum = await _waitForRemoteAlbumState(
+          tester,
+          container,
+          ownedAlbumId,
+          (album) => album.name == albumName && album.ownerId == owner.id,
+          reason: 'Expected the editor member to see the shared 054 album after refresh',
+        );
+        await _waitForRemoteAlbumUserRole(
+          tester,
+          container,
+          ownedAlbumId,
+          _albumSharingCollaboratorId,
+          (role) => role == AlbumUserRole.editor,
+          reason: 'Expected the collaborator to sync as an editor',
+        );
+
+        var router = container.read(appRouterProvider);
+        unawaited(router.push(RemoteAlbumRoute(album: sharedAlbum)));
+        await pumpUntilFound(tester, find.byType(RemoteAlbumPage), timeout: const Duration(seconds: 30));
+        await pumpUntilFound(tester, find.text(albumName), timeout: const Duration(seconds: 30));
+        await _openRemoteAlbumMenu(tester);
+        await pumpUntilFound(
+          tester,
+          find.byKey(const Key('remote-album-add-photos-action')),
+          timeout: const Duration(seconds: 30),
+        );
+        expect(find.byKey(const Key('remote-album-add-users-action')), findsNothing);
+        expect(find.byKey(const Key('remote-album-edit-action')), findsNothing);
+        expect(find.byKey(const Key('remote-album-delete-action')), findsNothing);
+        await _tapHitTestableFinder(tester, find.byKey(const Key('remote-album-add-photos-action')));
+        await pumpUntilFound(
+          tester,
+          find.byType(DriftAssetSelectionTimelinePage),
+          timeout: const Duration(seconds: 30),
+        );
+        await tester.binding.handlePopRoute();
+        await pumpUntilFound(tester, find.byType(RemoteAlbumPage), timeout: const Duration(seconds: 30));
+
+        await _tapRemoteAlbumMenuAction(tester, const Key('remote-album-options-action'));
+        await pumpUntilFound(tester, find.byType(DriftAlbumOptionsPage), timeout: const Duration(seconds: 30));
+        await pumpUntilFound(
+          tester,
+          find.byKey(const Key('remote-album-options-shared-user-$_albumSharingCollaboratorId')),
+          timeout: const Duration(seconds: 30),
+        );
+        await _tapHitTestableFinder(
+          tester,
+          find.byKey(const Key('remote-album-options-shared-user-$_albumSharingCollaboratorId')),
+        );
+        await pumpUntilFound(
+          tester,
+          find.byKey(const Key('remote-album-options-leave-album-action')),
+          timeout: const Duration(seconds: 30),
+        );
+        await _tapHitTestableFinder(tester, find.byKey(const Key('remote-album-options-leave-album-action')));
+        await pumpUntilFound(tester, find.byType(DriftAlbumsPage), timeout: const Duration(seconds: 30));
+        await _waitForRejectedResponse(
+          tester,
+          () => _authenticatedApiRequest('GET', '/albums/$ownedAlbumId', accessToken: collaboratorToken),
+          reason: 'Expected the collaborator to lose server access after leaving the 054 album',
+          acceptedStatusCodes: const {403, 404},
+        );
+        final leaveSyncSuccess = await container.read(syncStreamServiceProvider).sync();
+        expect(leaveSyncSuccess, isTrue);
+        await _waitForRemoteAlbumRowCount(
+          tester,
+          drift,
+          ownedAlbumId,
+          0,
+          reason: 'Expected the local album row to be removed after the collaborator leaves',
+        );
+
+        container = await _restartAuthenticatedApp(tester, email: _albumSharingViewerEmail, password: viewerPassword);
+        await _resetAndSyncRemoteState(tester, container);
+        sharedAlbum = await _waitForRemoteAlbumState(
+          tester,
+          container,
+          ownedAlbumId,
+          (album) => album.name == albumName && album.ownerId == owner.id,
+          reason: 'Expected the viewer member to see the shared 054 album after refresh',
+        );
+        await _waitForRemoteAlbumUserRole(
+          tester,
+          container,
+          ownedAlbumId,
+          _albumSharingViewerId,
+          (role) => role == AlbumUserRole.viewer,
+          reason: 'Expected the ordinary member to sync as a viewer',
+        );
+
+        router = container.read(appRouterProvider);
+        unawaited(router.push(RemoteAlbumRoute(album: sharedAlbum)));
+        await pumpUntilFound(tester, find.byType(RemoteAlbumPage), timeout: const Duration(seconds: 30));
+        await pumpUntilFound(tester, find.text(albumName), timeout: const Duration(seconds: 30));
+        await _openRemoteAlbumMenu(tester);
+        await _pumpFor(tester, const Duration(seconds: 1));
+        expect(find.byKey(const Key('remote-album-add-photos-action')), findsNothing);
+        expect(find.byKey(const Key('remote-album-add-users-action')), findsNothing);
+        expect(find.byKey(const Key('remote-album-edit-action')), findsNothing);
+        expect(find.byKey(const Key('remote-album-delete-action')), findsNothing);
+        expect(find.byKey(const Key('remote-album-options-action')), findsOneWidget);
+
+        container = await _restartAuthenticatedApp(tester, email: _email, password: _password);
+        drift = container.read(driftProvider);
+        albumsApi = container.read(apiServiceProvider).albumsApi;
+        await _resetAndSyncRemoteState(tester, container);
+        final ownerAlbum = await _waitForRemoteAlbumState(
+          tester,
+          container,
+          ownedAlbumId,
+          (album) => album.name == albumName && album.ownerId == owner.id,
+          reason: 'Expected the owner to still see the 054 album after another member leaves',
+        );
+        await _waitForRemoteAlbumSharedUsersState(
+          tester,
+          container,
+          ownedAlbumId,
+          (users) =>
+              !users.any((user) => user.id == _albumSharingCollaboratorId) &&
+              users.any((user) => user.id == _albumSharingViewerId),
+          reason: 'Expected owner sync to retain only the viewer after the collaborator leaves',
+        );
+
+        router = container.read(appRouterProvider);
+        unawaited(router.push(RemoteAlbumRoute(album: ownerAlbum)));
+        await pumpUntilFound(tester, find.byType(RemoteAlbumPage), timeout: const Duration(seconds: 30));
+        await _tapRemoteAlbumMenuAction(tester, const Key('remote-album-options-action'));
+        await pumpUntilFound(tester, find.byType(DriftAlbumOptionsPage), timeout: const Duration(seconds: 30));
+        await pumpUntilFound(
+          tester,
+          find.byKey(const Key('remote-album-options-shared-user-$_albumSharingViewerId')),
+          timeout: const Duration(seconds: 30),
+        );
+        await _tapHitTestableFinder(
+          tester,
+          find.byKey(const Key('remote-album-options-shared-user-$_albumSharingViewerId')),
+        );
+        await pumpUntilFound(
+          tester,
+          find.byKey(const Key('remote-album-options-remove-user-action-$_albumSharingViewerId')),
+          timeout: const Duration(seconds: 30),
+        );
+        await _tapHitTestableFinder(
+          tester,
+          find.byKey(const Key('remote-album-options-remove-user-action-$_albumSharingViewerId')),
+        );
+        await _waitForAlbumInfoState(
+          tester,
+          albumsApi,
+          ownedAlbumId,
+          (album) =>
+              album.albumUsers.length == 1 &&
+              _albumHasUserRole(album, owner.id, api.AlbumUserRole.owner) &&
+              !_albumHasUserRole(album, _albumSharingViewerId, api.AlbumUserRole.viewer),
+          reason: 'Expected owner removal to leave the album owned and unshared',
+        );
+        await _waitForRejectedResponse(
+          tester,
+          () => _authenticatedApiRequest('GET', '/albums/$ownedAlbumId', accessToken: viewerToken),
+          reason: 'Expected the removed viewer to lose server access to the 054 album',
+          acceptedStatusCodes: const {403, 404},
+        );
+        await container.read(syncStreamServiceProvider).sync();
+        await _waitForRemoteAlbumSharedUsersState(
+          tester,
+          container,
+          ownedAlbumId,
+          (users) => users.isEmpty,
+          reason: 'Expected owner local shared-user list to be empty after removing all members',
+        );
+        await _waitForRemoteAlbumRowCount(
+          tester,
+          drift,
+          ownedAlbumId,
+          1,
+          reason: 'The owner must not lose the album while removing other members',
+        );
+      },
+    );
+
     if (_selectedCaseId.isNotEmpty && !_registeredSelectedCase) {
       test(_selectedCaseId, () => fail('No real stack auth test registered for $_selectedCaseId'));
     }
@@ -7233,10 +7605,20 @@ Future<void> _openRemoteAlbumMenu(WidgetTester tester) async {
 Future<void> _tapRemoteAlbumMenuAction(WidgetTester tester, Key key) async {
   await _openRemoteAlbumMenu(tester);
   final action = find.byKey(key);
-  await pumpUntilFound(tester, action, timeout: const Duration(seconds: 30));
-  expect(action.hitTestable(), findsWidgets, reason: 'Expected remote album menu action $key to be tappable');
-  await tester.tap(action.hitTestable().last, warnIfMissed: false);
+  await _tapHitTestableFinder(tester, action, reason: 'Expected remote album menu action $key to be tappable');
   await _pumpFor(tester, const Duration(milliseconds: 500));
+}
+
+Future<void> _tapHitTestableFinder(
+  WidgetTester tester,
+  Finder finder, {
+  String? reason,
+  Duration timeout = const Duration(seconds: 30),
+}) async {
+  await pumpUntilFound(tester, finder, timeout: timeout);
+  await _pumpUntil(tester, () => finder.hitTestable().evaluate().isNotEmpty, timeout: timeout);
+  expect(finder.hitTestable(), findsWidgets, reason: reason);
+  await tester.tap(finder.hitTestable().last, warnIfMissed: false);
 }
 
 Future<void> _ensureTextVisibleInPage(WidgetTester tester, Type pageType, String label, {int maxScrolls = 40}) async {
@@ -8128,12 +8510,14 @@ Future<void> _loadAuthenticatedApp(
   bool overrideCancellation = false,
   bool closeDriftOnDispose = true,
   List<Override> extraOverrides = const [],
+  String email = _email,
+  String password = _password,
 }) async {
   await EasyLocalization.ensureInitialized();
   final (drift, _) = await Bootstrap.initDomain();
   await Store.clear();
 
-  await _seedAuthenticatedStore();
+  await _seedAuthenticatedStore(email: email, password: password);
 
   await tester.pumpWidget(
     ProviderScope(
@@ -8148,8 +8532,34 @@ Future<void> _loadAuthenticatedApp(
   await EasyLocalization.ensureInitialized();
   await _pumpFor(tester, const Duration(milliseconds: 500));
   await _waitForAccessToken(tester);
-  await _waitForCurrentUser(_email, tester);
+  await _waitForCurrentUser(email, tester);
   await _dismissFeatureMessageIfVisible(tester);
+}
+
+Future<ProviderContainer> _restartAuthenticatedApp(
+  WidgetTester tester, {
+  required String email,
+  required String password,
+}) async {
+  await tester.pumpWidget(const SizedBox.shrink());
+  await _pumpFor(tester, const Duration(milliseconds: 500));
+  await _loadAuthenticatedApp(
+    tester,
+    overrideCancellation: true,
+    closeDriftOnDispose: false,
+    email: email,
+    password: password,
+  );
+  return _containerOfApp(tester);
+}
+
+Future<void> _resetAndSyncRemoteState(WidgetTester tester, ProviderContainer container) async {
+  await container.read(syncApiRepositoryProvider).deleteSyncAck(_allReplayableSyncAckTypes);
+  await Store.delete(StoreKey.syncMigrationStatus);
+  await container.read(syncStreamRepositoryProvider).reset();
+  final syncSuccess = await container.read(syncStreamServiceProvider).sync();
+  expect(syncSuccess, isTrue);
+  await pumpUntilFound(tester, find.byType(Timeline), timeout: const Duration(seconds: 60));
 }
 
 Future<void> _loadUnauthenticatedApp(
@@ -8198,15 +8608,15 @@ Future<(ProviderContainer, Drift)> _loadAuthenticatedSyncContainer() async {
   );
 }
 
-Future<void> _seedAuthenticatedStore() async {
+Future<void> _seedAuthenticatedStore({String email = _email, String password = _password}) async {
   final endpoint = _apiEndpoint(_serverUrl);
   await Store.put(StoreKey.serverEndpoint, endpoint);
   await Store.put(StoreKey.serverUrl, endpoint);
   await _ensureDeviceId();
 
   final apiService = ApiService()..setEndpoint(endpoint);
-  final response = await AuthApiRepository(apiService).login(_email, _password);
-  expect(response.userEmail, _email);
+  final response = await AuthApiRepository(apiService).login(email, password);
+  expect(response.userEmail, email);
   await Store.put(StoreKey.accessToken, response.accessToken);
   await Store.put(
     StoreKey.currentUser,
@@ -8220,6 +8630,18 @@ Future<void> _seedAuthenticatedStore() async {
     ),
   );
   await apiService.updateHeaders();
+}
+
+Future<String> _loginForAccessToken(String email, String password) async {
+  final response = await http.post(
+    Uri.parse('${_apiEndpoint(_serverUrl)}/auth/login'),
+    headers: {'Content-Type': 'application/json'},
+    body: jsonEncode({'email': email, 'password': password}),
+  );
+  expect(response.statusCode, anyOf(200, 201), reason: 'Expected helper login for $email to succeed');
+  final body = jsonDecode(response.body) as Map<String, dynamic>;
+  expect(body['userEmail'], email);
+  return body['accessToken'] as String;
 }
 
 Future<void> _ensureDeviceId() async {
@@ -10724,6 +11146,10 @@ Future<api.AlbumResponseDto> _waitForAlbumInfoState(
   fail('$reason; latest server album=$latest; last error=$lastError');
 }
 
+bool _albumHasUserRole(api.AlbumResponseDto album, String userId, api.AlbumUserRole role) {
+  return album.albumUsers.any((albumUser) => albumUser.user.id == userId && albumUser.role == role);
+}
+
 Future<RemoteAlbum> _waitForRemoteAlbumState(
   WidgetTester tester,
   ProviderContainer container,
@@ -10742,6 +11168,47 @@ Future<RemoteAlbum> _waitForRemoteAlbumState(
   }
 
   fail('$reason; latest local album=$latest');
+}
+
+Future<List<UserDto>> _waitForRemoteAlbumSharedUsersState(
+  WidgetTester tester,
+  ProviderContainer container,
+  String albumId,
+  bool Function(List<UserDto> users) matches, {
+  required String reason,
+}) async {
+  var latest = const <UserDto>[];
+  final end = DateTime.now().add(const Duration(seconds: 60));
+  while (DateTime.now().isBefore(end)) {
+    latest = await container.read(remoteAlbumServiceProvider).getSharedUsers(albumId);
+    if (matches(latest)) {
+      return latest;
+    }
+    await _pumpFor(tester, const Duration(milliseconds: 500));
+  }
+
+  fail('$reason; latest shared users=${latest.map((user) => '${user.id}:${user.email}').join(', ')}');
+}
+
+Future<AlbumUserRole?> _waitForRemoteAlbumUserRole(
+  WidgetTester tester,
+  ProviderContainer container,
+  String albumId,
+  String userId,
+  bool Function(AlbumUserRole? role) matches, {
+  required String reason,
+}) async {
+  AlbumUserRole? latest;
+  final end = DateTime.now().add(const Duration(seconds: 60));
+  while (DateTime.now().isBefore(end)) {
+    latest = await container.read(remoteAlbumServiceProvider).getUserRole(albumId, userId);
+    if (matches(latest)) {
+      return latest;
+    }
+    await _pumpFor(tester, const Duration(milliseconds: 500));
+  }
+
+  fail('$reason; latest role=$latest');
 }
 
 Future<Set<String>> _waitForRemoteAlbumAssetIds(
@@ -10949,6 +11416,76 @@ Future<http.Response> _authenticatedApiGet(String path) {
     Uri.parse('$endpoint$separator$path'),
     headers: {...ApiService.getRequestHeaders(), 'Authorization': 'Bearer ${Store.get(StoreKey.accessToken)}'},
   );
+}
+
+Future<http.Response> _authenticatedApiRequest(
+  String method,
+  String path, {
+  String? accessToken,
+  Object? jsonBody,
+}) async {
+  final endpoint = Store.get(StoreKey.serverEndpoint);
+  final separator = path.startsWith('/') ? '' : '/';
+  final request = http.Request(method, Uri.parse('$endpoint$separator$path'))
+    ..headers.addAll({
+      ...ApiService.getRequestHeaders(),
+      'Authorization': 'Bearer ${accessToken ?? Store.get(StoreKey.accessToken)}',
+      if (jsonBody != null) HttpHeaders.contentTypeHeader: 'application/json',
+    });
+  if (jsonBody != null) {
+    request.body = jsonEncode(jsonBody);
+  }
+  return http.Response.fromStream(await request.send());
+}
+
+Future<void> _addAlbumUserViaApi(
+  WidgetTester tester,
+  String albumId, {
+  required String userId,
+  required String role,
+  required String accessToken,
+}) async {
+  await _waitForSuccessfulResponse(
+    tester,
+    () => _authenticatedApiRequest(
+      'PUT',
+      '/albums/$albumId/users',
+      accessToken: accessToken,
+      jsonBody: {
+        'albumUsers': [
+          {'userId': userId, 'role': role},
+        ],
+      },
+    ),
+    acceptedStatusCodes: const {200, 204},
+    acceptedEmptyBodyStatusCodes: const {204},
+  );
+}
+
+Future<void> _deleteAlbumBestEffortWithToken(String albumId, String accessToken) async {
+  try {
+    await _authenticatedApiRequest('DELETE', '/albums/$albumId', accessToken: accessToken);
+  } catch (_) {
+    // Best-effort cleanup for a test-created album.
+  }
+}
+
+Future<void> _deleteTestAssetBestEffortWithToken(String remoteAssetId, String accessToken) async {
+  for (final force in const [false, true]) {
+    try {
+      await _authenticatedApiRequest(
+        'DELETE',
+        '/assets',
+        accessToken: accessToken,
+        jsonBody: {
+          'ids': [remoteAssetId],
+          'force': force,
+        },
+      );
+    } catch (_) {
+      // Best-effort cleanup for a test-created asset.
+    }
+  }
 }
 
 Future<int> _remoteAssetRowCountById(Drift drift, String remoteAssetId) async {
