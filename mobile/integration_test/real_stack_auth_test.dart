@@ -77,6 +77,8 @@ import 'package:immich_mobile/presentation/pages/drift_locked_folder.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_map.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_memory.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_partner_detail.page.dart';
+import 'package:immich_mobile/presentation/pages/drift_people_collection.page.dart';
+import 'package:immich_mobile/presentation/pages/drift_person.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_place.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_place_detail.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_recently_added.page.dart';
@@ -12838,6 +12840,433 @@ void main() async {
       },
     );
 
+    _realStackSessionTest(
+      'MOB-UI-061-$_caseSuffix',
+      'manages people details, merges people, and hides people',
+      (tester) async {
+        tester.view.devicePixelRatio = 1.0;
+        tester.view.physicalSize = const Size(430, 932);
+        addTearDown(tester.view.reset);
+
+        await _loadAuthenticatedApp(
+          tester,
+          overrideCancellation: true,
+          closeDriftOnDispose: false,
+          resetSyncAcksBeforeStart: true,
+        );
+        var container = _containerOfApp(tester);
+        final apiService = container.read(apiServiceProvider);
+        final assetsApi = apiService.assetsApi;
+        final peopleApi = apiService.peopleApi;
+        var peopleService = container.read(driftPeopleServiceProvider);
+        final createdRemoteAssetIds = <String>[];
+        final createdPeopleIds = <String>{};
+
+        addTearDown(() async {
+          for (final personId in createdPeopleIds) {
+            await _deletePersonBestEffort(peopleApi, personId);
+          }
+          for (final assetId in createdRemoteAssetIds) {
+            await _deleteTestAssetBestEffort(assetsApi, assetId);
+          }
+        });
+
+        await _resetAndSyncRemoteState(tester, container);
+
+        final runToken = DateTime.now()
+            .toUtc()
+            .microsecondsSinceEpoch
+            .toString();
+        final sharedNeedle = 'people-061-$runToken';
+        final primaryName = 'Immich E2E Person 061 Primary $runToken';
+        final mergeName = 'Immich E2E Person 061 Merge $runToken';
+        final hiddenName = 'Immich E2E Person 061 Hidden $runToken';
+        final editedName = 'Immich E2E Person 061 Edited $runToken';
+        final birthday = DateTime(DateTime.now().year - 30, 1, 1);
+        final baseCreatedAt = DateTime.utc(2026, 3, 2, 12);
+
+        Future<String> createPerson(String name) async {
+          final createdPerson = await peopleApi.createPerson(
+            api.PersonCreateDto(
+              name: api.Optional.present(name),
+              isHidden: const api.Optional.present(false),
+              isFavorite: const api.Optional.present(false),
+              birthDate: const api.Optional.present(null),
+              color: const api.Optional.present(null),
+            ),
+          );
+          expect(createdPerson, isNotNull);
+          createdPeopleIds.add(createdPerson!.id);
+          return createdPerson.id;
+        }
+
+        Future<String> uploadPersonAsset(
+          String label,
+          String personId,
+          int index,
+        ) async {
+          final createdAt = baseCreatedAt.add(Duration(minutes: index));
+          final assetId = await _uploadGeneratedJpegAsSecondClient(
+            'immich-e2e-$sharedNeedle-$label-$index.jpg',
+            createdAt,
+            sourceMetadata: {
+              'width': 96,
+              'height': 64,
+              'device_make': 'ImmichE2E061',
+              'device_model': 'PeopleManagement',
+            },
+          );
+          createdRemoteAssetIds.add(assetId);
+          await _createFaceAsSecondClient(
+            assetId: assetId,
+            personId: personId,
+            x: 8 + index,
+            y: 9 + index,
+            width: 24,
+            height: 28,
+            imageWidth: 96,
+            imageHeight: 64,
+          );
+          return assetId;
+        }
+
+        final primaryPersonId = await createPerson(primaryName);
+        final mergePersonId = await createPerson(mergeName);
+        final hiddenPersonId = await createPerson(hiddenName);
+        final unnamedPersonId = await createPerson('');
+
+        final primaryAssetIds = [
+          await uploadPersonAsset('primary', primaryPersonId, 0),
+          await uploadPersonAsset('primary', primaryPersonId, 1),
+        ];
+        final mergeAssetIds = [
+          await uploadPersonAsset('merge', mergePersonId, 2),
+          await uploadPersonAsset('merge', mergePersonId, 3),
+        ];
+        final hiddenAssetId = await uploadPersonAsset(
+          'hidden',
+          hiddenPersonId,
+          4,
+        );
+        final unnamedAssetIds = [
+          await uploadPersonAsset('unnamed', unnamedPersonId, 5),
+          await uploadPersonAsset('unnamed', unnamedPersonId, 6),
+          await uploadPersonAsset('unnamed', unnamedPersonId, 7),
+        ];
+
+        final syncSuccess = await container
+            .read(syncStreamServiceProvider)
+            .sync();
+        expect(syncSuccess, isTrue);
+
+        for (final assetId in createdRemoteAssetIds) {
+          await _waitForRemoteAssetState(
+            tester,
+            container,
+            assetId,
+            (asset) => !asset.isTrashed,
+            reason: 'Expected 061 fixture asset $assetId to sync locally',
+          );
+        }
+
+        final initialPeople = await _waitForLocalPeopleState(
+          tester,
+          peopleService,
+          (people) =>
+              people.any((person) => person.id == primaryPersonId) &&
+              people.any((person) => person.id == mergePersonId) &&
+              people.any((person) => person.id == hiddenPersonId) &&
+              people.any(
+                (person) => person.id == unnamedPersonId && person.name.isEmpty,
+              ),
+          reason:
+              'Expected 061 visible and unnamed people to sync into the people collection',
+        );
+        expect(
+          initialPeople.map((person) => person.id),
+          contains(primaryPersonId),
+        );
+        expect(
+          initialPeople.map((person) => person.id),
+          contains(unnamedPersonId),
+        );
+
+        final router = container.read(appRouterProvider);
+        unawaited(router.push(const DriftPeopleCollectionRoute()));
+        await _pumpUntilFoundWithReason(
+          tester,
+          find.byType(DriftPeopleCollectionPage),
+          reason: 'Expected 061 people collection page to open',
+          timeout: const Duration(seconds: 30),
+        );
+        await _tapHitTestableFinder(
+          tester,
+          find.byKey(const Key('people-collection-search-button')),
+          reason: 'Expected 061 people search button to be tappable',
+        );
+        await _pumpUntilFoundWithReason(
+          tester,
+          find.byKey(const Key('people-collection-search-field')),
+          reason: 'Expected 061 people search field to appear',
+          timeout: const Duration(seconds: 30),
+        );
+        final peopleSearchInput = find.descendant(
+          of: find.byKey(const Key('people-collection-search-field')),
+          matching: find.byType(TextField),
+        );
+        await tester.enterText(peopleSearchInput, primaryName);
+        await _pumpFor(tester, const Duration(milliseconds: 300));
+        expect(find.text(primaryName), findsWidgets);
+        expect(find.text(mergeName), findsNothing);
+
+        final primaryPerson = initialPeople.singleWhere(
+          (person) => person.id == primaryPersonId,
+        );
+        unawaited(router.push(DriftPersonRoute(person: primaryPerson)));
+        await _pumpUntilFoundWithReason(
+          tester,
+          find.byType(DriftPersonPage),
+          reason: 'Expected 061 person detail page to open',
+          timeout: const Duration(seconds: 30),
+        );
+        await _pumpUntilFoundWithReason(
+          tester,
+          find.text(primaryName),
+          reason: 'Expected 061 person detail to show the initial name',
+          timeout: const Duration(seconds: 30),
+        );
+
+        await _tapHitTestableFinder(
+          tester,
+          find.byKey(Key('person-detail-name-$primaryPersonId')),
+          reason: 'Expected 061 person name to open edit dialog',
+        );
+        await _pumpUntilFoundWithReason(
+          tester,
+          find.byKey(const Key('person-edit-name-field')),
+          reason: 'Expected 061 person name edit field to appear',
+          timeout: const Duration(seconds: 30),
+        );
+        await tester.enterText(
+          find.byKey(const Key('person-edit-name-field')),
+          editedName,
+        );
+        await _tapHitTestableFinder(
+          tester,
+          find.byKey(const Key('person-edit-name-save')),
+          reason: 'Expected 061 person name save button to be tappable',
+        );
+
+        await _tapHitTestableFinder(
+          tester,
+          find.byKey(Key('person-detail-options-$primaryPersonId')),
+          reason: 'Expected 061 person options button to be tappable',
+        );
+        await _pumpUntilFoundWithReason(
+          tester,
+          find.byKey(const Key('person-option-edit-birthday')),
+          reason: 'Expected 061 person option sheet to show birthday action',
+          timeout: const Duration(seconds: 30),
+        );
+        await _tapHitTestableFinder(
+          tester,
+          find.byKey(const Key('person-option-edit-birthday')),
+          reason: 'Expected 061 birthday option to be tappable',
+        );
+        await _pumpUntilFoundWithReason(
+          tester,
+          find.byKey(const Key('person-edit-birthday-save')),
+          reason: 'Expected 061 birthday edit dialog to appear',
+          timeout: const Duration(seconds: 30),
+        );
+        await _tapHitTestableFinder(
+          tester,
+          find.byKey(const Key('person-edit-birthday-save')),
+          reason: 'Expected 061 birthday save button to be tappable',
+        );
+
+        final editedPrimary = await _waitForLocalPersonState(
+          tester,
+          peopleService,
+          primaryPersonId,
+          (person) =>
+              person != null &&
+              person.name == editedName &&
+              person.birthDate != null &&
+              person.birthDate!.year == birthday.year &&
+              person.birthDate!.month == birthday.month &&
+              person.birthDate!.day == birthday.day,
+          reason:
+              'Expected 061 UI edits to persist to the local primary person',
+        );
+        expect(editedPrimary!.name, editedName);
+
+        await _waitForServerPeopleState(
+          tester,
+          peopleApi,
+          withHidden: true,
+          matches: (people) => people.any(
+            (person) =>
+                person.id == primaryPersonId &&
+                person.name == editedName &&
+                person.birthDate?.year == birthday.year &&
+                person.birthDate?.month == birthday.month &&
+                person.birthDate?.day == birthday.day,
+          ),
+          reason:
+              'Expected 061 UI edits to persist to the server primary person',
+        );
+
+        _expectBulkSuccess(
+          await peopleApi.mergePerson(
+            primaryPersonId,
+            api.MergePersonDto(ids: [mergePersonId]),
+          ),
+          {mergePersonId},
+          reason: 'Expected 061 merge API to accept the source person',
+        );
+        createdPeopleIds.remove(mergePersonId);
+        await _resetAndSyncRemoteState(tester, container);
+
+        for (final assetId in mergeAssetIds) {
+          await _waitForAssetPeopleState(
+            tester,
+            peopleService,
+            assetId,
+            (people) =>
+                people.any((person) => person.id == primaryPersonId) &&
+                !people.any((person) => person.id == mergePersonId),
+            reason:
+                'Expected 061 merged asset $assetId to belong to the primary person locally',
+          );
+          expect(
+            await _remoteAssetFaceRowCount(
+              container.read(driftProvider),
+              assetId,
+              primaryPersonId,
+            ),
+            1,
+          );
+          expect(
+            await _remoteAssetFaceRowCount(
+              container.read(driftProvider),
+              assetId,
+              mergePersonId,
+            ),
+            0,
+          );
+        }
+
+        final personTimeline = container
+            .read(timelineFactoryProvider)
+            .person(container.read(currentUserProvider)!.id, primaryPersonId);
+        addTearDown(personTimeline.dispose);
+        await _expectTimelineAssetSet(
+          tester,
+          personTimeline,
+          includes: {...primaryAssetIds, ...mergeAssetIds},
+          excludes: {hiddenAssetId, ...unnamedAssetIds},
+          reason:
+              'Expected 061 person timeline to include primary and merged assets only',
+        );
+
+        _expectBulkSuccess(
+          await peopleApi.updatePeople(
+            api.PeopleUpdateDto(
+              people: [
+                api.PeopleUpdateItem(
+                  id: hiddenPersonId,
+                  isHidden: const api.Optional.present(true),
+                ),
+              ],
+            ),
+          ),
+          {hiddenPersonId},
+          reason: 'Expected 061 hidden person update to succeed',
+        );
+        await _resetAndSyncRemoteState(tester, container);
+
+        final visibleAfterHide = await _waitForLocalPeopleState(
+          tester,
+          peopleService,
+          (people) =>
+              people.any((person) => person.id == primaryPersonId) &&
+              people.any((person) => person.id == unnamedPersonId) &&
+              !people.any((person) => person.id == hiddenPersonId) &&
+              !people.any((person) => person.id == mergePersonId),
+          reason:
+              'Expected 061 hidden and merged people to disappear from the local collection',
+        );
+        expect(
+          visibleAfterHide.map((person) => person.id),
+          isNot(contains(hiddenPersonId)),
+        );
+        expect(
+          await _waitForAssetPeopleState(
+            tester,
+            peopleService,
+            hiddenAssetId,
+            (people) => people.isEmpty,
+            reason:
+                'Expected 061 hidden person to be filtered from asset people locally',
+          ),
+          isEmpty,
+        );
+
+        await _waitForServerPeopleState(
+          tester,
+          peopleApi,
+          withHidden: true,
+          matches: (people) => people.any(
+            (person) => person.id == hiddenPersonId && person.isHidden,
+          ),
+          reason: 'Expected 061 server people list to retain hidden person',
+        );
+        await _waitForServerPeopleState(
+          tester,
+          peopleApi,
+          withHidden: false,
+          matches: (people) =>
+              !people.any((person) => person.id == hiddenPersonId),
+          reason:
+              'Expected 061 visible server people list to exclude hidden person',
+        );
+
+        await router.maybePop();
+        container = await _restartAuthenticatedApp(
+          tester,
+          email: _email,
+          password: _password,
+        );
+        peopleService = container.read(driftPeopleServiceProvider);
+        await _resetAndSyncRemoteState(tester, container);
+        await _waitForLocalPersonState(
+          tester,
+          peopleService,
+          primaryPersonId,
+          (person) =>
+              person != null &&
+              person.name == editedName &&
+              person.birthDate != null &&
+              person.birthDate!.year == birthday.year &&
+              person.birthDate!.month == birthday.month &&
+              person.birthDate!.day == birthday.day,
+          reason:
+              'Expected 061 edited name and birthday to persist after restart',
+        );
+        await _waitForLocalPeopleState(
+          tester,
+          peopleService,
+          (people) =>
+              people.any((person) => person.id == primaryPersonId) &&
+              !people.any((person) => person.id == hiddenPersonId) &&
+              !people.any((person) => person.id == mergePersonId),
+          reason:
+              'Expected 061 hidden and merged people to remain filtered after restart',
+        );
+      },
+    );
+
     if (_selectedCaseId.isNotEmpty && !_registeredSelectedCase) {
       test(
         _selectedCaseId,
@@ -12972,7 +13401,12 @@ Future<void> _tapHitTestableFinder(
   String? reason,
   Duration timeout = const Duration(seconds: 30),
 }) async {
-  await pumpUntilFound(tester, finder, timeout: timeout);
+  await _pumpUntilFoundWithReason(
+    tester,
+    finder,
+    reason: reason ?? 'Expected finder to be tappable',
+    timeout: timeout,
+  );
   await _pumpUntil(
     tester,
     () => finder.hitTestable().evaluate().isNotEmpty,
@@ -17501,6 +17935,56 @@ Future<List<DriftPerson>> _waitForLocalPeopleState(
   }
 
   fail('$reason; latest local people=$latest');
+}
+
+Future<DriftPerson?> _waitForLocalPersonState(
+  WidgetTester tester,
+  DriftPeopleService peopleService,
+  String personId,
+  bool Function(DriftPerson? person) matches, {
+  required String reason,
+}) async {
+  DriftPerson? latest;
+  final end = DateTime.now().add(const Duration(seconds: 60));
+  while (DateTime.now().isBefore(end)) {
+    latest = await peopleService.get(personId);
+    if (matches(latest)) {
+      return latest;
+    }
+    await _pumpFor(tester, const Duration(milliseconds: 500));
+  }
+
+  fail('$reason; latest local person=$latest');
+}
+
+Future<List<api.PersonResponseDto>> _waitForServerPeopleState(
+  WidgetTester tester,
+  api.PeopleApi peopleApi, {
+  required bool withHidden,
+  required bool Function(List<api.PersonResponseDto> people) matches,
+  required String reason,
+}) async {
+  var latest = const <api.PersonResponseDto>[];
+  Object? lastError;
+  final end = DateTime.now().add(const Duration(seconds: 60));
+  while (DateTime.now().isBefore(end)) {
+    try {
+      latest =
+          (await peopleApi.getAllPeople(
+            withHidden: withHidden,
+            size: 1000,
+          ))?.people ??
+          const <api.PersonResponseDto>[];
+      if (matches(latest)) {
+        return latest;
+      }
+    } catch (error) {
+      lastError = error;
+    }
+    await _pumpFor(tester, const Duration(milliseconds: 500));
+  }
+
+  fail('$reason; latest server people=$latest; last error=$lastError');
 }
 
 Future<List<DriftPerson>> _waitForAssetPeopleState(

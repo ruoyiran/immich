@@ -19,11 +19,13 @@ class PersonOptionSheet extends StatelessWidget {
           shrinkWrap: true,
           children: [
             ListTile(
+              key: const Key('person-option-edit-name'),
               leading: const Icon(Icons.edit),
               title: Text('edit_name'.t(context: context), style: textStyle),
               onTap: onEditName,
             ),
             ListTile(
+              key: const Key('person-option-edit-birthday'),
               leading: const Icon(Icons.cake),
               title: Text((birthdayExists ? 'edit_birthday' : "add_birthday").t(context: context), style: textStyle),
               onTap: onEditBirthday,

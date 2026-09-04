@@ -60,6 +60,7 @@ class _DriftPersonNameEditFormState extends ConsumerState<DriftPersonNameEditFor
       title: const Text("edit_name", style: TextStyle(fontWeight: FontWeight.bold)).tr(),
       content: SingleChildScrollView(
         child: TextFormField(
+          key: const Key('person-edit-name-field'),
           controller: _formController,
           textCapitalization: TextCapitalization.words,
           autofocus: true,
@@ -68,6 +69,7 @@ class _DriftPersonNameEditFormState extends ConsumerState<DriftPersonNameEditFor
       ),
       actions: [
         TextButton(
+          key: const Key('person-edit-name-cancel'),
           onPressed: () => context.pop(null),
           child: Text(
             "cancel",
@@ -75,6 +77,7 @@ class _DriftPersonNameEditFormState extends ConsumerState<DriftPersonNameEditFor
           ).tr(),
         ),
         TextButton(
+          key: const Key('person-edit-name-save'),
           onPressed: () => onEdit(widget.person.id, _formController.text),
           child: Text(
             "save",

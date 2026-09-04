@@ -78,6 +78,7 @@ class _MesmerizingSliverAppBarState extends ConsumerState<PersonSliverAppBar> {
             snap: false,
             elevation: 0,
             leading: IconButton(
+              key: Key('person-detail-back-${widget.person.id}'),
               icon: Icon(
                 Platform.isIOS ? Icons.arrow_back_ios_new_rounded : Icons.arrow_back,
                 color: Color.lerp(Colors.white, context.primaryColor, _scrollProgress),
@@ -93,6 +94,7 @@ class _MesmerizingSliverAppBarState extends ConsumerState<PersonSliverAppBar> {
             ),
             actions: [
               IconButton(
+                key: Key('person-detail-options-${widget.person.id}'),
                 icon: Icon(Icons.more_vert, color: actionIconColor, shadows: actionIconShadows),
                 onPressed: widget.onShowOptions,
               ),
@@ -233,6 +235,7 @@ class _ExpandedBackgroundState extends ConsumerState<_ExpandedBackground> with S
                       backgroundImage: RemoteImageProvider(
                         url: getFaceThumbnailUrl(widget.person.id, updatedAt: widget.person.updatedAt),
                       ),
+                      onBackgroundImageError: (_, _) {},
                     ),
                   ),
                 ),
@@ -243,6 +246,7 @@ class _ExpandedBackgroundState extends ConsumerState<_ExpandedBackground> with S
                     mainAxisSize: MainAxisSize.min,
                     children: [
                       GestureDetector(
+                        key: Key('person-detail-name-${widget.person.id}'),
                         onTap: () => widget.onNameTap.call(),
                         child: SizedBox(
                           width: double.infinity,
@@ -275,6 +279,7 @@ class _ExpandedBackgroundState extends ConsumerState<_ExpandedBackground> with S
                       AnimatedContainer(duration: const Duration(milliseconds: 300), child: const _ItemCountText()),
                       const SizedBox(height: 8),
                       GestureDetector(
+                        key: Key('person-detail-birthday-${widget.person.id}'),
                         onTap: widget.onBirthdayTap,
                         child: Row(
                           crossAxisAlignment: CrossAxisAlignment.start,
