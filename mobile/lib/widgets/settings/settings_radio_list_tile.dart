@@ -12,8 +12,15 @@ class SettingsRadioListTile<T> extends StatelessWidget {
   final List<SettingsRadioGroup<T>> groups;
   final T groupBy;
   final void Function(T?) onRadioChanged;
+  final String? radioKeyPrefix;
 
-  const SettingsRadioListTile({super.key, required this.groups, required this.groupBy, required this.onRadioChanged});
+  const SettingsRadioListTile({
+    super.key,
+    required this.groups,
+    required this.groupBy,
+    required this.onRadioChanged,
+    this.radioKeyPrefix,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -24,6 +31,7 @@ class SettingsRadioListTile<T> extends StatelessWidget {
         children: groups
             .map(
               (g) => RadioListTile<T>(
+                key: radioKeyPrefix == null ? null : ValueKey('$radioKeyPrefix-${g.value}'),
                 contentPadding: const EdgeInsets.symmetric(horizontal: 20),
                 dense: true,
                 activeColor: context.primaryColor,

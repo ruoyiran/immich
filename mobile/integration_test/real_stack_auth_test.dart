@@ -13448,6 +13448,104 @@ void main() async {
       expect(apiService.apiClient.basePath, originalEndpoint);
     });
 
+    _realStackSessionTest('MOB-UI-063-$_caseSuffix', 'persists settings preferences across restart', (tester) async {
+      tester.view.devicePixelRatio = 1.0;
+      tester.view.physicalSize = const Size(430, 932);
+      addTearDown(tester.view.reset);
+
+      await _loadAuthenticatedApp(tester, overrideCancellation: true, closeDriftOnDispose: false);
+      var container = _containerOfApp(tester);
+      var originalLocale = const Locale('en');
+
+      addTearDown(() async {
+        await _restoreSettingsPreferenceDefaults();
+        await _restoreLocaleIfPossible(tester, originalLocale);
+      });
+
+      await _restoreSettingsPreferenceDefaults();
+
+      await _openSettingsSection(tester, container, SettingSection.languages);
+      final currentLocale = Localizations.localeOf(tester.element(find.byType(SettingsSubPage)));
+      originalLocale = currentLocale;
+      final changedLocale = _isSimplifiedChinese(currentLocale)
+          ? const Locale('en')
+          : const Locale.fromSubtags(languageCode: 'zh', scriptCode: 'Hans');
+      await _applyLanguageLocale(tester, changedLocale);
+      expect(Localizations.localeOf(tester.element(find.byType(SettingsSubPage))).toString(), changedLocale.toString());
+      await _restoreLocaleIfPossible(tester, currentLocale);
+      await _pumpUntil(
+        tester,
+        () =>
+            Localizations.localeOf(tester.element(find.byType(SettingsSubPage))).toString() == currentLocale.toString(),
+        timeout: const Duration(seconds: 10),
+      );
+      expect(tester.takeException(), isNull);
+
+      await _openSettingsSection(tester, container, SettingSection.notifications);
+      await _expectNotificationSettingsBranch(tester);
+
+      await _openSettingsSection(tester, container, SettingSection.preferences);
+      await _setSettingsSwitchValue(tester, const ValueKey('settings-theme-system-switch'), false);
+      await _pumpUntil(
+        tester,
+        () => SettingsRepository.instance.appConfig.theme.mode != ThemeMode.system,
+        timeout: const Duration(seconds: 10),
+      );
+      await _setSettingsSwitchValue(tester, const ValueKey('settings-haptic-enabled-switch'), false);
+      await _pumpUntil(
+        tester,
+        () => Store.get(StoreKey.enableHapticFeedback, true) == false,
+        timeout: const Duration(seconds: 10),
+      );
+      await _selectSettingsRadioValue(tester, 'settings-share-quality', ShareAssetType.preview);
+      await _waitForAppConfigSetting(tester, SettingsKey.shareFileType, ShareAssetType.preview);
+
+      await _openSettingsSection(tester, container, SettingSection.timeline);
+      await _setSettingsSwitchValue(tester, const ValueKey('settings-timeline-storage-indicator-switch'), false);
+      await _waitForAppConfigSetting(tester, SettingsKey.timelineStorageIndicator, false);
+      await _setSettingsSliderFraction(tester, const ValueKey('settings-timeline-tiles-per-row-slider'), 0.75);
+      await _waitForAppConfigSetting(tester, SettingsKey.timelineTilesPerRow, 5);
+      await _selectSettingsRadioValue(tester, 'settings-timeline-group-by', GroupAssetsBy.month);
+      await _waitForAppConfigSetting(tester, SettingsKey.timelineGroupAssetsBy, GroupAssetsBy.month);
+
+      await _openSettingsSection(tester, container, SettingSection.assetViewer);
+      await _setSettingsSwitchValue(tester, const ValueKey('settings-viewer-load-original-image-switch'), true);
+      await _waitForAppConfigSetting(tester, SettingsKey.imageLoadOriginal, true);
+      await _setSettingsSwitchValue(tester, const ValueKey('settings-viewer-tap-to-navigate-switch'), true);
+      await _waitForAppConfigSetting(tester, SettingsKey.viewerTapToNavigate, true);
+      await _setSettingsSwitchValue(tester, const ValueKey('settings-viewer-video-autoplay-switch'), false);
+      await _waitForAppConfigSetting(tester, SettingsKey.viewerAutoPlayVideo, false);
+      await _setSettingsSwitchValue(tester, const ValueKey('settings-slideshow-repeat-switch'), false);
+      await _waitForAppConfigSetting(tester, SettingsKey.slideshowRepeat, false);
+      await _setSettingsSliderFraction(tester, const ValueKey('settings-slideshow-duration-slider'), 0.2);
+      await _waitForAppConfigSetting(tester, SettingsKey.slideshowDuration, 10);
+      await _selectSettingsRadioValue(tester, 'settings-slideshow-look', SlideshowLook.cover);
+      await _waitForAppConfigSetting(tester, SettingsKey.slideshowLook, SlideshowLook.cover);
+      await _selectSettingsRadioValue(tester, 'settings-slideshow-direction', SlideshowDirection.shuffle);
+      await _waitForAppConfigSetting(tester, SettingsKey.slideshowDirection, SlideshowDirection.shuffle);
+
+      container = await _restartAuthenticatedApp(tester, email: _email, password: _password);
+      await _waitForAppConfigSetting(tester, SettingsKey.shareFileType, ShareAssetType.preview);
+      await _waitForAppConfigSetting(tester, SettingsKey.timelineTilesPerRow, 5);
+      await _waitForAppConfigSetting(tester, SettingsKey.timelineGroupAssetsBy, GroupAssetsBy.month);
+      await _waitForAppConfigSetting(tester, SettingsKey.imageLoadOriginal, true);
+      await _waitForAppConfigSetting(tester, SettingsKey.viewerTapToNavigate, true);
+      await _waitForAppConfigSetting(tester, SettingsKey.viewerAutoPlayVideo, false);
+      await _waitForAppConfigSetting(tester, SettingsKey.slideshowDirection, SlideshowDirection.shuffle);
+
+      await _restoreSettingsPreferenceDefaults();
+      await _waitForAppConfigSetting(tester, SettingsKey.themeMode, ThemeMode.system);
+      await _waitForAppConfigSetting(tester, SettingsKey.shareFileType, ShareAssetType.original);
+      await _waitForAppConfigSetting(tester, SettingsKey.timelineTilesPerRow, 4);
+      await _waitForAppConfigSetting(tester, SettingsKey.timelineGroupAssetsBy, GroupAssetsBy.day);
+      await _waitForAppConfigSetting(tester, SettingsKey.imageLoadOriginal, false);
+      await _waitForAppConfigSetting(tester, SettingsKey.viewerTapToNavigate, false);
+      await _waitForAppConfigSetting(tester, SettingsKey.viewerAutoPlayVideo, true);
+      await _waitForAppConfigSetting(tester, SettingsKey.slideshowDirection, SlideshowDirection.forward);
+      expect(Store.get(StoreKey.enableHapticFeedback, true), isTrue);
+      expect(container.read(apiServiceProvider).apiClient.basePath, _apiEndpoint(_serverUrl));
+    });
+
     if (_selectedCaseId.isNotEmpty && !_registeredSelectedCase) {
       test(
         _selectedCaseId,
@@ -15711,11 +15809,243 @@ Future<void> _waitForBackupSetting<T>(
   SettingsKey<T> settingKey,
   T expected,
 ) async {
+  await _waitForAppConfigSetting(tester, settingKey, expected);
+}
+
+Future<void> _waitForAppConfigSetting<T>(
+  WidgetTester tester,
+  SettingsKey<T> settingKey,
+  T expected,
+) async {
   await _pumpUntil(
     tester,
     () => SettingsRepository.instance.appConfig.read(settingKey) == expected,
     timeout: const Duration(seconds: 10),
   );
+}
+
+Future<void> _openSettingsRoot(
+  WidgetTester tester,
+  ProviderContainer container,
+) async {
+  final router = container.read(appRouterProvider);
+
+  for (var attempt = 0; attempt < 4; attempt++) {
+    final onRoot = find.byType(SettingsPage).evaluate().isNotEmpty && find.byType(SettingsSubPage).evaluate().isEmpty;
+    if (onRoot) {
+      return;
+    }
+
+    if (find.byType(SettingsSubPage).evaluate().isNotEmpty) {
+      await router.maybePop();
+    } else if (find.byType(SettingsPage).evaluate().isEmpty) {
+      unawaited(router.push(const SettingsRoute()));
+    }
+
+    await _pumpFor(tester, const Duration(milliseconds: 500));
+  }
+
+  await _pumpUntil(
+    tester,
+    () => find.byType(SettingsPage).evaluate().isNotEmpty && find.byType(SettingsSubPage).evaluate().isEmpty,
+    timeout: const Duration(seconds: 30),
+  );
+}
+
+Future<void> _openSettingsSection(
+  WidgetTester tester,
+  ProviderContainer container,
+  SettingSection section,
+) async {
+  await _openSettingsRoot(tester, container);
+  final card = find.byKey(ValueKey('settings-card-${section.name}'));
+  await _scrollSettingsRootUntilHitTestable(tester, card);
+  await _tapHitTestableFinder(tester, card, reason: 'Expected ${section.name} settings card to be tappable');
+  await _pumpUntil(
+    tester,
+    () => find.byType(SettingsSubPage).evaluate().any((element) {
+      final widget = element.widget;
+      return widget is SettingsSubPage && widget.section == section;
+    }),
+    timeout: const Duration(seconds: 30),
+  );
+}
+
+Future<void> _scrollSettingsRootUntilHitTestable(
+  WidgetTester tester,
+  Finder target,
+) async {
+  final scrollable = find.descendant(
+    of: find.byType(SettingsPage),
+    matching: find.byType(Scrollable),
+  );
+  expect(scrollable, findsWidgets);
+
+  for (final delta in const [Offset(0, -350), Offset(0, 350)]) {
+    for (var attempt = 0; attempt < 24; attempt++) {
+      if (tester.any(target.hitTestable())) {
+        return;
+      }
+      await tester.drag(scrollable.last, delta);
+      await _pumpFor(tester, const Duration(milliseconds: 100));
+    }
+  }
+
+  fail('Expected $target to become hit testable on the settings root page');
+}
+
+Future<void> _setSettingsSwitchValue(
+  WidgetTester tester,
+  Key tileKey,
+  bool expected,
+) async {
+  final tile = find.byKey(tileKey);
+  await pumpUntilFound(tester, tile, timeout: const Duration(seconds: 30));
+  await tester.ensureVisible(tile.first);
+  await _pumpFor(tester, const Duration(milliseconds: 200));
+  final switchFinder = find.descendant(of: tile, matching: find.byType(Switch));
+  expect(switchFinder, findsOneWidget);
+  if (tester.widget<Switch>(switchFinder).value == expected) {
+    return;
+  }
+
+  await _tapHitTestableFinder(tester, tile, reason: 'Expected $tileKey settings switch to be tappable');
+  await _pumpUntil(
+    tester,
+    () => tester.widget<Switch>(switchFinder).value == expected,
+    timeout: const Duration(seconds: 10),
+  );
+}
+
+Future<void> _setSettingsSliderFraction(
+  WidgetTester tester,
+  Key sliderKey,
+  double fraction,
+) async {
+  final slider = find.byKey(sliderKey);
+  await pumpUntilFound(tester, slider, timeout: const Duration(seconds: 30));
+  await tester.ensureVisible(slider.first);
+  await _pumpFor(tester, const Duration(milliseconds: 200));
+  final rect = tester.getRect(slider.first);
+  await tester.tapAt(Offset(rect.left + rect.width * fraction, rect.center.dy));
+  await _pumpFor(tester, const Duration(milliseconds: 500));
+}
+
+Future<void> _selectSettingsRadioValue(
+  WidgetTester tester,
+  String keyPrefix,
+  Object value,
+) async {
+  final radio = find.byKey(ValueKey('$keyPrefix-$value'));
+  await pumpUntilFound(tester, radio, timeout: const Duration(seconds: 30));
+  await tester.ensureVisible(radio.first);
+  await _pumpFor(tester, const Duration(milliseconds: 200));
+  await _tapHitTestableFinder(tester, radio, reason: 'Expected $keyPrefix $value radio option to be tappable');
+  await _pumpFor(tester, const Duration(milliseconds: 500));
+}
+
+Future<void> _applyLanguageLocale(WidgetTester tester, Locale locale) async {
+  final language = find.text(_languageListLabel(locale), skipOffstage: false);
+  await _scrollSettingsListUntilHitTestable(tester, language);
+  await _tapHitTestableFinder(tester, language, reason: 'Expected $locale language option to be tappable');
+
+  final apply = find.byKey(const ValueKey('language-settings-apply-button'));
+  await _pumpUntil(tester, () {
+    final buttons = apply.evaluate();
+    return buttons.isNotEmpty && (buttons.first.widget as ElevatedButton).onPressed != null;
+  }, timeout: const Duration(seconds: 10));
+  await _tapHitTestableFinder(tester, apply, reason: 'Expected language apply button to be tappable');
+  await _pumpUntil(
+    tester,
+    () => Localizations.localeOf(tester.element(find.byType(SettingsSubPage))).toString() == locale.toString(),
+    timeout: const Duration(seconds: 10),
+  );
+}
+
+String _languageListLabel(Locale locale) {
+  if (_isSimplifiedChinese(locale)) {
+    return 'Chinese Simplified (zh_CN)';
+  }
+
+  if (locale.languageCode == 'en') {
+    return 'English (en)';
+  }
+
+  return locale.toString();
+}
+
+bool _isSimplifiedChinese(Locale locale) => locale.languageCode == 'zh' && locale.scriptCode == 'Hans';
+
+Future<void> _scrollSettingsListUntilHitTestable(
+  WidgetTester tester,
+  Finder target,
+) async {
+  final scrollable = find.descendant(
+    of: find.byType(SettingsSubPage),
+    matching: find.byType(Scrollable),
+  );
+  expect(scrollable, findsWidgets);
+
+  for (final delta in const [Offset(0, -350), Offset(0, 350)]) {
+    for (var attempt = 0; attempt < 24; attempt++) {
+      if (tester.any(target.hitTestable())) {
+        return;
+      }
+      await tester.drag(scrollable.last, delta);
+      await _pumpFor(tester, const Duration(milliseconds: 100));
+    }
+  }
+
+  fail('Expected $target to become hit testable');
+}
+
+Future<void> _expectNotificationSettingsBranch(WidgetTester tester) async {
+  final enableButton = find.byKey(const ValueKey('settings-notifications-enable-button'));
+  final openButton = find.byKey(const ValueKey('settings-notifications-open-button'));
+  await _pumpUntil(
+    tester,
+    () => enableButton.evaluate().isNotEmpty || openButton.evaluate().isNotEmpty,
+    timeout: const Duration(seconds: 30),
+  );
+  expect(enableButton.evaluate().length + openButton.evaluate().length, 1);
+}
+
+Future<void> _restoreSettingsPreferenceDefaults() async {
+  await SettingsRepository.instance.write(SettingsKey.themeMode, ThemeMode.system);
+  await SettingsRepository.instance.write(SettingsKey.themeColorfulInterface, true);
+  await SettingsRepository.instance.write(SettingsKey.shareFileType, ShareAssetType.original);
+  await SettingsRepository.instance.write(SettingsKey.timelineStorageIndicator, true);
+  await SettingsRepository.instance.write(SettingsKey.timelineTilesPerRow, 4);
+  await SettingsRepository.instance.write(SettingsKey.timelineGroupAssetsBy, GroupAssetsBy.day);
+  await SettingsRepository.instance.write(SettingsKey.imageLoadOriginal, false);
+  await SettingsRepository.instance.write(SettingsKey.viewerTapToNavigate, false);
+  await SettingsRepository.instance.write(SettingsKey.viewerAutoPlayVideo, true);
+  await SettingsRepository.instance.write(SettingsKey.viewerLoopVideo, true);
+  await SettingsRepository.instance.write(SettingsKey.viewerLoadOriginalVideo, false);
+  await SettingsRepository.instance.write(SettingsKey.slideshowRepeat, true);
+  await SettingsRepository.instance.write(SettingsKey.slideshowDuration, 5);
+  await SettingsRepository.instance.write(SettingsKey.slideshowLook, SlideshowLook.blurredBackground);
+  await SettingsRepository.instance.write(SettingsKey.slideshowDirection, SlideshowDirection.forward);
+  await Store.put(StoreKey.enableHapticFeedback, true);
+}
+
+Future<void> _restoreLocaleIfPossible(WidgetTester tester, Locale locale) async {
+  final candidateFinders = [
+    find.byType(SettingsSubPage),
+    find.byType(SettingsPage),
+    find.byType(MaterialApp),
+    find.byType(app.MainWidget),
+  ];
+
+  for (final finder in candidateFinders) {
+    for (final element in finder.evaluate()) {
+      final localization = EasyLocalization.of(element);
+      if (localization != null) {
+        await localization.setLocale(locale);
+        return;
+      }
+    }
+  }
 }
 
 Future<void> _ensureUploadQueueTextVisible(

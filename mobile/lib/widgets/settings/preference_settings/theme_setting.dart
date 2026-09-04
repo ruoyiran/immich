@@ -57,18 +57,21 @@ class ThemeSetting extends HookConsumerWidget {
           icon: Icons.color_lens_outlined,
         ),
         SettingsSwitchListTile(
+          tileKey: const ValueKey('settings-theme-system-switch'),
           valueNotifier: isSystemTheme,
           title: 'theme_setting_system_theme_switch'.t(context: context),
           onChanged: onSystemThemeChange,
         ),
         if (currentTheme.value != ThemeMode.system)
           SettingsSwitchListTile(
+            tileKey: const ValueKey('settings-theme-dark-switch'),
             valueNotifier: isDarkTheme,
             title: 'map_settings_dark_mode'.t(context: context),
             onChanged: onThemeChange,
           ),
         const PrimaryColorSetting(),
         SettingsSwitchListTile(
+          tileKey: const ValueKey('settings-theme-colorful-switch'),
           valueNotifier: colorfulInterface,
           title: "theme_setting_colorful_interface_title".t(context: context),
           subtitle: 'theme_setting_colorful_interface_subtitle'.t(context: context),

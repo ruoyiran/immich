@@ -10,6 +10,8 @@ class SettingsSliderListTile extends StatelessWidget {
   final String? label;
   final bool enabled;
   final Function(int)? onChangeEnd;
+  final Key? tileKey;
+  final Key? sliderKey;
 
   const SettingsSliderListTile({
     required this.valueNotifier,
@@ -20,16 +22,20 @@ class SettingsSliderListTile extends StatelessWidget {
     this.enabled = true,
     this.label,
     this.onChangeEnd,
+    this.tileKey,
+    this.sliderKey,
     super.key,
   });
 
   @override
   Widget build(BuildContext context) {
     return ListTile(
+      key: tileKey,
       contentPadding: const EdgeInsets.symmetric(horizontal: 20),
       dense: true,
       title: Text(text, style: context.textTheme.bodyLarge?.copyWith(fontWeight: FontWeight.w500)),
       subtitle: Slider(
+        key: sliderKey,
         value: valueNotifier.value.toDouble(),
         onChanged: (double v) => valueNotifier.value = v.toInt(),
         onChangeEnd: (double v) => onChangeEnd?.call(v.toInt()),

@@ -95,7 +95,7 @@ class LanguageSettings extends HookWidget {
                       final bool isSelected = selectedLocale.value == localeValue;
 
                       return _LanguageItem(
-                        key: ValueKey(localeValue.toString()),
+                        key: ValueKey('language-settings-locale-$localeValue'),
                         countryName: countryName,
                         localeValue: localeValue,
                         isSelected: isSelected,
@@ -150,6 +150,7 @@ class _LanguageSearchBar extends StatelessWidget {
           ),
         ),
         child: SearchField(
+          key: const ValueKey('language-settings-search-field'),
           autofocus: false,
           contentPadding: const EdgeInsets.all(12),
           hintText: 'language_search_hint'.t(context: context),
@@ -210,6 +211,7 @@ class _LanguageApplyButton extends StatelessWidget {
           width: double.infinity,
           height: 48,
           child: ElevatedButton(
+            key: const ValueKey('language-settings-apply-button'),
             onPressed: isDisabled ? null : onPressed,
             child: isLoading
                 ? const SizedBox.square(dimension: 24, child: CircularProgressIndicator(strokeWidth: 2))
@@ -242,11 +244,11 @@ class _LanguageItem extends StatelessWidget {
   Widget build(BuildContext context) {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 4.0, horizontal: 8.0),
-      child: DecoratedBox(
-        decoration: BoxDecoration(
-          color: context.colorScheme.surfaceContainerLowest.withValues(alpha: .6),
+      child: Material(
+        color: context.colorScheme.surfaceContainerLowest.withValues(alpha: .6),
+        shape: RoundedRectangleBorder(
           borderRadius: const BorderRadius.all(Radius.circular(16.0)),
-          border: Border.all(color: context.colorScheme.outlineVariant.withValues(alpha: .4), width: 1.0),
+          side: BorderSide(color: context.colorScheme.outlineVariant.withValues(alpha: .4), width: 1.0),
         ),
         child: ListTile(
           title: Text(

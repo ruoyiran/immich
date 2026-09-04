@@ -37,6 +37,7 @@ class ShareSetting extends HookConsumerWidget {
           ),
         ),
         SettingsRadioListTile(
+          radioKeyPrefix: 'settings-share-quality',
           groups: [
             SettingsRadioGroup(title: context.t.share_original, value: ShareAssetType.original),
             SettingsRadioGroup(title: context.t.share_preview, value: ShareAssetType.preview),

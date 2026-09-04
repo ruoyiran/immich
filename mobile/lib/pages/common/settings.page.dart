@@ -72,6 +72,7 @@ class _MobileLayout extends StatelessWidget {
           (setting) => setting == SettingSection.beta
               ? [
                   SettingsCard(
+                    tileKey: const ValueKey('settings-card-beta'),
                     icon: Icons.sync_outlined,
                     title: 'sync_status'.tr(),
                     subtitle: 'sync_status_subtitle'.tr(),
@@ -80,6 +81,7 @@ class _MobileLayout extends StatelessWidget {
                 ]
               : [
                   SettingsCard(
+                    tileKey: ValueKey('settings-card-${setting.name}'),
                     title: setting.title.tr(),
                     subtitle: setting.subtitle.tr(),
                     icon: setting.icon,
@@ -90,6 +92,7 @@ class _MobileLayout extends StatelessWidget {
         .toList();
     settings.add(
       SettingsCard(
+        tileKey: const ValueKey('settings-card-whats-new'),
         icon: Icons.auto_awesome_outlined,
         title: context.t.whats_new,
         subtitle: context.t.whats_new_settings_subtitle,
@@ -116,6 +119,7 @@ class _TabletLayout extends HookWidget {
               ...SettingSection.values.map(
                 (s) => SliverToBoxAdapter(
                   child: ListTile(
+                    key: ValueKey('settings-card-${s.name}'),
                     title: Text(s.title).tr(),
                     leading: Icon(s.icon),
                     selected: s.index == selectedSection.value.index,

@@ -28,6 +28,7 @@ class ImageViewerQualitySetting extends HookConsumerWidget {
           subtitle: "setting_image_viewer_help".t(context: context),
         ),
         SettingsSwitchListTile(
+          tileKey: const ValueKey('settings-viewer-load-original-image-switch'),
           valueNotifier: isOriginal,
           title: "setting_image_viewer_original_title".t(context: context),
           subtitle: "setting_image_viewer_original_subtitle".t(context: context),

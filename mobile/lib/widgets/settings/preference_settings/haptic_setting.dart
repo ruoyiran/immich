@@ -26,6 +26,7 @@ class HapticSetting extends HookWidget {
           icon: Icons.vibration_outlined,
         ),
         SettingsSwitchListTile(
+          tileKey: const ValueKey('settings-haptic-enabled-switch'),
           valueNotifier: isHapticFeedbackEnabled,
           title: 'enabled'.t(context: context),
           onChanged: onHapticFeedbackChange,
