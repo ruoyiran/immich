@@ -49,6 +49,8 @@ class UploadRepository {
   final String? _endpointOverride;
   final Map<String, String>? _headersOverride;
   final Duration _resumableStatusPollInterval;
+  final Duration _resumableStatusPollMaxInterval;
+  final Future<void> Function(Duration) _delay;
   final Map<String, Future<void>> _serverCapabilityChecks = {};
   final Map<String, int> _serverResumableChunkBytes = {};
   Future<void> _nativeHashQueue = Future.value();
@@ -63,6 +65,8 @@ class UploadRepository {
     String? endpoint,
     Map<String, String>? headers,
     Duration resumableStatusPollInterval = defaultResumableStatusPollInterval,
+    Duration resumableStatusPollMaxInterval = const Duration(seconds: 5),
+    Future<void> Function(Duration)? delay,
     bool registerDownloaderCallbacks = true,
   }) : _nativeSyncApi = nativeSyncApi ?? NativeSyncApi(),
        _localAssetRepository = localAssetRepository,
@@ -70,7 +74,9 @@ class UploadRepository {
        _stateDirectoryOverride = stateDirectory,
        _endpointOverride = endpoint,
        _headersOverride = headers,
-       _resumableStatusPollInterval = resumableStatusPollInterval {
+       _resumableStatusPollInterval = resumableStatusPollInterval,
+       _resumableStatusPollMaxInterval = resumableStatusPollMaxInterval,
+       _delay = delay ?? Future<void>.delayed {
     if (registerDownloaderCallbacks) {
       FileDownloader().registerCallbacks(
         group: kBackupGroup,
@@ -212,7 +218,11 @@ class UploadRepository {
       if (attempt == null) {
         return null;
       }
-      final status = await _sendResumableJSON(Uri.parse('$endpoint/uploads/resumable'), 'POST', attempt.startBody);
+      final status = await _startResumable(
+        Uri.parse('$endpoint/uploads/resumable'),
+        attempt,
+        replaceIncompleteConflict: false,
+      );
       await _persistResumableState(attempt, status);
       if (!status.complete) {
         return null;
@@ -608,7 +618,7 @@ class UploadRepository {
       );
     }
     final size = attempt.size;
-    var status = await _sendResumableJSON(uri, 'POST', attempt.startBody);
+    var status = await _startResumable(uri, attempt);
     await _persistResumableState(attempt, status);
     _reportResumableProgress(status, onProgress, onProcessing);
     if (!status.complete) {
@@ -685,17 +695,18 @@ class UploadRepository {
         await handle.close();
       }
     }
+    var pollInterval = _resumableStatusPollInterval;
     while (status.processing && status.assetId == null) {
       if (cancelToken?.isCompleted ?? false) {
         await _persistResumableState(attempt, status);
         await _deleteOwnedPMLiveArtifact(attempt.sourcePath, attempt.uploadId);
         return UploadResult.cancelled();
       }
-      if (_resumableStatusPollInterval > Duration.zero) {
-        await Future.any([
-          Future<void>.delayed(_resumableStatusPollInterval),
-          if (cancelToken != null) cancelToken.future,
-        ]);
+      if (pollInterval > Duration.zero) {
+        await Future.any([_delay(pollInterval), if (cancelToken != null) cancelToken.future]);
+        pollInterval = Duration(
+          microseconds: minInt(pollInterval.inMicroseconds * 2, _resumableStatusPollMaxInterval.inMicroseconds),
+        );
       }
       if (cancelToken?.isCompleted ?? false) {
         await _persistResumableState(attempt, status);
@@ -784,6 +795,26 @@ class UploadRepository {
       throw _UploadHTTPException(response.statusCode, _errorMessage(response.statusCode, responseBody));
     }
     return _ResumableStatus.fromJSON(responseBody);
+  }
+
+  Future<_ResumableStatus> _startResumable(
+    Uri uri,
+    _ResumableAttempt attempt, {
+    bool replaceIncompleteConflict = true,
+  }) async {
+    try {
+      return await _sendResumableJSON(uri, 'POST', attempt.startBody());
+    } on _UploadHTTPException catch (error) {
+      if (error.statusCode != 409 || !error.message.contains('replace_generation')) {
+        rethrow;
+      }
+
+      final current = await _sendResumableJSON(uri.replace(path: '${uri.path}/${attempt.uploadId}'), 'GET', '');
+      if (current.complete || current.generation.isEmpty || !replaceIncompleteConflict) {
+        return current;
+      }
+      return _sendResumableJSON(uri, 'POST', attempt.startBody(replaceGeneration: current.generation));
+    }
   }
 
   void _reportResumableProgress(
@@ -1131,12 +1162,13 @@ class _ResumableAttempt {
     visibility: visibility,
   );
 
-  String get startBody => jsonEncode({
+  String startBody({String? replaceGeneration}) => jsonEncode({
     'upload_id': uploadId,
     'original_name': originalFileName,
     'size': size,
     'metadata': metadata,
     'generation_capability': 'required-v1',
+    if (replaceGeneration != null) 'replace_generation': replaceGeneration,
     'md5': UploadRepository._md5Hex(checksum),
     'is_favorite': isFavorite,
     'visibility': visibility,

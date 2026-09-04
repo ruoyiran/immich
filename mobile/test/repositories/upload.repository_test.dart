@@ -138,6 +138,127 @@ void main() {
     expect(states.listSync(), isEmpty);
   });
 
+  test('resumable start replaces a stale incomplete generation after an identity conflict', () async {
+    final root = await Directory.systemTemp.createTemp('resumable-start-conflict-test-');
+    addTearDown(() => root.delete(recursive: true));
+    final source = File('${root.path}/asset.jpg');
+    await source.writeAsBytes(utf8.encode('abcde'));
+    final checksum = base64Encode(md5.convert(utf8.encode('abcde')).bytes);
+    var startRequests = 0;
+    var statusRequests = 0;
+    var chunkRequests = 0;
+    final client = _RecordingClient((request, body) async {
+      if (request.method == 'POST') {
+        startRequests++;
+        final start = jsonDecode(utf8.decode(body)) as Map<String, dynamic>;
+        if (startRequests == 1) {
+          expect(start.containsKey('replace_generation'), isFalse);
+          return _json(409, {'error': 'upload_id belongs to different file; replace_generation is required'});
+        }
+        expect(start['replace_generation'], 'gen-old');
+        return _json(200, {
+          'upload_id': start['upload_id'],
+          'generation': 'gen-new',
+          'offset': 0,
+          'size': 5,
+          'complete': false,
+        });
+      }
+      if (request.method == 'GET') {
+        statusRequests++;
+        return _json(200, {
+          'upload_id': 'asset-conflict',
+          'generation': 'gen-old',
+          'offset': 2,
+          'size': 5,
+          'complete': false,
+        });
+      }
+      chunkRequests++;
+      expect(request.headers['x-upload-generation'], 'gen-new');
+      expect(body, utf8.encode('abcde'));
+      return _json(200, {
+        'upload_id': 'asset-conflict',
+        'generation': 'gen-new',
+        'offset': 5,
+        'size': 5,
+        'complete': true,
+        'asset_id': '22222222-2222-4222-8222-222222222222',
+        'asset_status': 'created',
+      });
+    });
+    final repository = UploadRepository(
+      client: client,
+      stateDirectory: root,
+      endpoint: 'http://server/api',
+      headers: const {},
+      registerDownloaderCallbacks: false,
+    );
+
+    final result = await repository.uploadFile(
+      file: source,
+      originalFileName: 'asset.jpg',
+      fields: const {'fileCreatedAt': '2026-08-12T01:02:03Z', 'fileModifiedAt': '2026-08-12T01:02:03Z'},
+      cancelToken: null,
+      logContext: 'stale start generation',
+      checksum: checksum,
+      uploadId: 'asset-conflict',
+    );
+
+    expect(result.remoteAssetId, '22222222-2222-4222-8222-222222222222');
+    expect(startRequests, 2);
+    expect(statusRequests, 1);
+    expect(chunkRequests, 1);
+  });
+
+  test('resumable start accepts a terminal server generation after an identity conflict', () async {
+    final root = await Directory.systemTemp.createTemp('resumable-terminal-conflict-test-');
+    addTearDown(() => root.delete(recursive: true));
+    final source = File('${root.path}/asset.jpg');
+    await source.writeAsBytes(utf8.encode('abcde'));
+    var startRequests = 0;
+    var statusRequests = 0;
+    final client = _RecordingClient((request, body) async {
+      if (request.method == 'POST') {
+        startRequests++;
+        return _json(409, {'error': 'upload_id belongs to different file; replace_generation is required'});
+      }
+      expect(request.method, 'GET');
+      statusRequests++;
+      return _json(200, {
+        'upload_id': 'asset-terminal-conflict',
+        'generation': 'gen-old',
+        'offset': 5,
+        'size': 5,
+        'complete': true,
+        'asset_id': '44444444-4444-4444-8444-444444444444',
+        'asset_status': 'duplicate',
+      });
+    });
+    final repository = UploadRepository(
+      client: client,
+      stateDirectory: root,
+      endpoint: 'http://server/api',
+      headers: const {},
+      registerDownloaderCallbacks: false,
+    );
+
+    final result = await repository.uploadFile(
+      file: source,
+      originalFileName: 'asset.jpg',
+      fields: const {'fileCreatedAt': '2026-08-12T01:02:03Z', 'fileModifiedAt': '2026-08-12T01:02:03Z'},
+      cancelToken: null,
+      logContext: 'terminal start generation',
+      checksum: base64Encode(md5.convert(utf8.encode('abcde')).bytes),
+      uploadId: 'asset-terminal-conflict',
+    );
+
+    expect(result.remoteAssetId, '44444444-4444-4444-8444-444444444444');
+    expect(result.assetStatus, 'duplicate');
+    expect(startRequests, 1);
+    expect(statusRequests, 1);
+  });
+
   test('resumable upload uses the server recommended chunk size', () async {
     final root = await Directory.systemTemp.createTemp('resumable-server-chunk-test-');
     addTearDown(() => root.delete(recursive: true));
@@ -384,6 +505,134 @@ void main() {
     expect(processingBeforeTerminal, isNotEmpty);
     expect(processingBeforeTerminal, everyElement(isTrue));
     expect(processingBeforePutResponse, everyElement(isFalse));
+  });
+
+  test('resumable processing polls use bounded exponential backoff', () async {
+    final root = await Directory.systemTemp.createTemp('resumable-poll-backoff-test-');
+    addTearDown(() => root.delete(recursive: true));
+    final bytes = utf8.encode('queued');
+    final source = File('${root.path}/asset.jpg');
+    await source.writeAsBytes(bytes);
+    final delays = <Duration>[];
+    var getRequests = 0;
+    final client = _RecordingClient((request, body) async {
+      if (request.method == 'POST') {
+        return _json(200, {
+          'upload_id': 'asset-backoff',
+          'generation': 'gen-a',
+          'offset': 0,
+          'size': bytes.length,
+          'complete': false,
+        });
+      }
+      if (request.method == 'PUT') {
+        return _json(200, {
+          'upload_id': 'asset-backoff',
+          'generation': 'gen-a',
+          'offset': bytes.length,
+          'size': bytes.length,
+          'complete': true,
+          'processing': true,
+        });
+      }
+      getRequests++;
+      if (getRequests < 3) {
+        return _json(200, {
+          'upload_id': 'asset-backoff',
+          'generation': 'gen-a',
+          'offset': bytes.length,
+          'size': bytes.length,
+          'complete': true,
+          'processing': true,
+        });
+      }
+      return _json(200, {
+        'upload_id': 'asset-backoff',
+        'generation': 'gen-a',
+        'offset': bytes.length,
+        'size': bytes.length,
+        'complete': true,
+        'asset_id': '33333333-3333-4333-8333-333333333333',
+        'asset_status': 'created',
+      });
+    });
+    final repository = UploadRepository(
+      client: client,
+      stateDirectory: root,
+      endpoint: 'http://server/api',
+      headers: const {},
+      resumableStatusPollInterval: const Duration(milliseconds: 500),
+      resumableStatusPollMaxInterval: const Duration(seconds: 2),
+      delay: (duration) async => delays.add(duration),
+      registerDownloaderCallbacks: false,
+    );
+
+    final result = await repository.uploadFile(
+      file: source,
+      originalFileName: 'asset.jpg',
+      fields: const {'fileCreatedAt': '2026-08-12T01:02:03Z', 'fileModifiedAt': '2026-08-12T01:02:03Z'},
+      cancelToken: null,
+      logContext: 'processing backoff',
+      checksum: base64Encode(md5.convert(bytes).bytes),
+      uploadId: 'asset-backoff',
+    );
+
+    expect(result.remoteAssetId, '33333333-3333-4333-8333-333333333333');
+    expect(delays, const [Duration(milliseconds: 500), Duration(seconds: 1), Duration(seconds: 2)]);
+  });
+
+  test('cancellation during processing backoff sends no status request', () async {
+    final root = await Directory.systemTemp.createTemp('resumable-poll-cancel-test-');
+    addTearDown(() => root.delete(recursive: true));
+    final bytes = utf8.encode('queued');
+    final source = File('${root.path}/asset.jpg');
+    await source.writeAsBytes(bytes);
+    final cancel = Completer<void>();
+    var getRequests = 0;
+    final client = _RecordingClient((request, body) async {
+      if (request.method == 'POST') {
+        return _json(200, {
+          'upload_id': 'asset-poll-cancel',
+          'generation': 'gen-a',
+          'offset': 0,
+          'size': bytes.length,
+          'complete': false,
+        });
+      }
+      if (request.method == 'PUT') {
+        return _json(200, {
+          'upload_id': 'asset-poll-cancel',
+          'generation': 'gen-a',
+          'offset': bytes.length,
+          'size': bytes.length,
+          'complete': true,
+          'processing': true,
+        });
+      }
+      getRequests++;
+      return _json(500, {'error': 'status request should not be sent'});
+    });
+    final repository = UploadRepository(
+      client: client,
+      stateDirectory: root,
+      endpoint: 'http://server/api',
+      headers: const {},
+      delay: (_) async => cancel.complete(),
+      registerDownloaderCallbacks: false,
+    );
+
+    final result = await repository.uploadFile(
+      file: source,
+      originalFileName: 'asset.jpg',
+      fields: const {'fileCreatedAt': '2026-08-12T01:02:03Z', 'fileModifiedAt': '2026-08-12T01:02:03Z'},
+      cancelToken: cancel,
+      logContext: 'processing cancellation',
+      checksum: base64Encode(md5.convert(bytes).bytes),
+      uploadId: 'asset-poll-cancel',
+    );
+
+    expect(result.isCancelled, isTrue);
+    expect(getRequests, 0);
   });
 
   test('resumable upload rejects an unsafe server chunk recommendation', () async {
