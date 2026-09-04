@@ -31,28 +31,29 @@ class ProfilePictureCropPage extends ConsumerStatefulWidget {
 class _ProfilePictureCropPageState extends ConsumerState<ProfilePictureCropPage> {
   late final CropController _cropController;
   bool _isLoading = false;
-  bool _didInitCropController = false;
+  bool _isCropReady = false;
 
   @override
   void initState() {
     super.initState();
-    _cropController = CropController(defaultCrop: const Rect.fromLTRB(0, 0, 1, 1));
+    _cropController = CropController(aspectRatio: 1.0, defaultCrop: const Rect.fromLTRB(0.1, 0.1, 0.9, 0.9));
+    _cropController.addListener(_handleCropControllerChanged);
+  }
 
-    // Lock aspect ratio to 1:1 for circular/square crop
-    // CropController depends on CropImage initializing its bitmap size.
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || _didInitCropController) {
-        return;
-      }
-      _didInitCropController = true;
+  void _handleCropControllerChanged() {
+    final isReady = _cropController.getImage() != null;
+    if (!mounted || _isCropReady == isReady) {
+      return;
+    }
 
-      _cropController.crop = const Rect.fromLTRB(0.1, 0.1, 0.9, 0.9);
-      _cropController.aspectRatio = 1.0;
+    setState(() {
+      _isCropReady = isReady;
     });
   }
 
   @override
   void dispose() {
+    _cropController.removeListener(_handleCropControllerChanged);
     _cropController.dispose();
     super.dispose();
   }
@@ -145,9 +146,11 @@ class _ProfilePictureCropPageState extends ConsumerState<ProfilePictureCropPage>
             )
           else
             ImmichIconButton(
+              key: const Key('profile-picture-crop-save'),
               icon: Icons.done_rounded,
               color: ImmichColor.primary,
               variant: ImmichVariant.ghost,
+              disabled: !_isCropReady,
               onPressed: _handleDone,
             ),
         ],

@@ -38,8 +38,10 @@ class UserService {
   Future<String?> createProfileImage(String name, Uint8List image) async {
     try {
       final path = await _userApiRepository.createProfileImage(name: name, data: image);
-      final updatedUser = getMyUser();
-      await _storeService.put(StoreKey.currentUser, updatedUser);
+      final updatedUser = tryGetMyUser();
+      if (updatedUser != null) {
+        await _storeService.put(StoreKey.currentUser, updatedUser);
+      }
       return path;
     } catch (e) {
       _log.warning("Failed to upload profile image", e);

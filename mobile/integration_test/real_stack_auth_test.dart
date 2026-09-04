@@ -55,12 +55,14 @@ import 'package:immich_mobile/pages/backup/drift_backup_album_selection.page.dar
 import 'package:immich_mobile/pages/backup/drift_backup_asset_detail.page.dart';
 import 'package:immich_mobile/pages/backup/drift_backup_options.page.dart';
 import 'package:immich_mobile/pages/backup/drift_upload_detail.page.dart';
+import 'package:immich_mobile/pages/common/headers_settings.page.dart';
 import 'package:immich_mobile/pages/common/settings.page.dart';
 import 'package:immich_mobile/pages/library/folder/folder.page.dart';
 import 'package:immich_mobile/pages/library/locked/pin_auth.page.dart';
 import 'package:immich_mobile/pages/library/partner/partner.page.dart';
 import 'package:immich_mobile/pages/library/shared_link/shared_link.page.dart';
 import 'package:immich_mobile/pages/library/shared_link/shared_link_edit.page.dart';
+import 'package:immich_mobile/pages/login/change_password.page.dart';
 import 'package:immich_mobile/pages/login/login.page.dart';
 import 'package:immich_mobile/pages/search/map/map_location_picker.page.dart';
 import 'package:immich_mobile/pages/share_intent/share_intent.page.dart';
@@ -90,6 +92,7 @@ import 'package:immich_mobile/presentation/pages/drift_video.page.dart';
 import 'package:immich_mobile/presentation/pages/edit/drift_edit.page.dart';
 import 'package:immich_mobile/presentation/pages/edit/editor.provider.dart';
 import 'package:immich_mobile/presentation/pages/local_timeline.page.dart';
+import 'package:immich_mobile/presentation/pages/profile/profile_picture_crop.page.dart';
 import 'package:immich_mobile/presentation/pages/search/drift_search.page.dart';
 import 'package:immich_mobile/presentation/pages/search/paginated_search.provider.dart';
 import 'package:immich_mobile/presentation/widgets/album/album_selector.widget.dart';
@@ -115,6 +118,7 @@ import 'package:immich_mobile/providers/api.provider.dart';
 import 'package:immich_mobile/providers/asset_viewer/asset_viewer.provider.dart';
 import 'package:immich_mobile/providers/asset_viewer/share_intent_upload.provider.dart';
 import 'package:immich_mobile/providers/asset_viewer/video_player_provider.dart';
+import 'package:immich_mobile/providers/auth.provider.dart';
 import 'package:immich_mobile/providers/background_sync.provider.dart';
 import 'package:immich_mobile/providers/backup/backup_album.provider.dart';
 import 'package:immich_mobile/providers/backup/drift_backup.provider.dart';
@@ -133,12 +137,15 @@ import 'package:immich_mobile/providers/infrastructure/people.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/platform.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/remote_album.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/search.provider.dart';
+import 'package:immich_mobile/providers/infrastructure/settings.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/sync.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/tag.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/timeline.provider.dart';
+import 'package:immich_mobile/providers/infrastructure/user.provider.dart';
 import 'package:immich_mobile/providers/shared_link.provider.dart';
 import 'package:immich_mobile/providers/tab.provider.dart';
 import 'package:immich_mobile/providers/timeline/multiselect.provider.dart';
+import 'package:immich_mobile/providers/upload_profile_image.provider.dart';
 import 'package:immich_mobile/providers/user.provider.dart';
 import 'package:immich_mobile/providers/websocket.provider.dart';
 import 'package:immich_mobile/repositories/asset_api.repository.dart';
@@ -163,6 +170,7 @@ import 'package:immich_mobile/widgets/asset_viewer/video_controls.dart';
 import 'package:immich_mobile/widgets/backup/drift_album_info_list_tile.dart';
 import 'package:immich_mobile/widgets/common/confirm_dialog.dart';
 import 'package:immich_mobile/widgets/common/selection_sliver_app_bar.dart';
+import 'package:immich_mobile/widgets/forms/change_password_form.dart';
 import 'package:immich_mobile/widgets/photo_view/photo_view.dart';
 import 'package:immich_mobile/widgets/settings/asset_viewer_settings/slideshow_settings.dart';
 import 'package:immich_mobile/widgets/settings/setting_list_tile.dart';
@@ -13267,6 +13275,179 @@ void main() async {
       },
     );
 
+    _realStackSessionTest('MOB-UI-062-$_caseSuffix', 'updates account security and network settings', (tester) async {
+      tester.view.devicePixelRatio = 1.0;
+      tester.view.physicalSize = const Size(430, 932);
+      addTearDown(tester.view.reset);
+
+      await _loadAuthenticatedApp(
+        tester,
+        overrideCancellation: true,
+        closeDriftOnDispose: false,
+        resetSyncAcksBeforeStart: true,
+      );
+      var container = _containerOfApp(tester);
+      var apiService = container.read(apiServiceProvider);
+      final assetsApi = apiService.assetsApi;
+      final originalEndpoint = Store.get(StoreKey.serverEndpoint);
+      final originalServerUrl = Store.tryGet(StoreKey.serverUrl);
+      final originalHeaders = Map<String, String>.from(container.read(appConfigProvider).network.customHeaders);
+      final createdRemoteAssetIds = <String>[];
+      var activePassword = _password;
+
+      addTearDown(() async {
+        for (final assetId in createdRemoteAssetIds) {
+          await _deleteTestAssetBestEffort(assetsApi, assetId);
+        }
+        if (activePassword != _password) {
+          final restored = await _changePasswordViaAuthEndpoint(
+            currentPassword: activePassword,
+            newPassword: _password,
+          );
+          if (restored) {
+            activePassword = _password;
+          }
+        }
+        await Store.put(StoreKey.serverEndpoint, originalEndpoint);
+        if (originalServerUrl == null) {
+          await Store.delete(StoreKey.serverUrl);
+        } else {
+          await Store.put(StoreKey.serverUrl, originalServerUrl);
+        }
+        await SettingsRepository.instance.write(SettingsKey.networkCustomHeaders, originalHeaders);
+      });
+
+      await _resetAndSyncRemoteState(tester, container);
+
+      final currentUser = container.read(currentUserProvider);
+      expect(currentUser, isNotNull);
+      final runToken = DateTime.now().toUtc().microsecondsSinceEpoch.toString();
+      final profileAssetId = await _uploadGeneratedJpegAsSecondClient(
+        'immich-e2e-account-062-profile-$runToken.jpg',
+        DateTime.now().toUtc(),
+        sourceMetadata: {'width': 96, 'height': 64, 'device_make': 'ImmichE2E062', 'device_model': 'AccountSecurity'},
+      );
+      createdRemoteAssetIds.add(profileAssetId);
+
+      final syncSuccess = await container.read(syncStreamServiceProvider).sync();
+      expect(syncSuccess, isTrue);
+      final profileAsset = await _waitForRemoteAssetState(
+        tester,
+        container,
+        profileAssetId,
+        (asset) => !asset.isTrashed,
+        reason: 'Expected 062 profile source asset to sync locally',
+      );
+
+      final router = container.read(appRouterProvider);
+      unawaited(router.push(ProfilePictureCropRoute(asset: profileAsset)));
+      await _pumpUntilFoundWithReason(
+        tester,
+        find.byType(ProfilePictureCropPage),
+        reason: 'Expected 062 profile crop page to open',
+        timeout: const Duration(seconds: 30),
+      );
+      final cropSaveButton = find.byKey(const Key('profile-picture-crop-save'));
+      await _pumpUntil(tester, () {
+        final iconButton = find.descendant(of: cropSaveButton, matching: find.byType(IconButton));
+        if (!tester.any(iconButton)) {
+          return false;
+        }
+
+        return tester.widget<IconButton>(iconButton.first).onPressed != null;
+      }, timeout: const Duration(seconds: 60));
+      await _tapHitTestableFinder(
+        tester,
+        cropSaveButton,
+        reason: 'Expected 062 profile crop save button to be tappable',
+        timeout: const Duration(seconds: 60),
+      );
+      await _pumpUntil(
+        tester,
+        () =>
+            container.read(uploadProfileImageProvider).status == UploadProfileStatus.success &&
+            container.read(uploadProfileImageProvider).profileImagePath.isNotEmpty,
+        timeout: const Duration(seconds: 60),
+      );
+      final uploadedProfilePath = container.read(uploadProfileImageProvider).profileImagePath;
+      final refreshedUser = await container.read(userServiceProvider).refreshMyUser();
+      expect(refreshedUser, isNotNull);
+      expect(refreshedUser!.hasProfileImage, isTrue);
+
+      final profileImageResponse = await http.get(
+        Uri.parse('${Store.get(StoreKey.serverEndpoint)}/users/${currentUser!.id}/profile-image'),
+        headers: {...ApiService.getRequestHeaders(), 'Authorization': 'Bearer ${Store.get(StoreKey.accessToken)}'},
+      );
+      expect(profileImageResponse.statusCode, HttpStatus.ok);
+      expect(profileImageResponse.bodyBytes, isNotEmpty);
+      expect(profileImageResponse.headers[HttpHeaders.contentTypeHeader], startsWith('image/'));
+      expect(uploadedProfilePath, contains(currentUser.id));
+      await _deleteProfileImageBestEffort(Store.tryGet(StoreKey.accessToken));
+      await _deleteTestAssetBestEffort(assetsApi, profileAssetId);
+      createdRemoteAssetIds.remove(profileAssetId);
+
+      await container.read(settingsProvider).write(SettingsKey.networkCustomHeaders, <String, String>{});
+      await apiService.updateHeaders();
+      const headerName = 'X-Immich-E2E-062';
+      final headerValue = 'account-$runToken';
+      unawaited(router.push(const HeaderSettingsRoute()));
+      await _pumpUntilFoundWithReason(
+        tester,
+        find.byType(HeaderSettingsPage),
+        reason: 'Expected 062 custom header settings page to open',
+        timeout: const Duration(seconds: 30),
+      );
+      await tester.enterText(find.byKey(const Key('header-settings-key-0')), headerName);
+      await tester.enterText(find.byKey(const Key('header-settings-value-0')), headerValue);
+      await router.maybePop();
+      await _pumpUntil(
+        tester,
+        () => container.read(appConfigProvider).network.customHeaders[headerName] == headerValue,
+        timeout: const Duration(seconds: 30),
+      );
+      expect(ApiService.getRequestHeaders()[headerName], headerValue);
+      expect(ApiService.getServerUrls(), contains(originalEndpoint));
+      expect(ApiService.getServerUrls(), isNot(contains(_apiEndpoint(_badServerUrl))));
+
+      final badAuxiliaryValid = await container.read(authProvider.notifier).validateAuxilaryServerUrl(_badServerUrl);
+      expect(badAuxiliaryValid, isFalse);
+      expect(apiService.apiClient.basePath, originalEndpoint);
+      expect(Store.get(StoreKey.serverEndpoint), originalEndpoint);
+      await _waitForSuccessfulResponse(tester, () => apiService.serverInfoApi.pingServerWithHttpInfo());
+
+      final newPassword = 'ImmichE2E062$runToken!';
+      unawaited(router.push(const ChangePasswordRoute()));
+      await _pumpUntilFoundWithReason(
+        tester,
+        find.byType(ChangePasswordPage),
+        reason: 'Expected 062 change password page to open',
+        timeout: const Duration(seconds: 30),
+      );
+      await tester.enterText(find.byKey(ChangePasswordForm.passwordFieldKey), newPassword);
+      await tester.enterText(find.byKey(ChangePasswordForm.confirmPasswordFieldKey), newPassword);
+      await _tapHitTestableFinder(
+        tester,
+        find.byKey(ChangePasswordForm.submitButtonKey),
+        reason: 'Expected 062 change password submit button to be tappable',
+      );
+      await _pumpUntil(tester, () => Store.tryGet(StoreKey.accessToken) == null, timeout: const Duration(seconds: 60));
+      activePassword = newPassword;
+      expect(await _loginStatus(_email, _password), HttpStatus.unauthorized);
+      expect(await _loginStatus(_email, newPassword), anyOf(HttpStatus.ok, HttpStatus.created));
+
+      final restored = await _changePasswordViaAuthEndpoint(currentPassword: newPassword, newPassword: _password);
+      expect(restored, isTrue);
+      activePassword = _password;
+
+      await _loadUnauthenticatedApp(tester, overrideCancellation: true, closeDriftOnDispose: false);
+      await _login(tester, serverUrl: _serverUrl, email: _email, password: _password);
+      await _waitForAccessToken(tester);
+      await _waitForCurrentUser(_email, tester);
+      container = _containerOfApp(tester);
+      apiService = container.read(apiServiceProvider);
+      expect(apiService.apiClient.basePath, originalEndpoint);
+    });
+
     if (_selectedCaseId.isNotEmpty && !_registeredSelectedCase) {
       test(
         _selectedCaseId,
@@ -14861,6 +15042,45 @@ Future<String> _loginForAccessToken(String email, String password) async {
   final body = jsonDecode(response.body) as Map<String, dynamic>;
   expect(body['userEmail'], email);
   return body['accessToken'] as String;
+}
+
+Future<int> _loginStatus(String email, String password) async {
+  final response = await http.post(
+    Uri.parse('${_apiEndpoint(_serverUrl)}/auth/login'),
+    headers: {'Content-Type': 'application/json'},
+    body: jsonEncode({'email': email, 'password': password}),
+  );
+  return response.statusCode;
+}
+
+Future<bool> _changePasswordViaAuthEndpoint({required String currentPassword, required String newPassword}) async {
+  final login = await http.post(
+    Uri.parse('${_apiEndpoint(_serverUrl)}/auth/login'),
+    headers: {'Content-Type': 'application/json'},
+    body: jsonEncode({'email': _email, 'password': currentPassword}),
+  );
+  if (login.statusCode < HttpStatus.ok || login.statusCode >= HttpStatus.multipleChoices) {
+    return false;
+  }
+  final token = (jsonDecode(login.body) as Map<String, dynamic>)['accessToken'] as String;
+  final response = await http.post(
+    Uri.parse('${_apiEndpoint(_serverUrl)}/auth/change-password'),
+    headers: {'Content-Type': 'application/json', 'Authorization': 'Bearer $token'},
+    body: jsonEncode({'password': currentPassword, 'newPassword': newPassword, 'invalidateSessions': true}),
+  );
+  return response.statusCode >= HttpStatus.ok && response.statusCode < HttpStatus.multipleChoices;
+}
+
+Future<void> _deleteProfileImageBestEffort(String? accessToken) async {
+  if (accessToken == null || accessToken.isEmpty) {
+    return;
+  }
+  try {
+    await http.delete(
+      Uri.parse('${_apiEndpoint(_serverUrl)}/users/profile-image'),
+      headers: {'Authorization': 'Bearer $accessToken'},
+    );
+  } catch (_) {}
 }
 
 Future<void> _ensureDeviceId() async {

@@ -119,14 +119,18 @@ class ApiService {
       serverUrl += '/api';
     }
 
+    final previousEndpoint = _apiClient.basePath;
     try {
       setEndpoint(serverUrl);
       await serverInfoApi.pingServer().timeout(const Duration(seconds: 5));
     } on TimeoutException catch (_) {
+      setEndpoint(previousEndpoint);
       return false;
     } on SocketException catch (_) {
+      setEndpoint(previousEndpoint);
       return false;
     } catch (error, stackTrace) {
+      setEndpoint(previousEndpoint);
       _log.severe("Error while checking server availability", error, stackTrace);
       return false;
     }
