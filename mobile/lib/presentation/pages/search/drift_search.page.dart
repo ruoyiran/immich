@@ -526,6 +526,7 @@ class DriftSearchPage extends HookConsumerWidget {
               ),
               builder: (BuildContext context, MenuController controller, Widget? child) {
                 return IconButton(
+                  key: const Key('search-type-menu-button'),
                   onPressed: () {
                     if (controller.isOpen) {
                       controller.close();
@@ -541,6 +542,7 @@ class DriftSearchPage extends HookConsumerWidget {
                 FeatureCheck(
                   feature: (features) => features.smartSearch,
                   child: MenuItemButton(
+                    key: const Key('search-type-context'),
                     child: ListTile(
                       leading: const Icon(Icons.image_search_rounded),
                       title: Text(
@@ -560,6 +562,7 @@ class DriftSearchPage extends HookConsumerWidget {
                   ),
                 ),
                 MenuItemButton(
+                  key: const Key('search-type-filename'),
                   child: ListTile(
                     leading: const Icon(Icons.abc_rounded),
                     title: Text(
@@ -578,6 +581,7 @@ class DriftSearchPage extends HookConsumerWidget {
                   },
                 ),
                 MenuItemButton(
+                  key: const Key('search-type-description'),
                   child: ListTile(
                     leading: const Icon(Icons.text_snippet_outlined),
                     title: Text(
@@ -598,6 +602,7 @@ class DriftSearchPage extends HookConsumerWidget {
                 FeatureCheck(
                   feature: (features) => features.ocr,
                   child: MenuItemButton(
+                    key: const Key('search-type-ocr'),
                     child: ListTile(
                       leading: const Icon(Icons.document_scanner_outlined),
                       title: Text(
@@ -792,6 +797,7 @@ class _SearchResultGrid extends ConsumerWidget {
     return NotificationListener<ScrollUpdateNotification>(
       onNotification: _onScrollUpdateNotification,
       child: SliverFillRemaining(
+        key: const Key('search-result-grid'),
         child: ProviderScope(
           overrides: [
             timelineServiceProvider.overrideWith((ref) {
@@ -827,6 +833,7 @@ class _SearchNoResults extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return SliverFillRemaining(
+      key: const Key('search-no-results'),
       hasScrollBody: false,
       child: Container(
         alignment: Alignment.center,
@@ -854,6 +861,7 @@ class _SearchSuggestions extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return SliverToBoxAdapter(
+      key: const Key('search-suggestions'),
       child: ListView(
         shrinkWrap: true,
         children: [
@@ -900,22 +908,26 @@ class _QuickLinkList extends StatelessWidget {
         physics: const NeverScrollableScrollPhysics(),
         children: [
           _QuickLink(
+            key: const Key('search-quick-link-recently-taken'),
             title: 'recently_taken'.t(context: context),
             icon: Icons.schedule_outlined,
             isTop: true,
             onTap: () => context.pushRoute(const DriftRecentlyTakenRoute()),
           ),
           _QuickLink(
+            key: const Key('search-quick-link-recently-added'),
             title: context.t.recently_added,
             icon: Icons.upload_outlined,
             onTap: () => context.pushRoute(const DriftRecentlyAddedRoute()),
           ),
           _QuickLink(
+            key: const Key('search-quick-link-videos'),
             title: 'videos'.t(context: context),
             icon: Icons.play_circle_outline_rounded,
             onTap: () => context.pushRoute(const DriftVideoRoute()),
           ),
           _QuickLink(
+            key: const Key('search-quick-link-favorites'),
             title: 'favorites'.t(context: context),
             icon: Icons.favorite_border_rounded,
             isBottom: true,
@@ -935,6 +947,7 @@ class _QuickLink extends StatelessWidget {
   final bool isBottom;
 
   const _QuickLink({
+    super.key,
     required this.title,
     required this.icon,
     required this.onTap,

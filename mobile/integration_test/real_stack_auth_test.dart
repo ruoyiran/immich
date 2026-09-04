@@ -8199,6 +8199,244 @@ void main() async {
       expect(find.byKey(Key('partner-shared-with-$ownerId')), findsNothing);
     });
 
+    _realStackSessionTest('MOB-UI-058-$_caseSuffix', 'searches text suggestions and empty states', (tester) async {
+      tester.view.devicePixelRatio = 1.0;
+      tester.view.physicalSize = const Size(430, 932);
+      addTearDown(tester.view.reset);
+
+      await _loadAuthenticatedApp(tester, overrideCancellation: true, closeDriftOnDispose: false);
+      final container = _containerOfApp(tester);
+      final apiService = container.read(apiServiceProvider);
+      final assetsApi = apiService.assetsApi;
+      final searchApi = apiService.searchApi;
+      final searchService = container.read(searchServiceProvider);
+      final createdRemoteAssetIds = <String>[];
+
+      addTearDown(() async {
+        for (final assetId in createdRemoteAssetIds) {
+          await _deleteTestAssetBestEffort(assetsApi, assetId);
+        }
+      });
+
+      await _resetAndSyncRemoteState(tester, container);
+
+      final runToken = DateTime.now().toUtc().microsecondsSinceEpoch.toString();
+      final sharedNeedle = 'search-058-$runToken';
+      final contextNeedle = 'context-058-$runToken';
+      final filenameNeedle = '$sharedNeedle-東京';
+      final descriptionNeedle = 'gallery description 058 cafe $runToken';
+      final ocrNeedle = 'boarding gate 058 $runToken';
+      final cameraMake = 'ImmichE2E058-$runToken';
+      const cameraModel = 'SearchTextSuggestions';
+      final baseCreatedAt = DateTime.utc(2026, 2, 28, 12);
+
+      final firstName = 'immich-e2e-$filenameNeedle-alpha.jpg';
+      final firstAssetId = await _uploadGeneratedJpegAsSecondClient(
+        firstName,
+        baseCreatedAt,
+        sourceMetadata: {
+          'width': 96,
+          'height': 64,
+          'device_make': cameraMake,
+          'device_model': cameraModel,
+          'immich_description': '$descriptionNeedle primary',
+          'immich_ocr_text': '$ocrNeedle primary',
+        },
+      );
+      createdRemoteAssetIds.add(firstAssetId);
+
+      final secondAssetId = await _uploadGeneratedJpegAsSecondClient(
+        'immich-e2e-$filenameNeedle-beta.jpg',
+        baseCreatedAt.add(const Duration(minutes: 1)),
+        sourceMetadata: {
+          'width': 96,
+          'height': 64,
+          'device_make': cameraMake,
+          'device_model': cameraModel,
+          'immich_description': 'secondary search description $runToken',
+          'immich_ocr_text': 'secondary OCR $runToken',
+        },
+      );
+      createdRemoteAssetIds.add(secondAssetId);
+
+      final createdTags = await container.read(tagProvider.notifier).upsertTags([contextNeedle]);
+      expect(createdTags, hasLength(1));
+      final taggedCount = await container
+          .read(tagProvider.notifier)
+          .bulkTagAssets([firstAssetId], [createdTags.single.id]);
+      expect(taggedCount, 1);
+
+      final syncSuccess = await container.read(syncStreamServiceProvider).sync();
+      expect(syncSuccess, isTrue);
+      await _waitForRemoteAssetState(
+        tester,
+        container,
+        firstAssetId,
+        (asset) => asset.isRemoteOnly && asset.isImage && !asset.isTrashed,
+        reason: 'Expected the primary 058 search asset to sync locally',
+      );
+      await _waitForRemoteAssetState(
+        tester,
+        container,
+        secondAssetId,
+        (asset) => asset.isRemoteOnly && asset.isImage && !asset.isTrashed,
+        reason: 'Expected the secondary 058 search asset to sync locally',
+      );
+
+      final contextServer = await _waitForServerSmartSearchResponse(
+        tester,
+        searchApi,
+        api.SmartSearchDto(
+          query: api.Optional.present(contextNeedle),
+          visibility: const api.Optional.present(api.AssetVisibility.timeline),
+          page: const api.Optional.present(1),
+          size: const api.Optional.present(10),
+        ),
+        (response) {
+          final ids = _serverSearchAssetIds(response);
+          return ids.contains(firstAssetId) && !ids.contains(secondAssetId);
+        },
+        reason: 'Expected context smart search to match the tagged 058 asset only',
+      );
+      expect(_serverSearchAssetIds(contextServer), contains(firstAssetId));
+
+      final filenameServer = await _waitForServerSearchResponse(
+        tester,
+        searchApi,
+        _metadataSearchDto(
+          filename: filenameNeedle,
+          type: api.AssetTypeEnum.IMAGE,
+          visibility: api.AssetVisibility.timeline,
+        ),
+        (response) => _serverSearchAssetIds(response).containsAll({firstAssetId, secondAssetId}),
+        reason: 'Expected filename search to match both 058 fixtures',
+      );
+      expect(_serverSearchAssetIds(filenameServer), containsAll({firstAssetId, secondAssetId}));
+
+      final descriptionServer = await _waitForServerSearchResponse(
+        tester,
+        searchApi,
+        _metadataSearchDto(description: descriptionNeedle, type: api.AssetTypeEnum.IMAGE),
+        (response) {
+          final ids = _serverSearchAssetIds(response);
+          return ids.contains(firstAssetId) && !ids.contains(secondAssetId);
+        },
+        reason: 'Expected description search to match only the primary 058 asset',
+      );
+      expect(_serverSearchAssetIds(descriptionServer), contains(firstAssetId));
+
+      final ocrServer = await _waitForServerSearchResponse(
+        tester,
+        searchApi,
+        _metadataSearchDto(ocr: ocrNeedle, type: api.AssetTypeEnum.IMAGE),
+        (response) {
+          final ids = _serverSearchAssetIds(response);
+          return ids.contains(firstAssetId) && !ids.contains(secondAssetId);
+        },
+        reason: 'Expected OCR search to match only the primary 058 asset',
+      );
+      expect(_serverSearchAssetIds(ocrServer), contains(firstAssetId));
+
+      final cameraSuggestions = await _waitForSearchSuggestions(
+        tester,
+        searchService,
+        api.SearchSuggestionType.cameraMake,
+        (values) => values.contains(cameraMake),
+        reason: 'Expected camera-make suggestions to include the 058 fixture make',
+      );
+      expect(cameraSuggestions, contains(cameraMake));
+
+      final pageOne = await _waitForServerSearchResponse(
+        tester,
+        searchApi,
+        _metadataSearchDto(
+          filename: filenameNeedle,
+          page: 1,
+          size: 1,
+          type: api.AssetTypeEnum.IMAGE,
+          visibility: api.AssetVisibility.timeline,
+        ),
+        (response) => response.assets.total >= 2 && response.assets.items.length == 1,
+        reason: 'Expected the first 058 filename page to contain one asset',
+      );
+      final pageTwo = await _waitForServerSearchResponse(
+        tester,
+        searchApi,
+        _metadataSearchDto(
+          filename: filenameNeedle,
+          page: 2,
+          size: 1,
+          type: api.AssetTypeEnum.IMAGE,
+          visibility: api.AssetVisibility.timeline,
+        ),
+        (response) => response.assets.total == pageOne.assets.total && response.assets.items.length == 1,
+        reason: 'Expected the second 058 filename page to be stable',
+      );
+      expect(_serverSearchAssetIds(pageOne).intersection(_serverSearchAssetIds(pageTwo)), isEmpty);
+
+      await _selectPrimaryNavigationTab(tester, kSearchTabIndex);
+      await pumpUntilFound(tester, find.byType(DriftSearchPage), timeout: const Duration(seconds: 30));
+      await pumpUntilFound(tester, find.byKey(const Key('search-suggestions')), timeout: const Duration(seconds: 30));
+      await _tapHitTestableFinder(tester, find.byKey(const Key('search-quick-link-recently-added')));
+      await pumpUntilFound(tester, find.byType(DriftRecentlyAddedPage), timeout: const Duration(seconds: 30));
+      await container.read(appRouterProvider).maybePop();
+      await pumpUntilFound(tester, find.byType(DriftSearchPage), timeout: const Duration(seconds: 30));
+
+      await _selectSearchTextType(tester, const Key('search-type-context'));
+      await _submitSearchText(tester, contextNeedle);
+      await _waitForPaginatedSearchAssetIds(
+        tester,
+        container,
+        (ids) => ids.contains(firstAssetId) && !ids.contains(secondAssetId),
+        reason: 'Expected context UI search to show only the primary 058 asset',
+      );
+      await pumpUntilFound(tester, find.byKey(const Key('search-result-grid')), timeout: const Duration(seconds: 30));
+
+      await _selectSearchTextType(tester, const Key('search-type-filename'));
+      await _submitSearchText(tester, filenameNeedle);
+      final filenameUiIds = await _waitForPaginatedSearchAssetIds(
+        tester,
+        container,
+        (ids) => ids.containsAll({firstAssetId, secondAssetId}),
+        reason: 'Expected filename UI search to show both 058 assets',
+      );
+      expect(filenameUiIds.length, filenameUiIds.toSet().length);
+      await _exerciseTimelineUiPagination(tester);
+
+      await _selectSearchTextType(tester, const Key('search-type-description'));
+      await _submitSearchText(tester, 'transient-$runToken');
+      await _pumpFor(tester, const Duration(milliseconds: 100));
+      await _submitSearchText(tester, descriptionNeedle);
+      await _waitForPaginatedSearchAssetIds(
+        tester,
+        container,
+        (ids) => ids.contains(firstAssetId) && !ids.contains(secondAssetId),
+        reason: 'Expected description UI search to settle on the latest rapid query',
+      );
+
+      await _selectSearchTextType(tester, const Key('search-type-ocr'));
+      await _submitSearchText(tester, ocrNeedle);
+      await _waitForPaginatedSearchAssetIds(
+        tester,
+        container,
+        (ids) => ids.contains(firstAssetId) && !ids.contains(secondAssetId),
+        reason: 'Expected OCR UI search to show only the primary 058 asset',
+      );
+
+      await _submitSearchText(tester, 'immich-e2e-no-result-$runToken');
+      final noResultIds = await _waitForPaginatedSearchAssetIds(
+        tester,
+        container,
+        (ids) => ids.isEmpty,
+        reason: 'Expected no-result UI search to return an empty asset set',
+      );
+      expect(noResultIds, isEmpty);
+      await pumpUntilFound(tester, find.byKey(const Key('search-no-results')), timeout: const Duration(seconds: 30));
+
+      await _submitSearchText(tester, '');
+      await pumpUntilFound(tester, find.byKey(const Key('search-suggestions')), timeout: const Duration(seconds: 30));
+    });
+
     if (_selectedCaseId.isNotEmpty && !_registeredSelectedCase) {
       test(_selectedCaseId, () => fail('No real stack auth test registered for $_selectedCaseId'));
     }
@@ -10803,6 +11041,25 @@ Future<void> _selectPrimaryNavigationTab(WidgetTester tester, int index) async {
   await _pumpFor(tester, const Duration(milliseconds: 800));
 }
 
+Future<void> _selectSearchTextType(WidgetTester tester, Key menuItemKey) async {
+  await _tapHitTestableFinder(tester, find.byKey(const Key('search-type-menu-button')));
+  await _tapHitTestableFinder(
+    tester,
+    find.byKey(menuItemKey),
+    reason: 'Expected search type menu item $menuItemKey to be tappable',
+  );
+  await _pumpFor(tester, const Duration(milliseconds: 300));
+}
+
+Future<void> _submitSearchText(WidgetTester tester, String value) async {
+  final searchField = find.descendant(of: find.byKey(const Key('search_text_field')), matching: find.byType(TextField));
+  await pumpUntilFound(tester, searchField, timeout: const Duration(seconds: 30));
+  await tester.tap(searchField.first, warnIfMissed: false);
+  await tester.enterText(searchField.first, value);
+  await tester.testTextInput.receiveAction(TextInputAction.done);
+  await _pumpFor(tester, const Duration(milliseconds: 500));
+}
+
 Future<void> _expectPhotoRetapScrollsToTop(WidgetTester tester) async {
   await pumpUntilFound(tester, find.byType(Timeline), timeout: const Duration(seconds: 60));
   final scrollable = find.descendant(of: find.byType(Timeline), matching: find.byType(Scrollable));
@@ -11301,6 +11558,7 @@ SearchFilter _searchFilter({
 
 api.MetadataSearchDto _metadataSearchDto({
   String? filename,
+  String? description,
   DateTime? takenAfter,
   DateTime? takenBefore,
   bool? isFavorite,
@@ -11316,6 +11574,7 @@ api.MetadataSearchDto _metadataSearchDto({
 }) {
   return api.MetadataSearchDto(
     originalFileName: filename == null ? const api.Optional.absent() : api.Optional.present(filename),
+    description: description == null ? const api.Optional.absent() : api.Optional.present(description),
     takenAfter: takenAfter == null ? const api.Optional.absent() : api.Optional.present(takenAfter),
     takenBefore: takenBefore == null ? const api.Optional.absent() : api.Optional.present(takenBefore),
     isFavorite: isFavorite == null ? const api.Optional.absent() : api.Optional.present(isFavorite),
@@ -11408,6 +11667,31 @@ Future<Set<String>> _waitForSearchServiceAssetIds(
   }
 
   fail('$reason; latest app search ids=${latest.toList()..sort()}; last error=$lastError');
+}
+
+Future<List<String>> _waitForSearchSuggestions(
+  WidgetTester tester,
+  SearchService searchService,
+  api.SearchSuggestionType type,
+  bool Function(List<String> values) matches, {
+  required String reason,
+}) async {
+  var latest = const <String>[];
+  Object? lastError;
+  final end = DateTime.now().add(const Duration(seconds: 60));
+  while (DateTime.now().isBefore(end)) {
+    try {
+      latest = await searchService.getSearchSuggestions(type) ?? const <String>[];
+      if (matches(latest)) {
+        return latest;
+      }
+    } catch (error) {
+      lastError = error;
+    }
+    await _pumpFor(tester, const Duration(milliseconds: 500));
+  }
+
+  fail('$reason; latest suggestions=${latest.toList()..sort()}; last error=$lastError');
 }
 
 Future<Set<String>> _waitForPaginatedSearchAssetIds(
@@ -12283,21 +12567,11 @@ Future<void> _deletePartnerBestEffortWithToken(String sharedWithId, String acces
   }
 }
 
-Future<void> _waitForUserRow(
-  WidgetTester tester,
-  Drift drift,
-  String userId, {
-  required String reason,
-}) async {
+Future<void> _waitForUserRow(WidgetTester tester, Drift drift, String userId, {required String reason}) async {
   var latestCount = 0;
   final end = DateTime.now().add(const Duration(seconds: 60));
   while (DateTime.now().isBefore(end)) {
-    latestCount = await _rowCountWhere(
-      drift,
-      'user_entity',
-      'id = ?',
-      [Variable.withString(userId)],
-    );
+    latestCount = await _rowCountWhere(drift, 'user_entity', 'id = ?', [Variable.withString(userId)]);
     if (latestCount > 0) {
       return;
     }
