@@ -342,6 +342,10 @@ class ForegroundUploadService {
           checksum: motionChecksum,
           uploadId: '${asset.id}:motion',
         );
+        if (motionResult.isCancelled) {
+          shouldAbortUpload = true;
+          return;
+        }
         if (!motionResult.isSuccess || motionResult.remoteAssetId == null) {
           callbacks.onError?.call(asset.localId!, motionResult.errorMessage ?? 'Failed to upload Live Photo motion');
           return;
