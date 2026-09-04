@@ -12987,6 +12987,206 @@ void main() async {
       },
     );
 
+    _realStackSessionTest(
+      'MOB-MEDIA-066-$_caseSuffix',
+      'uploads a batch of gallery photos idempotently',
+      (tester) async {
+        tester.view.devicePixelRatio = 1.0;
+        tester.view.physicalSize = const Size(430, 932);
+        addTearDown(tester.view.reset);
+
+        await _loadAuthenticatedApp(
+          tester,
+          overrideCancellation: true,
+          closeDriftOnDispose: false,
+          resetSyncAcksBeforeStart: true,
+        );
+        final container = _containerOfApp(tester);
+        final apiService = container.read(apiServiceProvider);
+        final assetsApi = apiService.assetsApi;
+        final searchApi = apiService.searchApi;
+        final createdRemoteAssetIds = <String>{};
+        final createdLocalAssetIds = <String>{};
+
+        addTearDown(() async {
+          for (final assetId in createdRemoteAssetIds) {
+            await _deleteTestAssetBestEffort(assetsApi, assetId);
+          }
+          unawaited(_deleteLocalTestAssetsBestEffort(createdLocalAssetIds));
+        });
+
+        await _resetAndSyncRemoteState(tester, container);
+
+        final runToken = DateTime.now().toUtc().microsecondsSinceEpoch.toString();
+        final batchPrefix = 'immich-e2e-batch-066-$runToken-';
+        final expectedByLocalId = <String, ({String md5, int size})>{};
+        for (var i = 0; i < 20; i++) {
+          final extension = i.isEven ? 'jpg' : 'png';
+          final name = '$batchPrefix${i.toString().padLeft(2, '0')}.$extension';
+          final bytes = i.isEven
+              ? _generatedJpegBytes(runToken.hashCode + i)
+              : await _generatedPngBytes(
+                  runToken.hashCode + i,
+                  width: i.isEven ? 120 : 96 + i,
+                  height: i.isEven ? 80 : 128 + i,
+                );
+          expect(
+            await _serverAssetIdsByOriginalFilename(searchApi, name),
+            isEmpty,
+            reason: 'The 066 batch filename $name must be unique before upload',
+          );
+          final created = await container.read(fileMediaRepositoryProvider).saveLocalAsset(
+            bytes,
+            title: name,
+            relativePath: 'Pictures/ImmichE2E066',
+          );
+          expect(created, isNotNull);
+          createdLocalAssetIds.add(created!.id);
+        }
+
+        await container.read(backgroundSyncProvider).syncLocal(full: true);
+        final localAssets = await _waitForLocalAssetsByPrefix(
+          container,
+          batchPrefix,
+          20,
+          tester,
+        );
+        expect(localAssets.every((asset) => asset.isImage), isTrue);
+        expect(localAssets.map((asset) => asset.name).toSet(), hasLength(20));
+        for (final asset in localAssets) {
+          expect(asset.isLocalOnly, isTrue);
+          final localFile = await container.read(storageRepositoryProvider).getFileForAsset(asset.id);
+          expect(localFile, isNotNull);
+          final bytes = await localFile!.readAsBytes();
+          expectedByLocalId[asset.id] = (
+            md5: base64Encode(md5.convert(bytes).bytes),
+            size: bytes.length,
+          );
+          expect(asset.contentSize, bytes.length);
+        }
+
+        final uploaded = <String, String>{};
+        final failed = <String, String>{};
+        final progressById = <String, List<double>>{};
+        await container.read(foregroundUploadServiceProvider).uploadManual(
+          localAssets,
+          cancelToken: Completer<void>(),
+          callbacks: UploadCallbacks(
+            onProgress: (id, _, bytes, totalBytes) {
+              final progress = totalBytes > 0 ? bytes / totalBytes : 0.0;
+              final assetProgress = progressById.putIfAbsent(id, () => []);
+              expect(progress, inInclusiveRange(0.0, 1.0));
+              if (assetProgress.isNotEmpty) {
+                expect(progress, greaterThanOrEqualTo(assetProgress.last));
+              }
+              assetProgress.add(progress);
+            },
+            onSuccess: (id, remoteId) {
+              uploaded[id] = remoteId;
+              failed.remove(id);
+            },
+            onError: (id, errorMessage) => failed[id] = errorMessage,
+          ),
+        );
+
+        expect(failed, isEmpty);
+        expect(uploaded, hasLength(20));
+        expect(uploaded.values.toSet(), hasLength(20));
+        expect(progressById.keys, containsAll(uploaded.keys));
+        createdRemoteAssetIds.addAll(uploaded.values);
+
+        for (final entry in uploaded.entries) {
+          final expected = expectedByLocalId[entry.key]!;
+          final info = await _waitForAssetInfoState(
+            tester,
+            assetsApi,
+            entry.value,
+            (asset) =>
+                asset.type == api.AssetTypeEnum.IMAGE &&
+                asset.width != null &&
+                asset.height != null,
+            reason:
+                'Expected the 066 uploaded asset ${entry.value} to expose server metadata',
+          );
+          expect(info.checksum, expected.md5);
+          final original = await _waitForSuccessfulResponse(
+            tester,
+            () => container
+                .read(assetApiRepositoryProvider)
+                .downloadAsset(entry.value, edited: false),
+            timeout: const Duration(minutes: 3),
+          );
+          expect(original.bodyBytes.length, expected.size);
+          expect(base64Encode(md5.convert(original.bodyBytes).bytes), expected.md5);
+        }
+
+        for (final remoteId in uploaded.values.take(3)) {
+          final thumbnail = await _waitForSuccessfulResponse(
+            tester,
+            () => assetsApi.viewAssetWithHttpInfo(
+              remoteId,
+              size: api.AssetMediaSize.thumbnail,
+            ),
+            timeout: const Duration(minutes: 3),
+          );
+          expect(thumbnail.bodyBytes, isNotEmpty);
+        }
+
+        await _resetAndSyncRemoteState(tester, container);
+        for (final entry in uploaded.entries) {
+          final expected = expectedByLocalId[entry.key]!;
+          await _waitForRemoteAssetState(
+            tester,
+            container,
+            entry.value,
+            (asset) =>
+                asset.isImage &&
+                asset.hasLocal &&
+                asset.hasRemote &&
+                asset.checksum == expected.md5,
+            reason:
+                'Expected the 066 uploaded asset ${entry.value} to sync as merged',
+          );
+        }
+
+        final ownerId = (await container
+            .read(remoteAssetRepositoryProvider)
+            .get(uploaded.values.first))!
+            .ownerId;
+        final timeline = container.read(timelineFactoryProvider).main([ownerId]);
+        addTearDown(timeline.dispose);
+        final timelineAssets = await _expectTimelineAssetSet(
+          tester,
+          timeline,
+          includes: uploaded.values.toSet(),
+          excludes: const {},
+          reason:
+              'Expected all 066 batch uploads to appear in the client timeline',
+        );
+        final visibleUploadedIds = _timelineAssetIds(timelineAssets).intersection(uploaded.values.toSet());
+        expect(visibleUploadedIds, hasLength(20));
+
+        final retryUploaded = <String, String>{};
+        final retryFailed = <String, String>{};
+        await container.read(foregroundUploadServiceProvider).uploadManual(
+          localAssets,
+          cancelToken: Completer<void>(),
+          callbacks: UploadCallbacks(
+            onSuccess: (id, remoteId) => retryUploaded[id] = remoteId,
+            onError: (id, errorMessage) => retryFailed[id] = errorMessage,
+          ),
+        );
+        expect(retryFailed, isEmpty);
+        expect(retryUploaded, uploaded);
+        expect(retryUploaded.values.toSet(), createdRemoteAssetIds);
+
+        debugPrint(
+          'MOB-MEDIA-066-A uploaded count=${uploaded.length} '
+          'remoteIds=${uploaded.values.join(',')}',
+        );
+      },
+    );
+
     if (_selectedCaseId.isNotEmpty && !_registeredSelectedCase) {
       test(
         _selectedCaseId,
