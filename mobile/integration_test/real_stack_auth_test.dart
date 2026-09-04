@@ -14672,6 +14672,397 @@ void main() async {
       },
     );
 
+    _realStackSessionTest(
+      'MOB-MEDIA-071-$_caseSuffix',
+      'recovers mixed upload queue after client and server restart',
+      (tester) async {
+        tester.view.devicePixelRatio = 1.0;
+        tester.view.physicalSize = const Size(430, 932);
+        addTearDown(tester.view.reset);
+
+        await _loadAuthenticatedApp(
+          tester,
+          overrideCancellation: true,
+          closeDriftOnDispose: false,
+          resetSyncAcksBeforeStart: true,
+        );
+        var container = _containerOfApp(tester);
+        var drift = container.read(driftProvider);
+        var apiService = container.read(apiServiceProvider);
+        final realEndpoint = _apiEndpoint(_serverUrl);
+        final user = Store.tryGet(StoreKey.currentUser);
+        expect(user, isNotNull);
+        final createdRemoteAssetIds = <String>{};
+        final createdLocalAssetIds = <String>{};
+
+        addTearDown(() async {
+          await Store.put(StoreKey.serverEndpoint, realEndpoint);
+          await Store.put(StoreKey.serverUrl, realEndpoint);
+          final cleanupApiService = ApiService()..setEndpoint(realEndpoint);
+          await cleanupApiService.updateHeaders();
+          for (final assetId in createdRemoteAssetIds) {
+            await _deleteTestAssetBestEffort(cleanupApiService.assetsApi, assetId);
+          }
+          unawaited(_deleteLocalTestAssetsBestEffort(createdLocalAssetIds));
+        });
+
+        await container
+            .read(syncApiRepositoryProvider)
+            .deleteSyncAck(_allReplayableSyncAckTypes);
+        await Store.delete(StoreKey.syncMigrationStatus);
+        await container.read(syncStreamRepositoryProvider).reset();
+        final baselineSyncSuccess = await container
+            .read(syncStreamServiceProvider)
+            .sync();
+        expect(baselineSyncSuccess, isTrue);
+        if (Store.tryGet(StoreKey.currentUser) == null) {
+          await Store.put(StoreKey.currentUser, user!);
+        }
+        final baselineRows = await _remoteSyncRowCounts(drift);
+
+        final runToken = DateTime.now().toUtc().microsecondsSinceEpoch.toString();
+        final photoName = 'immich-e2e-media-071-photo-$runToken.jpg';
+        final videoName = 'immich-e2e-media-071-video-$runToken.mp4';
+        final liveName = 'immich-e2e-media-071-live-$runToken.jpg';
+        final seed = runToken.hashCode;
+        final photoBytes = _generatedJpegBytes(seed);
+        final videoBytes = _padFixtureBytes(
+          _generatedMp4Bytes('MOB-MEDIA-071-$_caseSuffix-video-$runToken'),
+          _media070ResumableFixtureBytes,
+          seed + 71,
+        );
+        final liveStillBytes = _generatedJpegBytes(seed + 710);
+        final liveMotionBytes = _generatedMp4Bytes(
+          'MOB-MEDIA-071-$_caseSuffix-live-$runToken',
+        );
+
+        final photoEntity = await container
+            .read(fileMediaRepositoryProvider)
+            .saveLocalAsset(
+              photoBytes,
+              title: photoName,
+              relativePath: 'Pictures/ImmichE2E071',
+            );
+        expect(
+          photoEntity,
+          isNotNull,
+          reason: 'Expected PhotoManager to save the 071 photo fixture',
+        );
+        createdLocalAssetIds.add(photoEntity!.id);
+        final videoEntity = await _saveLocalTestVideo(
+          container,
+          createdLocalAssetIds,
+          title: videoName,
+          relativePath: 'Movies/ImmichE2E071',
+          bytes: videoBytes,
+        );
+        final liveEntity = await _saveLocalTestLivePhoto(
+          container,
+          createdLocalAssetIds,
+          title: liveName,
+          relativePath: 'Pictures/ImmichE2E071',
+          imageBytes: liveStillBytes,
+          videoBytes: liveMotionBytes,
+        );
+
+        await container.read(backgroundSyncProvider).syncLocal(full: true);
+        final photoAsset = await _waitForLocalAssetByNameState(
+          container,
+          photoName,
+          tester,
+          (asset) => asset.isImage && !asset.isMotionPhoto,
+          reason: 'Expected the 071 photo fixture to sync locally',
+        );
+        final videoAsset = await _waitForLocalAssetByNameState(
+          container,
+          videoName,
+          tester,
+          (asset) =>
+              asset.isVideo &&
+              asset.contentSize != null &&
+              asset.contentSize! > _resumableCancelAfterBytes,
+          reason: 'Expected the 071 large video fixture to sync locally',
+        );
+        final liveAsset = await _waitForLocalAssetByNameState(
+          container,
+          liveName,
+          tester,
+          (asset) => asset.isImage && asset.isMotionPhoto,
+          reason: 'Expected the 071 Live Photo fixture to sync locally',
+        );
+        expect(photoEntity.id, photoAsset.id);
+        expect(videoEntity.id, videoAsset.id);
+        expect(liveEntity.id, liveAsset.id);
+
+        await _clearResumableStateFiles();
+        final firstProgress = <int>[];
+        String? firstVideoRemoteId;
+        String? firstUploadError;
+        var restartMarkerPrinted = false;
+        final uploadService = container.read(foregroundUploadServiceProvider);
+        uploadService.shouldAbortUpload = false;
+        final firstUpload = uploadService.uploadSingleAsset(
+          videoAsset,
+          null,
+          callbacks: UploadCallbacks(
+            onProgress: (_, _, bytes, totalBytes) {
+              firstProgress.add(bytes);
+              if (!restartMarkerPrinted && bytes > 0 && bytes < totalBytes) {
+                restartMarkerPrinted = true;
+                debugPrint(_serverRestartReadyMarker);
+              }
+            },
+            onSuccess: (_, remoteId) => firstVideoRemoteId = remoteId,
+            onError: (_, errorMessage) => firstUploadError = errorMessage,
+          ),
+        );
+
+        await _pumpUntil(
+          tester,
+          () =>
+              restartMarkerPrinted ||
+              firstVideoRemoteId != null ||
+              firstUploadError != null,
+          timeout: const Duration(seconds: 90),
+        );
+        expect(
+          restartMarkerPrinted,
+          isTrue,
+          reason:
+              'Expected 071 upload progress before asking the host harness to restart the server',
+        );
+
+        await _waitForServerReachability(
+          tester,
+          realEndpoint,
+          reachable: false,
+          timeout: const Duration(seconds: 45),
+        );
+        await _waitForServerReachability(
+          tester,
+          realEndpoint,
+          reachable: true,
+          timeout: const Duration(seconds: 120),
+        );
+
+        await firstUpload.timeout(
+          const Duration(seconds: 150),
+          onTimeout: () => fail(
+            'Timed out waiting for the 071 in-flight upload to settle after server restart',
+          ),
+        );
+        expect(firstProgress, isNotEmpty);
+        if (firstVideoRemoteId == null) {
+          expect(
+            firstUploadError,
+            isNotNull,
+            reason:
+                'Expected the interrupted 071 video upload to report a recoverable error',
+          );
+          expect(
+            await _resumableStateFiles(),
+            isNotEmpty,
+            reason:
+                'Interrupted 071 video upload should persist resumable state',
+          );
+        }
+
+        await tester.pumpWidget(const SizedBox.shrink());
+        await _pumpFor(tester, const Duration(milliseconds: 500));
+        await _loadAppPreservingStore(
+          tester,
+          overrideCancellation: true,
+          closeDriftOnDispose: false,
+        );
+        await _waitForAccessToken(tester);
+        await _waitForCurrentUser(_email, tester);
+        container = _containerOfApp(tester);
+        drift = container.read(driftProvider);
+        apiService = container.read(apiServiceProvider);
+
+        await container.read(backgroundSyncProvider).syncLocal(full: true);
+        final restartedPhotoAsset = await _waitForLocalAssetByName(
+          container,
+          photoName,
+          tester,
+        );
+        final restartedVideoAsset = await _waitForLocalAssetByName(
+          container,
+          videoName,
+          tester,
+        );
+        final restartedLiveAsset = await _waitForLocalAssetByName(
+          container,
+          liveName,
+          tester,
+        );
+
+        final completedIdsByLocalId = <String, String>{};
+        final recoveryErrors = <String, String>{};
+        final recoveryProgressByName = <String, List<int>>{};
+        final recoveredUploadService = container.read(foregroundUploadServiceProvider);
+        recoveredUploadService.shouldAbortUpload = false;
+        await recoveredUploadService.uploadManual(
+          [
+            if (firstVideoRemoteId == null) restartedVideoAsset,
+            restartedPhotoAsset,
+            restartedLiveAsset,
+          ],
+          callbacks: UploadCallbacks(
+            onProgress: (_, fileName, bytes, totalBytes) {
+              final progress = recoveryProgressByName.putIfAbsent(
+                fileName,
+                () => [],
+              );
+              expect(bytes, inInclusiveRange(0, totalBytes));
+              if (progress.isNotEmpty) {
+                expect(bytes, greaterThanOrEqualTo(progress.last));
+              }
+              progress.add(bytes);
+            },
+            onSuccess: (localId, remoteId) =>
+                completedIdsByLocalId[localId] = remoteId,
+            onError: (localId, errorMessage) =>
+                recoveryErrors[localId] = errorMessage,
+          ),
+        );
+        expect(
+          recoveryErrors,
+          isEmpty,
+          reason: 'Expected 071 recovered upload queue to finish cleanly',
+        );
+
+        final videoRemoteId =
+            firstVideoRemoteId ?? completedIdsByLocalId[restartedVideoAsset.localId];
+        final photoRemoteId = completedIdsByLocalId[restartedPhotoAsset.localId];
+        final liveRemoteId = completedIdsByLocalId[restartedLiveAsset.localId];
+        expect(videoRemoteId, isNotNull);
+        expect(photoRemoteId, isNotNull);
+        expect(liveRemoteId, isNotNull);
+        final recoveredVideoRemoteId = videoRemoteId!;
+        final recoveredPhotoRemoteId = photoRemoteId!;
+        final recoveredLiveRemoteId = liveRemoteId!;
+        createdRemoteAssetIds.addAll([
+          recoveredVideoRemoteId,
+          recoveredPhotoRemoteId,
+          recoveredLiveRemoteId,
+        ]);
+
+        expect(
+          await _resumableStateFiles(),
+          isEmpty,
+          reason: '071 recovered queue should clear resumable state files',
+        );
+        final syncedAfterRecovery = await container
+            .read(syncStreamServiceProvider)
+            .sync();
+        expect(syncedAfterRecovery, isTrue);
+
+        await _waitForServerAssetIdsByOriginalFilename(
+          tester,
+          apiService.searchApi,
+          photoName,
+          (ids) => ids.length == 1 && ids.contains(recoveredPhotoRemoteId),
+          reason: 'Expected 071 photo to have one server asset after recovery',
+        );
+        await _waitForServerAssetIdsByOriginalFilename(
+          tester,
+          apiService.searchApi,
+          videoName,
+          (ids) => ids.length == 1 && ids.contains(recoveredVideoRemoteId),
+          type: api.AssetTypeEnum.VIDEO,
+          reason: 'Expected 071 video to have one server asset after recovery',
+        );
+        await _waitForServerAssetIdsByOriginalFilename(
+          tester,
+          apiService.searchApi,
+          liveName,
+          (ids) => ids.length == 1 && ids.contains(recoveredLiveRemoteId),
+          reason:
+              'Expected 071 Live Photo still to have one server asset after recovery',
+        );
+
+        final liveInfo = await _waitForAssetInfoState(
+          tester,
+          apiService.assetsApi,
+          recoveredLiveRemoteId,
+          (asset) => asset.livePhotoVideoId.orElse(null) != null,
+          reason: 'Expected 071 Live Photo to retain its linked motion asset',
+        );
+        final liveMotionId = liveInfo.livePhotoVideoId.orElse(null);
+        expect(liveMotionId, isNotNull);
+        createdRemoteAssetIds.add(liveMotionId!);
+        await _waitForAssetInfoState(
+          tester,
+          apiService.assetsApi,
+          liveMotionId,
+          (asset) => asset.type == api.AssetTypeEnum.VIDEO,
+          reason: 'Expected 071 Live Photo motion to be a video asset',
+        );
+
+        await _waitForRemoteAssetState(
+          tester,
+          container,
+          recoveredPhotoRemoteId,
+          (asset) => asset.hasRemote && asset.isImage && !asset.isTrashed,
+          reason: 'Expected 071 recovered photo in local sync',
+        );
+        final localVideo = await _waitForRemoteAssetState(
+          tester,
+          container,
+          recoveredVideoRemoteId,
+          (asset) => asset.hasRemote && asset.isVideo && !asset.isTrashed,
+          reason: 'Expected 071 recovered video in local sync',
+        );
+        await _waitForRemoteAssetState(
+          tester,
+          container,
+          recoveredLiveRemoteId,
+          (asset) =>
+              asset.hasRemote &&
+              asset.isImage &&
+              asset.isMotionPhoto &&
+              asset.livePhotoVideoId == liveMotionId,
+          reason: 'Expected 071 recovered Live Photo in local sync',
+        );
+        expect(localVideo.ownerId, user!.id);
+        expect(await _remoteAssetRowCountById(drift, recoveredVideoRemoteId), 1);
+        expect(await _remoteAssetRowCountById(drift, recoveredPhotoRemoteId), 1);
+        expect(await _remoteAssetRowCountById(drift, recoveredLiveRemoteId), 1);
+
+        final recoveredRows = await _remoteSyncRowCounts(drift);
+        expect(
+          recoveredRows['remote_asset_entity'],
+          greaterThanOrEqualTo(baselineRows['remote_asset_entity']! + 3),
+        );
+
+        final timeline = container.read(timelineFactoryProvider).main([
+          localVideo.ownerId,
+        ]);
+        addTearDown(timeline.dispose);
+        await _expectTimelineAssetSet(
+          tester,
+          timeline,
+          includes: {
+            recoveredPhotoRemoteId,
+            recoveredVideoRemoteId,
+            recoveredLiveRemoteId,
+          },
+          excludes: {liveMotionId},
+          reason:
+              'Expected 071 timeline to show recovered photo, video, and Live still only',
+        );
+        expect(tester.takeException(), isNull);
+
+        debugPrint(
+          'MOB-MEDIA-071-$_caseSuffix recovered mixed upload queue '
+          'photo=$recoveredPhotoRemoteId video=$recoveredVideoRemoteId '
+          'live=$recoveredLiveRemoteId '
+          'motion=$liveMotionId progressFiles=${recoveryProgressByName.keys.length}',
+        );
+      },
+    );
+
     if (_selectedCaseId.isNotEmpty && !_registeredSelectedCase) {
       test(
         _selectedCaseId,
