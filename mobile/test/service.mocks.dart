@@ -9,7 +9,6 @@ import 'package:immich_mobile/platform/native_sync_api.g.dart';
 import 'package:immich_mobile/services/api.service.dart';
 import 'package:immich_mobile/services/app_settings.service.dart';
 import 'package:immich_mobile/services/auth.service.dart';
-import 'package:immich_mobile/services/background_upload.service.dart';
 import 'package:immich_mobile/services/cleanup.service.dart';
 import 'package:immich_mobile/services/foreground_upload.service.dart';
 import 'package:immich_mobile/services/gcast.service.dart';
@@ -57,7 +56,5 @@ class MockAuthService extends Mock implements AuthService {}
 class MockSecureStorageService extends Mock implements SecureStorageService {}
 
 class MockWidgetService extends Mock implements WidgetService {}
-
-class MockBackgroundUploadService extends Mock implements BackgroundUploadService {}
 
 class MockBackgroundWorkerLockService extends Mock implements BackgroundWorkerLockService {}

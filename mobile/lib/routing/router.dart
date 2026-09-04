@@ -14,11 +14,6 @@ import 'package:immich_mobile/domain/services/timeline.service.dart';
 import 'package:immich_mobile/models/folder/recursive_folder.model.dart';
 import 'package:immich_mobile/models/shared_link/shared_link.model.dart';
 import 'package:immich_mobile/models/upload/share_intent_attachment.model.dart';
-import 'package:immich_mobile/pages/backup/drift_backup.page.dart';
-import 'package:immich_mobile/pages/backup/drift_backup_album_selection.page.dart';
-import 'package:immich_mobile/pages/backup/drift_backup_asset_detail.page.dart';
-import 'package:immich_mobile/pages/backup/drift_backup_options.page.dart';
-import 'package:immich_mobile/pages/backup/drift_upload_detail.page.dart';
 import 'package:immich_mobile/pages/common/app_log.page.dart';
 import 'package:immich_mobile/pages/common/app_log_detail.page.dart';
 import 'package:immich_mobile/pages/common/headers_settings.page.dart';
@@ -145,8 +140,6 @@ class AppRouter extends RootStackRouter {
     AutoRoute(page: PinAuthRoute.page, guards: [_authGuard, _duplicateGuard]),
     AutoRoute(page: LocalMediaSummaryRoute.page, guards: [_authGuard, _duplicateGuard]),
     AutoRoute(page: RemoteMediaSummaryRoute.page, guards: [_authGuard, _duplicateGuard]),
-    AutoRoute(page: DriftBackupRoute.page, guards: [_authGuard, _duplicateGuard]),
-    AutoRoute(page: DriftBackupAlbumSelectionRoute.page, guards: [_authGuard, _duplicateGuard]),
     AutoRoute(page: LocalTimelineRoute.page, guards: [_authGuard, _duplicateGuard]),
     AutoRoute(page: MainTimelineRoute.page, guards: [_authGuard, _duplicateGuard]),
     AutoRoute(page: RemoteAlbumRoute.page, guards: [_authGuard]),
@@ -180,16 +173,13 @@ class AppRouter extends RootStackRouter {
     AutoRoute(page: DriftPlaceDetailRoute.page, guards: [_authGuard, _duplicateGuard]),
     AutoRoute(page: DriftUserSelectionRoute.page, guards: [_authGuard, _duplicateGuard]),
     AutoRoute(page: PartnerRoute.page, guards: [_authGuard, _duplicateGuard]),
-    AutoRoute(page: DriftUploadDetailRoute.page, guards: [_authGuard, _duplicateGuard]),
     AutoRoute(page: SyncStatusRoute.page, guards: [_duplicateGuard]),
     AutoRoute(page: DriftPeopleCollectionRoute.page, guards: [_authGuard, _duplicateGuard]),
     AutoRoute(page: DriftPersonRoute.page, guards: [_authGuard]),
-    AutoRoute(page: DriftBackupOptionsRoute.page, guards: [_authGuard, _duplicateGuard]),
     AutoRoute(page: DriftAlbumOptionsRoute.page, guards: [_authGuard, _duplicateGuard]),
     AutoRoute(page: DriftMapRoute.page, guards: [_authGuard, _duplicateGuard]),
     AutoRoute(page: DriftEditImageRoute.page),
     AutoRoute(page: DriftActivitiesRoute.page, guards: [_authGuard, _duplicateGuard]),
-    AutoRoute(page: DriftBackupAssetDetailRoute.page, guards: [_authGuard, _duplicateGuard]),
     AutoRoute(page: AssetTroubleshootRoute.page, guards: [_authGuard, _duplicateGuard]),
     AutoRoute(page: DownloadInfoRoute.page, guards: [_authGuard, _duplicateGuard]),
     AutoRoute(page: CleanupPreviewRoute.page, guards: [_authGuard, _duplicateGuard]),

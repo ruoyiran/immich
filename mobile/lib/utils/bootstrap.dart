@@ -14,6 +14,25 @@ import 'package:logging/logging.dart';
 import 'package:photo_manager/photo_manager.dart';
 import 'package:sqlite3/common.dart';
 
+const _legacyBackupGroups = ['backup_group', 'backup_live_photo_group'];
+
+Future<void> cleanupLegacyBackupTasks({
+  Future<void> Function(String group)? cancelAll,
+  Future<void> Function(String group)? reset,
+  Future<void> Function(String group)? deleteRecords,
+}) async {
+  final downloader = FileDownloader();
+  final cancelGroup = cancelAll ?? (group) async => downloader.cancelAll(group: group);
+  final resetGroup = reset ?? (group) async => downloader.reset(group: group);
+  final deleteGroup = deleteRecords ?? (group) => downloader.database.deleteAllRecords(group: group);
+
+  for (final group in _legacyBackupGroups) {
+    await cancelGroup(group);
+    await resetGroup(group);
+    await deleteGroup(group);
+  }
+}
+
 void configureFileDownloaderNotifications() {
   FileDownloader().configureNotificationForGroup(
     kDownloadGroupImage,
@@ -34,13 +53,6 @@ void configureFileDownloaderNotifications() {
     running: TaskNotification('uploading_media'.t(), 'backup_background_service_in_progress_notification'.t()),
     complete: TaskNotification('upload_finished'.t(), 'backup_background_service_complete_notification'.t()),
     groupNotificationId: kManualUploadGroup,
-  );
-
-  FileDownloader().configureNotificationForGroup(
-    kBackupGroup,
-    running: TaskNotification('uploading_media'.t(), 'backup_background_service_in_progress_notification'.t()),
-    complete: TaskNotification('upload_finished'.t(), 'backup_background_service_complete_notification'.t()),
-    groupNotificationId: kBackupGroup,
   );
 }
 

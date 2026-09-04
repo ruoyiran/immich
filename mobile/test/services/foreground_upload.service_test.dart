@@ -19,7 +19,6 @@ import 'package:immich_mobile/repositories/upload.repository.dart';
 import 'package:immich_mobile/services/foreground_upload.service.dart';
 import 'package:mocktail/mocktail.dart';
 
-import '../api.mocks.dart';
 import '../fixtures/asset.stub.dart';
 import '../infrastructure/repository.mock.dart';
 import '../mocks/asset_entity.mock.dart';
@@ -29,8 +28,6 @@ void main() {
   late ForegroundUploadService sut;
   late MockUploadRepository mockUploadRepository;
   late MockStorageRepository mockStorageRepository;
-  late MockDriftBackupRepository mockBackupRepository;
-  late MockConnectivityApi mockConnectivityApi;
   late MockAssetMediaRepository mockAssetMediaRepository;
   late Drift db;
 
@@ -55,17 +52,9 @@ void main() {
   setUp(() {
     mockUploadRepository = MockUploadRepository();
     mockStorageRepository = MockStorageRepository();
-    mockBackupRepository = MockDriftBackupRepository();
-    mockConnectivityApi = MockConnectivityApi();
     mockAssetMediaRepository = MockAssetMediaRepository();
 
-    sut = ForegroundUploadService(
-      mockUploadRepository,
-      mockStorageRepository,
-      mockBackupRepository,
-      mockConnectivityApi,
-      mockAssetMediaRepository,
-    );
+    sut = ForegroundUploadService(mockUploadRepository, mockStorageRepository, mockAssetMediaRepository);
     when(
       () => mockUploadRepository.preflightLocalAssetIdentity(
         assetId: any(named: 'assetId'),
@@ -435,13 +424,7 @@ void main() {
         headers: const {},
         registerDownloaderCallbacks: false,
       );
-      final terminalService = ForegroundUploadService(
-        repository,
-        mockStorageRepository,
-        mockBackupRepository,
-        mockConnectivityApi,
-        mockAssetMediaRepository,
-      );
+      final terminalService = ForegroundUploadService(repository, mockStorageRepository, mockAssetMediaRepository);
       String? remoteId;
 
       await terminalService.uploadSingleAsset(

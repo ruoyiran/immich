@@ -7,11 +7,9 @@ import 'package:immich_mobile/entities/store.entity.dart';
 import 'package:immich_mobile/extensions/platform_extensions.dart';
 import 'package:immich_mobile/providers/auth.provider.dart';
 import 'package:immich_mobile/providers/background_sync.provider.dart';
-import 'package:immich_mobile/providers/backup/drift_backup.provider.dart';
 import 'package:immich_mobile/providers/gallery_permission.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/memory.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/platform.provider.dart';
-import 'package:immich_mobile/providers/infrastructure/settings.provider.dart';
 import 'package:immich_mobile/providers/permission.provider.dart';
 import 'package:immich_mobile/providers/server_info.provider.dart';
 import 'package:immich_mobile/providers/websocket.provider.dart';
@@ -119,40 +117,14 @@ class AppLifeCycleNotifier extends StateNotifier<AppLifeCycleEnum> {
     // clears the task refs synchronously, so the syncs below see a clean slate.
     unawaited(backgroundManager.cancelResumeSyncs());
 
-    final isAlbumLinkedSyncEnable = _ref.read(appConfigProvider).backup.syncAlbums;
-
     try {
-      bool syncSuccess = false;
       await Future.wait([
         _safeRun(() => backgroundManager.syncLocal(full: CurrentPlatform.isAndroid), "syncLocal"),
-        _safeRun(() async {
-          syncSuccess = await backgroundManager.syncRemote();
-        }, "syncRemote"),
+        _safeRun(() async => backgroundManager.syncRemote(), "syncRemote"),
       ]);
       _ref.invalidate(driftMemoryFutureProvider);
-      if (syncSuccess) {
-        await _resumeBackup();
-      }
-
-      if (isAlbumLinkedSyncEnable) {
-        await _safeRun(backgroundManager.syncLinkedAlbum, "syncLinkedAlbum");
-      }
     } catch (e, stackTrace) {
       _log.severe("Error during background sync", e, stackTrace);
-    }
-  }
-
-  Future<void> _resumeBackup() async {
-    final isEnableBackup = _ref.read(appConfigProvider).backup.enabled;
-
-    if (isEnableBackup) {
-      final currentUser = Store.tryGet(StoreKey.currentUser);
-      if (currentUser != null) {
-        await _safeRun(
-          () => _ref.read(driftBackupProvider.notifier).startForegroundBackup(currentUser.id),
-          "handleBackupResume",
-        );
-      }
     }
   }
 
@@ -199,8 +171,6 @@ class AppLifeCycleNotifier extends StateNotifier<AppLifeCycleEnum> {
 
   Future<void> _performPause() {
     if (_ref.read(authProvider).isAuthenticated) {
-      _ref.read(driftBackupProvider.notifier).stopForegroundBackup(reason: "the app being sent to the background");
-
       _ref.read(websocketProvider.notifier).disconnect();
     }
 

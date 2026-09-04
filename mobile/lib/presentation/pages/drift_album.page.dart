@@ -49,7 +49,6 @@ class _DriftAlbumsPageState extends ConsumerState<DriftAlbumsPage> {
               icon: const Icon(Icons.add_rounded),
             ),
           ],
-          showUploadButton: false,
         ),
         AlbumSelector(
           onAlbumSelected: (album) {
