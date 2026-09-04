@@ -13762,6 +13762,467 @@ void main() async {
       },
     );
 
+    _realStackSessionTest(
+      'MOB-MEDIA-069-$_caseSuffix',
+      'keeps repeated photo video and live uploads idempotent',
+      (tester) async {
+        tester.view.devicePixelRatio = 1.0;
+        tester.view.physicalSize = const Size(430, 932);
+        addTearDown(tester.view.reset);
+
+        await _loadAuthenticatedApp(
+          tester,
+          overrideCancellation: true,
+          closeDriftOnDispose: false,
+          resetSyncAcksBeforeStart: true,
+        );
+        final container = _containerOfApp(tester);
+        final apiService = container.read(apiServiceProvider);
+        final assetsApi = apiService.assetsApi;
+        final searchApi = apiService.searchApi;
+        final createdRemoteAssetIds = <String>{};
+        final createdLocalAssetIds = <String>{};
+        final fixtureRoot = await Directory.systemTemp.createTemp(
+          'immich-duplicate-069-',
+        );
+
+        addTearDown(() async {
+          for (final assetId in createdRemoteAssetIds) {
+            await _deleteTestAssetBestEffort(assetsApi, assetId);
+          }
+          unawaited(_deleteLocalTestAssetsBestEffort(createdLocalAssetIds));
+          if (fixtureRoot.existsSync()) {
+            fixtureRoot.deleteSync(recursive: true);
+          }
+        });
+
+        await _resetAndSyncRemoteState(tester, container);
+
+        final runToken = DateTime.now().toUtc().microsecondsSinceEpoch.toString();
+        final photoName = 'immich-e2e-media-069-photo-$runToken.jpg';
+        final videoName = 'immich-e2e-media-069-video-$runToken.mp4';
+        final liveName = 'immich-e2e-media-069-live-$runToken.jpg';
+        final photoBytes = _generatedJpegBytes(runToken.hashCode);
+        final videoBytes = _generatedMp4Bytes(
+          'MOB-MEDIA-069-$_caseSuffix-video-$runToken',
+        );
+        final liveStillBytes = _generatedJpegBytes(runToken.hashCode + 69);
+        final liveMotionBytes = _generatedMp4Bytes(
+          'MOB-MEDIA-069-$_caseSuffix-live-$runToken',
+        );
+
+        expect(
+          await _serverAssetIdsByOriginalFilename(searchApi, photoName),
+          isEmpty,
+          reason: 'The 069 photo filename must be unique before upload',
+        );
+        expect(
+          await _serverAssetIdsByOriginalFilename(
+            searchApi,
+            videoName,
+            type: api.AssetTypeEnum.VIDEO,
+          ),
+          isEmpty,
+          reason: 'The 069 video filename must be unique before upload',
+        );
+        expect(
+          await _serverAssetIdsByOriginalFilename(searchApi, liveName),
+          isEmpty,
+          reason: 'The 069 Live Photo filename must be unique before upload',
+        );
+
+        final photoEntity = await container
+            .read(fileMediaRepositoryProvider)
+            .saveLocalAsset(
+              photoBytes,
+              title: photoName,
+              relativePath: 'Pictures/ImmichE2E069',
+            );
+        expect(
+          photoEntity,
+          isNotNull,
+          reason: 'Expected PhotoManager to save the 069 photo fixture',
+        );
+        createdLocalAssetIds.add(photoEntity!.id);
+
+        final videoEntity = await _saveLocalTestVideo(
+          container,
+          createdLocalAssetIds,
+          title: videoName,
+          relativePath: 'Movies/ImmichE2E069',
+          bytes: videoBytes,
+        );
+        final liveEntity = await _saveLocalTestLivePhoto(
+          container,
+          createdLocalAssetIds,
+          title: liveName,
+          relativePath: 'Pictures/ImmichE2E069',
+          imageBytes: liveStillBytes,
+          videoBytes: liveMotionBytes,
+        );
+
+        await container.read(backgroundSyncProvider).syncLocal(full: true);
+        final photoAsset = await _waitForLocalAssetByNameState(
+          container,
+          photoName,
+          tester,
+          (asset) => asset.isImage && !asset.isMotionPhoto && asset.contentSize != null,
+          reason: 'Expected the 069 photo fixture to sync locally',
+        );
+        final videoAsset = await _waitForLocalAssetByNameState(
+          container,
+          videoName,
+          tester,
+          (asset) => asset.isVideo && asset.contentSize != null,
+          reason: 'Expected the 069 video fixture to sync locally',
+        );
+        final liveAsset = await _waitForLocalAssetByNameState(
+          container,
+          liveName,
+          tester,
+          (asset) => asset.isImage && asset.isMotionPhoto,
+          reason: 'Expected the 069 Live Photo fixture to sync locally',
+        );
+
+        expect(videoEntity.id, videoAsset.id);
+        expect(liveEntity.id, liveAsset.id);
+
+        Future<({String remoteId, Map<String, List<double>> progress})>
+        uploadAndCollect(LocalAsset asset, String label) async {
+          String? remoteAssetId;
+          String? uploadError;
+          final progressByName = <String, List<double>>{};
+          await container.read(foregroundUploadServiceProvider).uploadSingleAsset(
+            asset,
+            Completer<void>(),
+            callbacks: UploadCallbacks(
+              onProgress: (_, fileName, bytes, totalBytes) {
+                final progress = totalBytes > 0 ? bytes / totalBytes : 0.0;
+                final fileProgress = progressByName.putIfAbsent(
+                  fileName,
+                  () => [],
+                );
+                expect(progress, inInclusiveRange(0.0, 1.0));
+                if (fileProgress.isNotEmpty) {
+                  expect(progress, greaterThanOrEqualTo(fileProgress.last));
+                }
+                fileProgress.add(progress);
+              },
+              onSuccess: (_, remoteId) => remoteAssetId = remoteId,
+              onError: (_, errorMessage) => uploadError = errorMessage,
+            ),
+          );
+
+          expect(uploadError, isNull, reason: 'Expected $label upload to succeed');
+          expect(
+            remoteAssetId,
+            isNotNull,
+            reason: 'Expected $label upload to return a remote id',
+          );
+          return (remoteId: remoteAssetId!, progress: progressByName);
+        }
+
+        Future<void> expectServerIds(
+          String filename,
+          api.AssetTypeEnum type,
+          Set<String> expected, {
+          required String reason,
+        }) async {
+          final ids = await _waitForServerAssetIdsByOriginalFilename(
+            tester,
+            searchApi,
+            filename,
+            (ids) => ids.length == expected.length && ids.containsAll(expected),
+            type: type,
+            reason: reason,
+          );
+          expect(ids, expected, reason: reason);
+        }
+
+        final firstPhoto = await uploadAndCollect(photoAsset, '069 photo');
+        final firstVideo = await uploadAndCollect(videoAsset, '069 video');
+        final firstLive = await uploadAndCollect(liveAsset, '069 Live Photo');
+        createdRemoteAssetIds.addAll([
+          firstPhoto.remoteId,
+          firstVideo.remoteId,
+          firstLive.remoteId,
+        ]);
+
+        expect(firstPhoto.progress, contains(photoName));
+        expect(firstVideo.progress, contains(videoName));
+        expect(
+          firstLive.progress.keys.any(
+            (name) =>
+                name.toLowerCase().endsWith('.jpg') ||
+                name.toLowerCase().endsWith('.jpeg') ||
+                name.toLowerCase().endsWith('.mp4') ||
+                name.toLowerCase().endsWith('.mov'),
+          ),
+          isTrue,
+        );
+
+        await expectServerIds(
+          photoName,
+          api.AssetTypeEnum.IMAGE,
+          {firstPhoto.remoteId},
+          reason: 'Expected the 069 photo to create exactly one server image',
+        );
+        await expectServerIds(
+          videoName,
+          api.AssetTypeEnum.VIDEO,
+          {firstVideo.remoteId},
+          reason: 'Expected the 069 video to create exactly one server video',
+        );
+        await expectServerIds(
+          liveName,
+          api.AssetTypeEnum.IMAGE,
+          {firstLive.remoteId},
+          reason: 'Expected the 069 Live Photo still to create one server image',
+        );
+
+        final firstPhotoInfo = await _waitForAssetInfoState(
+          tester,
+          assetsApi,
+          firstPhoto.remoteId,
+          (asset) =>
+              asset.type == api.AssetTypeEnum.IMAGE &&
+              asset.originalFileName == photoName &&
+              asset.width != null &&
+              asset.height != null,
+          reason: 'Expected the 069 photo metadata after initial upload',
+        );
+        final firstVideoInfo = await _waitForAssetInfoState(
+          tester,
+          assetsApi,
+          firstVideo.remoteId,
+          (asset) =>
+              asset.type == api.AssetTypeEnum.VIDEO &&
+              asset.originalFileName == videoName &&
+              asset.duration != null &&
+              asset.duration! > 0,
+          reason: 'Expected the 069 video metadata after initial upload',
+        );
+        final firstLiveInfo = await _waitForAssetInfoState(
+          tester,
+          assetsApi,
+          firstLive.remoteId,
+          (asset) =>
+              asset.type == api.AssetTypeEnum.IMAGE &&
+              asset.originalFileName == liveName &&
+              asset.livePhotoVideoId.orElse(null) != null,
+          reason: 'Expected the 069 Live Photo metadata after initial upload',
+        );
+        final liveMotionId = firstLiveInfo.livePhotoVideoId.orElse(null);
+        expect(liveMotionId, isNotNull);
+        createdRemoteAssetIds.add(liveMotionId!);
+
+        await _waitForAssetInfoState(
+          tester,
+          assetsApi,
+          liveMotionId,
+          (asset) => asset.type == api.AssetTypeEnum.VIDEO,
+          reason: 'Expected the 069 Live Photo motion component to exist',
+        );
+
+        final secondPhoto = await uploadAndCollect(photoAsset, '069 duplicate photo');
+        final secondVideo = await uploadAndCollect(videoAsset, '069 duplicate video');
+        final secondLive = await uploadAndCollect(liveAsset, '069 duplicate Live Photo');
+
+        expect(secondPhoto.remoteId, firstPhoto.remoteId);
+        expect(secondVideo.remoteId, firstVideo.remoteId);
+        expect(secondLive.remoteId, firstLive.remoteId);
+
+        await expectServerIds(
+          photoName,
+          api.AssetTypeEnum.IMAGE,
+          {firstPhoto.remoteId},
+          reason: 'Repeated 069 photo upload must not create another image',
+        );
+        await expectServerIds(
+          videoName,
+          api.AssetTypeEnum.VIDEO,
+          {firstVideo.remoteId},
+          reason: 'Repeated 069 video upload must not create another video',
+        );
+        await expectServerIds(
+          liveName,
+          api.AssetTypeEnum.IMAGE,
+          {firstLive.remoteId},
+          reason: 'Repeated 069 Live Photo upload must not create another still',
+        );
+
+        final duplicatePhotoInfo = await assetsApi.getAssetInfo(firstPhoto.remoteId);
+        final duplicateVideoInfo = await assetsApi.getAssetInfo(firstVideo.remoteId);
+        final duplicateLiveInfo = await assetsApi.getAssetInfo(firstLive.remoteId);
+        expect(duplicatePhotoInfo, isNotNull);
+        expect(duplicateVideoInfo, isNotNull);
+        expect(duplicateLiveInfo, isNotNull);
+        expect(duplicatePhotoInfo!.checksum, firstPhotoInfo.checksum);
+        expect(duplicateVideoInfo!.checksum, firstVideoInfo.checksum);
+        expect(
+          duplicateLiveInfo!.livePhotoVideoId.orElse(null),
+          liveMotionId,
+          reason: 'Repeated 069 Live upload must keep the same motion asset',
+        );
+
+        final sharePhotoFile = File('${fixtureRoot.path}/$photoName');
+        final shareVideoFile = File('${fixtureRoot.path}/$videoName');
+        await sharePhotoFile.writeAsBytes(photoBytes, flush: true);
+        await shareVideoFile.writeAsBytes(videoBytes, flush: true);
+        final notifier = container.read(shareIntentUploadProvider.notifier);
+        notifier.onSharedMedia([
+          await _shareIntentAttachment(
+            sharePhotoFile,
+            ShareIntentAttachmentType.image,
+          ),
+          await _shareIntentAttachment(
+            shareVideoFile,
+            ShareIntentAttachmentType.video,
+          ),
+        ]);
+        await _waitForShareIntentPage(tester, {photoName, videoName});
+        final uploadButton = find.descendant(
+          of: find.byType(ShareIntentPage),
+          matching: find.widgetWithText(ElevatedButton, 'upload'.tr()),
+        );
+        await pumpUntilFound(
+          tester,
+          uploadButton,
+          timeout: const Duration(seconds: 30),
+        );
+        await tester.tap(uploadButton.last, warnIfMissed: false);
+        await _waitForShareIntentState(
+          tester,
+          container,
+          (attachments) =>
+              attachments.length == 2 &&
+              attachments.every(
+                (attachment) =>
+                    attachment.status == UploadStatus.complete &&
+                    attachment.uploadProgress == 1.0,
+              ),
+          reason: 'Expected duplicate 069 share intent uploads to complete',
+        );
+        await tester.binding.handlePopRoute();
+        await _pumpFor(tester, const Duration(seconds: 1));
+        await pumpUntilFound(
+          tester,
+          find.byType(Timeline),
+          timeout: const Duration(seconds: 30),
+        );
+
+        await expectServerIds(
+          photoName,
+          api.AssetTypeEnum.IMAGE,
+          {firstPhoto.remoteId},
+          reason: 'Share-import duplicate 069 photo must not create another image',
+        );
+        await expectServerIds(
+          videoName,
+          api.AssetTypeEnum.VIDEO,
+          {firstVideo.remoteId},
+          reason: 'Share-import duplicate 069 video must not create another video',
+        );
+        await expectServerIds(
+          liveName,
+          api.AssetTypeEnum.IMAGE,
+          {firstLive.remoteId},
+          reason: 'Share duplicate pass must leave the 069 Live Photo still unique',
+        );
+
+        await _resetAndSyncRemoteState(tester, container);
+        final syncedPhoto = await _waitForRemoteAssetState(
+          tester,
+          container,
+          firstPhoto.remoteId,
+          (asset) =>
+              asset.isImage &&
+              asset.hasRemote &&
+              asset.checksum == firstPhotoInfo.checksum,
+          reason: 'Expected the 069 photo to remain one synced remote asset',
+        );
+        await _waitForRemoteAssetState(
+          tester,
+          container,
+          firstVideo.remoteId,
+          (asset) =>
+              asset.isVideo &&
+              asset.hasRemote &&
+              asset.checksum == firstVideoInfo.checksum,
+          reason: 'Expected the 069 video to remain one synced remote asset',
+        );
+        await _waitForRemoteAssetState(
+          tester,
+          container,
+          firstLive.remoteId,
+          (asset) =>
+              asset.isImage &&
+              asset.isMotionPhoto &&
+              asset.hasRemote &&
+              asset.livePhotoVideoId == liveMotionId,
+          reason: 'Expected the 069 Live Photo to remain one synced still asset',
+        );
+        await _waitForRemoteAssetState(
+          tester,
+          container,
+          liveMotionId,
+          (asset) => asset.isVideo && asset.visibility == AssetVisibility.hidden,
+          reason:
+              'Expected the 069 duplicate Live Photo motion asset to remain hidden',
+        );
+
+        final timeline = container.read(timelineFactoryProvider).main([
+          syncedPhoto.ownerId,
+        ]);
+        addTearDown(timeline.dispose);
+        final timelineAssets = await _expectTimelineAssetSet(
+          tester,
+          timeline,
+          includes: {
+            firstPhoto.remoteId,
+            firstVideo.remoteId,
+            firstLive.remoteId,
+          },
+          excludes: {liveMotionId},
+          reason:
+              'Expected the 069 timeline to show one photo, one video, and one Live still',
+        );
+        final visibleUploadedIds = _timelineAssetIds(timelineAssets).intersection({
+          firstPhoto.remoteId,
+          firstVideo.remoteId,
+          firstLive.remoteId,
+          liveMotionId,
+        });
+        expect(visibleUploadedIds, {
+          firstPhoto.remoteId,
+          firstVideo.remoteId,
+          firstLive.remoteId,
+        });
+
+        final playback = await _waitForSuccessfulResponse(
+          tester,
+          () => assetsApi.playAssetVideoWithHttpInfo(firstVideo.remoteId),
+          acceptedStatusCodes: const {200, 206},
+          timeout: const Duration(minutes: 3),
+        );
+        expect(playback.bodyBytes, isNotEmpty);
+        final motionPlayback = await _waitForSuccessfulResponse(
+          tester,
+          () => assetsApi.playAssetVideoWithHttpInfo(liveMotionId),
+          acceptedStatusCodes: const {200, 206},
+          timeout: const Duration(minutes: 3),
+        );
+        expect(motionPlayback.bodyBytes, isNotEmpty);
+        expect(tester.takeException(), isNull);
+
+        debugPrint(
+          'MOB-MEDIA-069-$_caseSuffix duplicate uploads stayed idempotent '
+          'photo=${firstPhoto.remoteId} video=${firstVideo.remoteId} '
+          'live=${firstLive.remoteId} motion=$liveMotionId',
+        );
+      },
+    );
+
     if (_selectedCaseId.isNotEmpty && !_registeredSelectedCase) {
       test(
         _selectedCaseId,
