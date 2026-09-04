@@ -74,6 +74,7 @@ class _DriftActivityTextFieldState extends ConsumerState<DriftActivityTextField>
     return Padding(
       padding: EdgeInsets.symmetric(vertical: widget.isBottomSheet ? 0 : 10),
       child: TextField(
+        key: const Key('drift-activity-comment-field'),
         controller: inputController,
         enabled: widget.isEnabled,
         focusNode: inputFocusNode,
@@ -92,6 +93,7 @@ class _DriftActivityTextFieldState extends ConsumerState<DriftActivityTextField>
                 )
               : null,
           suffixIcon: IconButton(
+            key: const Key('drift-activity-send-action'),
             onPressed: sendEnabled ? onEditingComplete : null,
             icon: const Icon(Icons.send),
             iconSize: 24,

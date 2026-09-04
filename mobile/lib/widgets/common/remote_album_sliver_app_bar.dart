@@ -91,11 +91,13 @@ class _MesmerizingSliverAppBarState extends ConsumerState<RemoteAlbumSliverAppBa
             ),
       actions: [
         IconButton(
+          key: const Key('remote-album-slideshow-action'),
           onPressed: () => context.pushRoute(DriftSlideshowRoute(timeline: ref.read(timelineServiceProvider))),
           icon: Icon(Icons.slideshow_outlined, color: actionIconColor, shadows: actionIconShadows),
         ),
         if (currentAlbum.isActivityEnabled && currentAlbum.isShared)
           IconButton(
+            key: const Key('remote-album-activity-action'),
             icon: Icon(Icons.chat_outlined, color: actionIconColor, shadows: actionIconShadows),
             onPressed: widget.onActivity,
           ),
