@@ -66,7 +66,11 @@ class _NativeVideoViewerState extends ConsumerState<NativeVideoViewer> with Widg
 
     if (!widget.isCurrent) {
       _loadTimer?.cancel();
-      unawaited(_notifier.pause());
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          unawaited(_notifier.pause());
+        }
+      });
       return;
     }
 

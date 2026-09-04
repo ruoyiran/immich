@@ -13,6 +13,7 @@ import 'package:immich_mobile/presentation/widgets/images/image_provider.dart';
 import 'package:immich_mobile/presentation/widgets/memory/memory_bottom_info.widget.dart';
 import 'package:immich_mobile/presentation/widgets/memory/memory_card.widget.dart';
 import 'package:immich_mobile/providers/asset_viewer/asset_viewer.provider.dart';
+import 'package:immich_mobile/providers/asset_viewer/video_player_provider.dart';
 import 'package:immich_mobile/providers/haptic_feedback.provider.dart';
 import 'package:immich_mobile/utils/system_ui.utils.dart';
 import 'package:immich_mobile/widgets/memories/memory_epilogue.dart';
@@ -39,7 +40,13 @@ class DriftMemoryPage extends HookConsumerWidget {
     final currentMemoryIndex = useState(memoryIndex);
     final assetProgress = useState("${currentAssetPage.value + 1}|${currentMemory.value.assets.length}");
     const bgColor = Colors.black;
-    final currentAsset = useState<RemoteAsset?>(null);
+    final currentAsset = useState<RemoteAsset?>(
+      memories[memoryIndex].assets.isEmpty ? null : memories[memoryIndex].assets.first,
+    );
+    final activeAsset = currentAsset.value;
+    final videoState = activeAsset != null && activeAsset.isVideo
+        ? ref.watch(videoPlayerProvider(activeAsset.id))
+        : null;
 
     /// The list of all of the asset page controllers
     final memoryAssetPageControllers = List.generate(memories.length, (i) => usePageController());
@@ -50,11 +57,15 @@ class DriftMemoryPage extends HookConsumerWidget {
     useEffect(() {
       // Memories is an immersive activity
       unawaited(SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersive));
+      final asset = currentAsset.value;
+      if (asset != null) {
+        ref.read(assetViewerProvider.notifier).setAsset(asset);
+      }
       return () {
         // Clean up to normal edge to edge when we are done
         unawaited(restoreEdgeToEdge());
       };
-    });
+    }, const []);
 
     void toNextMemory() {
       unawaited(memoryPageController.nextPage(duration: const Duration(milliseconds: 500), curve: Curves.easeIn));
@@ -339,16 +350,47 @@ class DriftMemoryPage extends HookConsumerWidget {
                             child: const Icon(Icons.close_rounded, color: Colors.white),
                           ),
                         ),
-                        if (currentAsset.value != null && currentAsset.value!.isVideo)
+                        if (mIndex == currentMemoryIndex.value && activeAsset != null && activeAsset.isVideo)
                           Positioned(
                             bottom: 24,
                             right: 32,
-                            child: Icon(Icons.videocam_outlined, color: Colors.grey[200]),
+                            child: Row(
+                              children: [
+                                Tooltip(
+                                  message: videoState?.status == VideoPlaybackStatus.paused
+                                      ? 'Play video'
+                                      : 'Pause video',
+                                  child: MaterialButton(
+                                    key: const Key('memory-video-play-pause-button'),
+                                    minWidth: 0,
+                                    padding: const EdgeInsets.all(10),
+                                    onPressed: () => ref.read(videoPlayerProvider(activeAsset.id).notifier).toggle(),
+                                    shape: const CircleBorder(),
+                                    color: Colors.white.withValues(alpha: 0.2),
+                                    elevation: 0,
+                                    child: Icon(
+                                      videoState?.status == VideoPlaybackStatus.paused
+                                          ? Icons.play_arrow_rounded
+                                          : Icons.pause_rounded,
+                                      color: Colors.white,
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                Icon(Icons.videocam_outlined, color: Colors.grey[200]),
+                              ],
+                            ),
                           ),
                       ],
                     ),
                   ),
-                  DriftMemoryBottomInfo(memory: memories[mIndex], title: title),
+                  DriftMemoryBottomInfo(
+                    memory: memories[mIndex],
+                    asset: mIndex == currentMemoryIndex.value
+                        ? currentAsset.value ?? memories[mIndex].assets.first
+                        : memories[mIndex].assets.first,
+                    title: title,
+                  ),
                 ],
               );
             },

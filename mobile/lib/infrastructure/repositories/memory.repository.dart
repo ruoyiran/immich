@@ -84,6 +84,21 @@ class DriftMemoryRepository extends DriftDatabaseRepository {
     return memory.toDto().copyWith(assets: assets);
   }
 
+  Future<void> setSaved(String memoryId, bool isSaved) {
+    return (_db.update(_db.memoryEntity)..where((memory) => memory.id.equals(memoryId))).write(
+      MemoryEntityCompanion(isSaved: Value(isSaved), updatedAt: Value(DateTime.now().toUtc())),
+    );
+  }
+
+  Future<void> hide(String memoryId) {
+    final now = DateTime.now();
+    final hideAt = DateTime.utc(now.year, now.month, now.day).subtract(const Duration(milliseconds: 1));
+
+    return (_db.update(_db.memoryEntity)..where((memory) => memory.id.equals(memoryId))).write(
+      MemoryEntityCompanion(hideAt: Value(hideAt), updatedAt: Value(DateTime.now().toUtc())),
+    );
+  }
+
   Future<int> getCount() {
     return _db.managers.memoryEntity.count();
   }

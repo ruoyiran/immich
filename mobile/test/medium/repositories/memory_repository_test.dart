@@ -105,4 +105,28 @@ void main() {
       expect(result, isEmpty);
     });
   });
+
+  group('local updates', () {
+    test('saves and hides a memory locally while keeping it traceable by id', () async {
+      final user = await ctx.newUser();
+      final asset = await ctx.newRemoteAsset(ownerId: user.id);
+      final memory = await ctx.newMemory(ownerId: user.id);
+      await ctx.newMemoryAsset(memoryId: memory.id, assetId: asset.id);
+
+      await sut.setSaved(memory.id, true);
+
+      final saved = await sut.get(memory.id);
+      expect(saved, isNotNull);
+      expect(saved!.isSaved, isTrue);
+
+      await sut.hide(memory.id);
+
+      final lane = await sut.getAll(user.id);
+      expect(lane, isEmpty);
+
+      final hidden = await sut.get(memory.id);
+      expect(hidden, isNotNull);
+      expect(hidden!.hideAt, isNotNull);
+    });
+  });
 }
