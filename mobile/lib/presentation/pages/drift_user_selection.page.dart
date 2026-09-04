@@ -74,6 +74,7 @@ class DriftUserSelectionPage extends HookConsumerWidget {
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 8.0),
             child: Chip(
+              key: Key('drift-user-selection-chip-${user.id}'),
               backgroundColor: context.primaryColor.withValues(alpha: 0.15),
               label: Text(user.name, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
             ),
@@ -95,6 +96,7 @@ class DriftUserSelectionPage extends HookConsumerWidget {
             shrinkWrap: true,
             itemBuilder: (context, index) {
               return ListTile(
+                key: Key('drift-user-selection-tile-${users[index].id}'),
                 leading: buildTileIcon(users[index]),
                 dense: true,
                 title: Text(users[index].name, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold)),
@@ -117,6 +119,7 @@ class DriftUserSelectionPage extends HookConsumerWidget {
     }
 
     return Scaffold(
+      key: const Key('drift-user-selection-page'),
       appBar: AppBar(
         title: const Text('invite_to_album').tr(),
         elevation: 0,
@@ -129,6 +132,7 @@ class DriftUserSelectionPage extends HookConsumerWidget {
         ),
         actions: [
           TextButton(
+            key: const Key('drift-user-selection-add-action'),
             onPressed: sharedUsersList.value.isEmpty ? null : () => addNewUsersHandler(),
             child: const Text("add", style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold)).tr(),
           ),

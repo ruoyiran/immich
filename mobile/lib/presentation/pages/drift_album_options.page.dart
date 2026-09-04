@@ -105,6 +105,7 @@ class DriftAlbumOptionsPage extends HookConsumerWidget {
       if (user.id == userId) {
         actions = [
           ListTile(
+            key: const Key('remote-album-options-leave-album-action'),
             leading: const Icon(Icons.exit_to_app_rounded),
             title: const Text("leave_album").t(context: context),
             onTap: leaveAlbum,
@@ -115,6 +116,7 @@ class DriftAlbumOptionsPage extends HookConsumerWidget {
       if (isOwner) {
         actions = [
           ListTile(
+            key: Key('remote-album-options-remove-user-action-${user.id}'),
             leading: const Icon(Icons.person_remove_rounded),
             title: const Text("remove_user").t(context: context),
             onTap: () => removeUserFromAlbum(user),
@@ -143,6 +145,7 @@ class DriftAlbumOptionsPage extends HookConsumerWidget {
       if (isOwner) {
         final owner = ref.read(currentUserProvider);
         return ListTile(
+          key: const Key('remote-album-options-owner-row'),
           leading: owner != null ? UserCircleAvatar(user: owner) : const SizedBox(),
           title: Text(album.ownerName, style: const TextStyle(fontWeight: FontWeight.w500)),
           subtitle: Text(owner?.email ?? "", style: TextStyle(color: context.colorScheme.onSurfaceSecondary)),
@@ -159,6 +162,7 @@ class DriftAlbumOptionsPage extends HookConsumerWidget {
             }
 
             return ListTile(
+              key: const Key('remote-album-options-owner-row'),
               leading: UserCircleAvatar(user: user),
               title: Text(user.name, style: const TextStyle(fontWeight: FontWeight.w500)),
               subtitle: Text(user.email, style: TextStyle(color: context.colorScheme.onSurfaceSecondary)),
@@ -179,6 +183,7 @@ class DriftAlbumOptionsPage extends HookConsumerWidget {
           itemBuilder: (context, index) {
             final user = sharedUsers[index];
             return ListTile(
+              key: Key('remote-album-options-shared-user-${user.id}'),
               leading: UserCircleAvatar(user: user),
               title: Text(user.name, style: const TextStyle(fontWeight: FontWeight.w500)),
               subtitle: Text(user.email, style: TextStyle(color: context.colorScheme.onSurfaceSecondary)),
