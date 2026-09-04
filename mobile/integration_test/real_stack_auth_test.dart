@@ -13187,6 +13187,259 @@ void main() async {
       },
     );
 
+    _realStackSessionTest(
+      'MOB-MEDIA-067-$_caseSuffix',
+      'uploads an MP4 and verifies server media outputs and playback',
+      (tester) async {
+        tester.view.devicePixelRatio = 1.0;
+        tester.view.physicalSize = const Size(430, 932);
+        addTearDown(tester.view.reset);
+
+        await _loadAuthenticatedApp(
+          tester,
+          overrideCancellation: true,
+          closeDriftOnDispose: false,
+          resetSyncAcksBeforeStart: true,
+        );
+        final container = _containerOfApp(tester);
+        final apiService = container.read(apiServiceProvider);
+        final assetsApi = apiService.assetsApi;
+        final searchApi = apiService.searchApi;
+        final createdRemoteAssetIds = <String>[];
+        final createdLocalAssetIds = <String>{};
+
+        addTearDown(() async {
+          for (final assetId in createdRemoteAssetIds) {
+            await _deleteTestAssetBestEffort(assetsApi, assetId);
+          }
+          unawaited(_deleteLocalTestAssetsBestEffort(createdLocalAssetIds));
+        });
+
+        await _resetAndSyncRemoteState(tester, container);
+
+        final runToken = DateTime.now().toUtc().microsecondsSinceEpoch.toString();
+        final localName = 'immich-e2e-media-067-video-$runToken.mp4';
+        final sourceBytes = _generatedMp4Bytes(
+          'MOB-MEDIA-067-$_caseSuffix-$runToken',
+        );
+        expect(
+          await _serverAssetIdsByOriginalFilename(
+            searchApi,
+            localName,
+            type: api.AssetTypeEnum.VIDEO,
+          ),
+          isEmpty,
+          reason: 'The 067 video filename must be unique before upload',
+        );
+
+        final createdLocal = await _saveLocalTestVideo(
+          container,
+          createdLocalAssetIds,
+          title: localName,
+          relativePath: Platform.isAndroid ? 'Movies/ImmichE2E067' : null,
+          bytes: sourceBytes,
+        );
+        expect(createdLocal.id, isNotEmpty);
+
+        await container.read(backgroundSyncProvider).syncLocal(full: true);
+        final localAsset = await _waitForLocalAssetByNameState(
+          container,
+          localName,
+          tester,
+          (asset) =>
+              asset.isVideo &&
+              asset.contentSize != null &&
+              asset.contentSize! > 0,
+          reason:
+              'Expected the 067 gallery video fixture to sync with uploadable metadata',
+        );
+        expect(localAsset.isLocalOnly, isTrue);
+
+        final localFile = await container.read(storageRepositoryProvider).getFileForAsset(localAsset.id);
+        expect(localFile, isNotNull);
+        final localBytes = await localFile!.readAsBytes();
+        final localMd5 = base64Encode(md5.convert(localBytes).bytes);
+        expect(localBytes.length, localAsset.contentSize);
+
+        final progressById = <String, List<double>>{};
+        String? remoteAssetId;
+        String? uploadError;
+        await container.read(foregroundUploadServiceProvider).uploadSingleAsset(
+          localAsset,
+          Completer<void>(),
+          callbacks: UploadCallbacks(
+            onProgress: (id, _, bytes, totalBytes) {
+              final progress = totalBytes > 0 ? bytes / totalBytes : 0.0;
+              final assetProgress = progressById.putIfAbsent(id, () => []);
+              expect(progress, inInclusiveRange(0.0, 1.0));
+              if (assetProgress.isNotEmpty) {
+                expect(progress, greaterThanOrEqualTo(assetProgress.last));
+              }
+              assetProgress.add(progress);
+            },
+            onSuccess: (_, remoteId) => remoteAssetId = remoteId,
+            onError: (_, errorMessage) => uploadError = errorMessage,
+          ),
+        );
+
+        expect(uploadError, isNull);
+        expect(remoteAssetId, isNotNull);
+        expect(progressById, contains(localAsset.id));
+        createdRemoteAssetIds.add(remoteAssetId!);
+
+        final serverIds = await _waitForServerAssetIdsByOriginalFilename(
+          tester,
+          searchApi,
+          localName,
+          (ids) => ids.contains(remoteAssetId),
+          type: api.AssetTypeEnum.VIDEO,
+          reason:
+              'Expected the 067 uploaded video to be indexed by filename on the real server',
+        );
+        expect(serverIds, hasLength(1));
+
+        final info = await _waitForAssetInfoState(
+          tester,
+          assetsApi,
+          remoteAssetId!,
+          (asset) =>
+              asset.type == api.AssetTypeEnum.VIDEO &&
+              asset.originalFileName == localName &&
+              asset.duration != null &&
+              asset.duration! > 0 &&
+              asset.width != null &&
+              asset.height != null,
+          reason:
+              'Expected the 067 uploaded video to expose processed server metadata',
+        );
+        expect(info.checksum, localMd5);
+
+        final original = await _waitForSuccessfulResponse(
+          tester,
+          () => container
+              .read(assetApiRepositoryProvider)
+              .downloadAsset(remoteAssetId!, edited: false),
+          timeout: const Duration(minutes: 3),
+        );
+        expect(original.bodyBytes.length, localBytes.length);
+        expect(base64Encode(md5.convert(original.bodyBytes).bytes), localMd5);
+
+        final thumbnail = await _waitForSuccessfulResponse(
+          tester,
+          () => assetsApi.viewAssetWithHttpInfo(
+            remoteAssetId!,
+            size: api.AssetMediaSize.thumbnail,
+          ),
+          timeout: const Duration(minutes: 3),
+        );
+        expect(thumbnail.bodyBytes, isNotEmpty);
+
+        final playback = await _waitForSuccessfulResponse(
+          tester,
+          () => assetsApi.playAssetVideoWithHttpInfo(remoteAssetId!),
+          acceptedStatusCodes: const {200, 206},
+          timeout: const Duration(minutes: 3),
+        );
+        expect(playback.bodyBytes, isNotEmpty);
+
+        final rangedPlayback = await _waitForSuccessfulResponse(
+          tester,
+          () => http.get(
+            Uri.parse(
+              '${Store.get(StoreKey.serverEndpoint)}/assets/$remoteAssetId/video/playback',
+            ),
+            headers: {
+              ...ApiService.getRequestHeaders(),
+              'Authorization': 'Bearer ${Store.get(StoreKey.accessToken)}',
+              HttpHeaders.rangeHeader: 'bytes=0-2047',
+            },
+          ),
+          acceptedStatusCodes: const {206},
+          timeout: const Duration(minutes: 3),
+        );
+        expect(rangedPlayback.bodyBytes, isNotEmpty);
+        expect(
+          rangedPlayback.headers[HttpHeaders.contentRangeHeader],
+          startsWith('bytes 0-'),
+        );
+
+        await _resetAndSyncRemoteState(tester, container);
+        final syncedAsset = await _waitForRemoteAssetState(
+          tester,
+          container,
+          remoteAssetId!,
+          (asset) =>
+              asset.isVideo &&
+              asset.hasLocal &&
+              asset.hasRemote &&
+              asset.checksum == localMd5 &&
+              asset.duration > Duration.zero,
+          reason:
+              'Expected the 067 upload to sync back as one merged local/remote video asset',
+        );
+
+        final timeline = container.read(timelineFactoryProvider).main([
+          syncedAsset.ownerId,
+        ]);
+        addTearDown(timeline.dispose);
+        final timelineAssets = await _expectTimelineAssetSet(
+          tester,
+          timeline,
+          includes: {remoteAssetId!},
+          excludes: const {},
+          reason:
+              'Expected the 067 uploaded video to appear in the client timeline',
+        );
+        final timelineMatches = timelineAssets
+            .where(
+              (asset) =>
+                  _timelineAssetId(asset) == remoteAssetId ||
+                  asset.refersToSameAsset(syncedAsset),
+            )
+            .toList();
+        expect(timelineMatches, hasLength(1));
+        expect(timelineMatches.single.isVideo, isTrue);
+
+        await _openTimelineAsset(tester, syncedAsset);
+        await pumpUntilFound(
+          tester,
+          find.byType(AssetViewer),
+          timeout: const Duration(seconds: 60),
+        );
+        expect(
+          container.read(assetViewerProvider).currentAsset?.remoteId,
+          remoteAssetId,
+        );
+        await pumpUntilFound(
+          tester,
+          find.byType(NativeVideoViewer),
+          timeout: const Duration(seconds: 60),
+        );
+        await _waitForVideoState(
+          tester,
+          container,
+          remoteAssetId!,
+          (state) => state.duration > Duration.zero,
+          timeout: const Duration(seconds: 90),
+        );
+        await _playVideoFromControls(tester, container, remoteAssetId!);
+        await _waitForVideoPositionAfter(
+          tester,
+          container,
+          remoteAssetId!,
+          Duration.zero,
+        );
+        await _pauseVideoFromControls(tester, container, remoteAssetId!);
+        expect(tester.takeException(), isNull);
+
+        debugPrint(
+          'MOB-MEDIA-067-$_caseSuffix uploaded video remoteId=$remoteAssetId '
+          'sourceFilename=$localName md5=$localMd5 size=${localBytes.length} '
+          'durationMs=${info.duration} dimensions=${info.width}x${info.height}',
+        );
+      },
+    );
+
     if (_selectedCaseId.isNotEmpty && !_registeredSelectedCase) {
       test(
         _selectedCaseId,
@@ -14922,6 +15175,34 @@ Future<LocalAsset> _saveLocalTestImage(
   );
   createdLocalAssetIds.add(created!.id);
   return created;
+}
+
+Future<AssetEntity> _saveLocalTestVideo(
+  ProviderContainer container,
+  Set<String> createdLocalAssetIds, {
+  required String title,
+  required String? relativePath,
+  required List<int> bytes,
+}) async {
+  final directory = await getTemporaryDirectory();
+  final file = File('${directory.path}/$title');
+  await file.writeAsBytes(bytes, flush: true);
+  try {
+    final created = await container
+        .read(fileMediaRepositoryProvider)
+        .saveVideo(file, title: title, relativePath: relativePath);
+    expect(
+      created,
+      isNotNull,
+      reason: 'Expected PhotoManager to save local video fixture $title',
+    );
+    createdLocalAssetIds.add(created!.id);
+    return created;
+  } finally {
+    if (file.existsSync()) {
+      file.deleteSync();
+    }
+  }
 }
 
 Future<void> _deleteLocalTestAssetsBestEffort(Iterable<String> assetIds) async {
@@ -16969,10 +17250,7 @@ Future<String> _uploadGeneratedMp4AsSecondClient(
   String fileName,
   DateTime createdAt,
 ) async {
-  final bytes = <int>[
-    ...base64Decode(_tinyMp4FixtureBase64),
-    ..._mp4FreeBoxBytes(fileName),
-  ];
+  final bytes = _generatedMp4Bytes(fileName);
   final request =
       http.MultipartRequest(
           'POST',
@@ -17003,6 +17281,11 @@ Future<String> _uploadGeneratedMp4AsSecondClient(
   expect(payload['status'], 'created', reason: response.body);
   return payload['id'] as String;
 }
+
+List<int> _generatedMp4Bytes(String payload) => <int>[
+  ...base64Decode(_tinyMp4FixtureBase64),
+  ..._mp4FreeBoxBytes(payload),
+];
 
 const _tinyMp4FixtureBase64 =
     ''
