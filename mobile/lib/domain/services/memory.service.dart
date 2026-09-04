@@ -17,6 +17,14 @@ class DriftMemoryService {
     return _repository.get(memoryId);
   }
 
+  Future<void> setSaved(String memoryId, bool isSaved) {
+    return _repository.setSaved(memoryId, isSaved);
+  }
+
+  Future<void> hide(String memoryId) {
+    return _repository.hide(memoryId);
+  }
+
   Future<int> getCount() {
     return _repository.getCount();
   }

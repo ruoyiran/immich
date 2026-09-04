@@ -21,6 +21,7 @@ import 'package:immich_mobile/domain/models/asset/base_asset.model.dart';
 import 'package:immich_mobile/domain/models/asset_edit.model.dart';
 import 'package:immich_mobile/domain/models/events.model.dart';
 import 'package:immich_mobile/domain/models/exif.model.dart';
+import 'package:immich_mobile/domain/models/memory.model.dart';
 import 'package:immich_mobile/domain/models/ocr.model.dart';
 import 'package:immich_mobile/domain/models/person.model.dart';
 import 'package:immich_mobile/domain/models/settings_key.dart';
@@ -62,6 +63,7 @@ import 'package:immich_mobile/presentation/pages/drift_favorite.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_library.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_local_album.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_locked_folder.page.dart';
+import 'package:immich_mobile/presentation/pages/drift_memory.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_recently_added.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_recently_taken.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_remote_album.page.dart';
@@ -105,6 +107,7 @@ import 'package:immich_mobile/providers/infrastructure/asset.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/asset_viewer/asset.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/cancel.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/db.provider.dart';
+import 'package:immich_mobile/providers/infrastructure/memory.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/ocr.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/people.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/platform.provider.dart';
@@ -114,6 +117,7 @@ import 'package:immich_mobile/providers/infrastructure/tag.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/timeline.provider.dart';
 import 'package:immich_mobile/providers/tab.provider.dart';
 import 'package:immich_mobile/providers/timeline/multiselect.provider.dart';
+import 'package:immich_mobile/providers/user.provider.dart';
 import 'package:immich_mobile/providers/websocket.provider.dart';
 import 'package:immich_mobile/repositories/asset_api.repository.dart';
 import 'package:immich_mobile/repositories/asset_media.repository.dart';
@@ -6691,6 +6695,186 @@ void main() async {
       await _popUntilVisible(tester, DriftLibraryPage);
     });
 
+    _realStackSessionTest('MOB-UI-052-$_caseSuffix', 'browses and manages memories', (tester) async {
+      tester.view.devicePixelRatio = 1.0;
+      tester.view.physicalSize = const Size(430, 932);
+      addTearDown(tester.view.reset);
+
+      await _loadAuthenticatedApp(tester, overrideCancellation: true, closeDriftOnDispose: false);
+      final container = _containerOfApp(tester);
+      final apiService = container.read(apiServiceProvider);
+      final downloadService = container.read(downloadServiceProvider);
+      final downloadRepository = container.read(downloadRepositoryProvider);
+      final shareInvocations = <_ShareInvocation>[];
+      final downloadUpdates = <TaskStatusUpdate>[];
+      final createdRemoteAssetIds = <String>[];
+
+      _recordSharePlusInvocations(shareInvocations);
+      downloadService.onImageDownloadStatus = downloadUpdates.add;
+      downloadService.onVideoDownloadStatus = downloadUpdates.add;
+      addTearDown(() async {
+        _clearSharePlusInvocationRecorder();
+        downloadService.onImageDownloadStatus = null;
+        downloadService.onVideoDownloadStatus = null;
+        await downloadRepository.deleteRecordsWithIds(createdRemoteAssetIds);
+        for (final assetId in createdRemoteAssetIds) {
+          await _deleteTestAssetBestEffort(apiService.assetsApi, assetId);
+        }
+      });
+
+      final now = DateTime.now().toUtc();
+      final runToken = now.microsecondsSinceEpoch.toString();
+      final memoryPhotoName = 'immich-e2e-memory-052-photo-$runToken.jpg';
+      final memoryVideoName = 'immich-e2e-memory-052-video-$runToken.mp4';
+      final otherMemoryName = 'immich-e2e-memory-052-other-$runToken.jpg';
+      final photoId = await _uploadGeneratedJpegAsSecondClient(
+        memoryPhotoName,
+        DateTime.utc(now.year - 1, now.month, now.day, 9),
+      );
+      createdRemoteAssetIds.add(photoId);
+      final videoId = await _uploadGeneratedMp4AsSecondClient(
+        memoryVideoName,
+        DateTime.utc(now.year - 1, now.month, now.day, 10),
+      );
+      createdRemoteAssetIds.add(videoId);
+      final otherMemoryId = await _uploadGeneratedJpegAsSecondClient(
+        otherMemoryName,
+        DateTime.utc(now.year - 2, now.month, now.day, 9),
+      );
+      createdRemoteAssetIds.add(otherMemoryId);
+
+      for (final assetId in createdRemoteAssetIds) {
+        await _waitForSuccessfulResponse(
+          tester,
+          () => _authenticatedApiGet('/assets/$assetId/thumbnail?size=thumbnail&edited=false&c=$runToken'),
+          timeout: const Duration(minutes: 3),
+        );
+      }
+
+      await container.read(syncApiRepositoryProvider).deleteSyncAck(_allReplayableSyncAckTypes);
+      await container.read(syncStreamRepositoryProvider).reset();
+      final syncSuccess = await container.read(syncStreamServiceProvider).sync();
+      expect(syncSuccess, isTrue);
+      container.invalidate(driftMemoryFutureProvider);
+      await _pumpFor(tester, const Duration(seconds: 1));
+
+      final memories = await _waitForMemoryLane(
+        tester,
+        container,
+        (items) =>
+            items.any((memory) => _memoryAssetIds(memory).containsAll({photoId, videoId})) &&
+            items.any((memory) => _memoryAssetIds(memory).contains(otherMemoryId)),
+        reason: 'Expected synced on-this-day memories for the 052 image/video fixtures',
+      );
+      expect(memories.map((memory) => memory.data.year), isNot(contains(now.year)));
+      final targetMemory = memories.singleWhere((memory) => _memoryAssetIds(memory).containsAll({photoId, videoId}));
+      final otherMemory = memories.singleWhere((memory) => _memoryAssetIds(memory).contains(otherMemoryId));
+      final targetIds = _memoryAssetIds(targetMemory);
+      final photoAsset = targetMemory.assets.singleWhere((asset) => asset.id == photoId);
+      expect(targetMemory.assets, hasLength(greaterThanOrEqualTo(2)));
+      expect(targetIds, contains(photoId));
+      expect(targetIds, contains(videoId));
+
+      final providerMemories = await container.read(driftMemoryFutureProvider.future);
+      expect(providerMemories.map((memory) => memory.id), contains(targetMemory.id));
+      await _selectPrimaryNavigationTab(tester, kPhotoTabIndex);
+      await pumpUntilFound(tester, find.byType(Timeline), timeout: const Duration(seconds: 60));
+      await _openMemoryFromTimeline(tester, targetMemory.id);
+      await _pumpUntilFoundWithReason(
+        tester,
+        find.byType(DriftMemoryPage),
+        reason: 'Expected tapping the 052 memory card to open the memory viewer',
+        timeout: const Duration(seconds: 30),
+      );
+      await _pumpUntil(
+        tester,
+        () => container.read(assetViewerProvider).currentAsset?.id == targetMemory.assets.first.id,
+        timeout: const Duration(seconds: 10),
+      );
+
+      await _advanceMemoryAssetTo(tester, container, photoId, maxTaps: targetMemory.assets.length);
+      await _tapMemoryActionButton(tester, const Key('memory-share-button'));
+      await _waitForShareInvocationCount(tester, shareInvocations, 1);
+      _expectSharedDisplayNames(shareInvocations.single, {photoAsset.name});
+
+      await downloadRepository.deleteRecordsWithIds([photoId]);
+      await _tapMemoryActionButton(tester, const Key('memory-download-button'));
+      final downloadRecord = await _waitForDownloadRecordStatus(
+        tester,
+        photoId,
+        TaskStatus.complete,
+        reason: 'Expected memory download to complete for the current asset',
+      );
+      expect(downloadRecord.task.filename, photoAsset.name);
+
+      await _tapMemoryActionButton(tester, const Key('memory-save-button'));
+      await _waitForMemory(
+        tester,
+        container,
+        targetMemory.id,
+        (memory) => memory?.isSaved ?? false,
+        reason: 'Expected memory save action to persist locally',
+        timeout: const Duration(seconds: 10),
+      );
+
+      await _advanceMemoryAssetTo(tester, container, videoId, maxTaps: targetMemory.assets.length);
+      await _waitForVideoState(
+        tester,
+        container,
+        videoId,
+        (state) => state.status == VideoPlaybackStatus.playing || state.status == VideoPlaybackStatus.buffering,
+        timeout: const Duration(seconds: 30),
+      );
+      await _tapMemoryActionButton(tester, const Key('memory-video-play-pause-button'));
+      await _waitForVideoState(
+        tester,
+        container,
+        videoId,
+        (state) => state.status == VideoPlaybackStatus.paused,
+        timeout: const Duration(seconds: 30),
+      );
+      await _tapMemoryActionButton(tester, const Key('memory-video-play-pause-button'));
+      await _waitForVideoState(
+        tester,
+        container,
+        videoId,
+        (state) => state.status == VideoPlaybackStatus.playing || state.status == VideoPlaybackStatus.buffering,
+        timeout: const Duration(seconds: 30),
+      );
+
+      await tester.fling(find.byType(PageView).first, const Offset(0, -700), 1200);
+      await _pumpUntil(
+        tester,
+        () => container.read(assetViewerProvider).currentAsset?.id == otherMemory.assets.first.id,
+        timeout: const Duration(seconds: 10),
+      );
+      await tester.fling(find.byType(PageView).first, const Offset(0, 700), 1200);
+      await _pumpUntil(
+        tester,
+        () => container.read(assetViewerProvider).currentAsset?.id == targetMemory.assets.first.id,
+        timeout: const Duration(seconds: 10),
+      );
+
+      await _tapMemoryActionButton(tester, const Key('memory-hide-button'));
+      await _pumpUntil(
+        tester,
+        () => find.byType(DriftMemoryPage).evaluate().isEmpty,
+        timeout: const Duration(seconds: 30),
+      );
+
+      final hidden = await container.read(driftMemoryServiceProvider).get(targetMemory.id);
+      expect(hidden, isNotNull);
+      expect(hidden!.hideAt, isNotNull);
+      container.invalidate(driftMemoryFutureProvider);
+      final refreshedMemories = await _waitForMemoryLane(
+        tester,
+        container,
+        (items) => !items.any((memory) => memory.id == targetMemory.id),
+        reason: 'Expected the hidden 052 memory to disappear from the memory lane',
+      );
+      expect(refreshedMemories.map((memory) => memory.id), contains(otherMemory.id));
+    });
+
     if (_selectedCaseId.isNotEmpty && !_registeredSelectedCase) {
       test(_selectedCaseId, () => fail('No real stack auth test registered for $_selectedCaseId'));
     }
@@ -6910,6 +7094,103 @@ Future<List<SyncEvent>> _interruptSyncAfterFirstSafeEvent(ProviderContainer cont
         batchSize: 1,
       );
   return events;
+}
+
+Set<String> _memoryAssetIds(DriftMemory memory) => memory.assets.map((asset) => asset.id).toSet();
+
+Future<List<DriftMemory>> _waitForMemoryLane(
+  WidgetTester tester,
+  ProviderContainer container,
+  bool Function(List<DriftMemory>) matches, {
+  required String reason,
+  Duration timeout = const Duration(seconds: 60),
+}) async {
+  final currentUser = container.read(currentUserProvider);
+  expect(currentUser, isNotNull);
+  final userId = currentUser!.id;
+
+  var latest = const <DriftMemory>[];
+  final end = DateTime.now().add(timeout);
+  while (DateTime.now().isBefore(end)) {
+    latest = await container.read(driftMemoryServiceProvider).getMemoryLane(userId);
+    if (matches(latest)) {
+      return latest;
+    }
+    await _pumpFor(tester, const Duration(milliseconds: 500));
+  }
+
+  fail('$reason; latest memory ids=${latest.map((memory) => memory.id).join(', ')}');
+}
+
+Future<DriftMemory?> _waitForMemory(
+  WidgetTester tester,
+  ProviderContainer container,
+  String memoryId,
+  bool Function(DriftMemory?) matches, {
+  required String reason,
+  Duration timeout = const Duration(seconds: 60),
+}) async {
+  DriftMemory? latest;
+  final end = DateTime.now().add(timeout);
+  while (DateTime.now().isBefore(end)) {
+    latest = await container.read(driftMemoryServiceProvider).get(memoryId);
+    if (matches(latest)) {
+      return latest;
+    }
+    await _pumpFor(tester, const Duration(milliseconds: 500));
+  }
+
+  fail('$reason; latest=$latest');
+}
+
+Future<void> _tapMemoryActionButton(WidgetTester tester, Key key) async {
+  final button = find.byKey(key);
+  await pumpUntilFound(tester, button, timeout: const Duration(seconds: 30));
+  expect(button.hitTestable(), findsWidgets, reason: 'Expected memory action $key to be tappable');
+  await tester.tap(button.hitTestable().first, warnIfMissed: false);
+  await _pumpFor(tester, const Duration(milliseconds: 500));
+}
+
+Future<void> _openMemoryFromTimeline(WidgetTester tester, String memoryId) async {
+  final card = find.byKey(Key(memoryId));
+  final scrollable = find.descendant(of: find.byType(Timeline), matching: find.byType(Scrollable));
+  expect(scrollable, findsWidgets, reason: 'Expected timeline scrollable before opening memory $memoryId');
+
+  for (var attempt = 0; attempt < 12; attempt++) {
+    if (card.evaluate().isNotEmpty) {
+      await tester.ensureVisible(card.first);
+      await _pumpFor(tester, const Duration(milliseconds: 300));
+      await tester.tapAt(tester.getCenter(card.first));
+      await _pumpFor(tester, const Duration(milliseconds: 700));
+      return;
+    }
+
+    await tester.drag(scrollable.first, const Offset(0, 700));
+    await _pumpFor(tester, const Duration(milliseconds: 500));
+  }
+
+  fail('Expected the 052 memory card in the timeline memory lane; memoryId=$memoryId');
+}
+
+Future<void> _advanceMemoryAssetTo(
+  WidgetTester tester,
+  ProviderContainer container,
+  String assetId, {
+  required int maxTaps,
+}) async {
+  for (var attempt = 0; attempt <= maxTaps; attempt++) {
+    if (container.read(assetViewerProvider).currentAsset?.id == assetId) {
+      return;
+    }
+
+    final page = find.byType(DriftMemoryPage);
+    await pumpUntilFound(tester, page, timeout: const Duration(seconds: 30));
+    final viewerRect = tester.getRect(page.first);
+    await tester.tapAt(Offset(viewerRect.right - 24, viewerRect.center.dy));
+    await _pumpFor(tester, const Duration(milliseconds: 700));
+  }
+
+  fail('Could not advance memory viewer to asset $assetId');
 }
 
 Future<void> _connectAndWaitForWebsocket(WidgetTester tester, ProviderContainer container) async {
