@@ -18,14 +18,12 @@ import 'package:immich_mobile/domain/services/background_worker.service.dart';
 import 'package:immich_mobile/extensions/build_context_extensions.dart';
 import 'package:immich_mobile/extensions/translate_extensions.dart';
 import 'package:immich_mobile/generated/codegen_loader.g.dart';
-import 'package:immich_mobile/generated/translations.g.dart';
 import 'package:immich_mobile/infrastructure/repositories/network.repository.dart';
 import 'package:immich_mobile/pages/common/splash_screen.page.dart';
 import 'package:immich_mobile/platform/background_worker_lock_api.g.dart';
 import 'package:immich_mobile/providers/app_life_cycle.provider.dart';
 import 'package:immich_mobile/providers/asset_viewer/share_intent_upload.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/db.provider.dart';
-import 'package:immich_mobile/providers/infrastructure/platform.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/settings.provider.dart';
 import 'package:immich_mobile/providers/locale_provider.dart';
 import 'package:immich_mobile/providers/routes.provider.dart';
@@ -104,6 +102,7 @@ Future<void> initApp() async {
     globalConfig: [(Config.holdingQueue, (6, 6, 3)), (Config.runInForegroundIfFileLargerThan, 256)],
   );
 
+  await cleanupLegacyBackupTasks();
   await FileDownloader().trackTasksInGroup(kDownloadGroupLivePhoto, markDownloadedComplete: false);
 
   unawaited(FileDownloader().trackTasks());
@@ -222,21 +221,6 @@ class ImmichAppState extends ConsumerState<ImmichApp> with WidgetsBindingObserve
   void initState() {
     super.initState();
     unawaited(initApp().then((_) => dPrint(() => "App Init Completed")));
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      // needs to be delayed so that EasyLocalization is working
-      unawaited(ref.read(backgroundWorkerFgServiceProvider).enable());
-      if (Platform.isAndroid) {
-        unawaited(
-          ref
-              .read(backgroundWorkerFgServiceProvider)
-              .saveNotificationMessage(
-                StaticTranslations.instance.uploading_media,
-                StaticTranslations.instance.backup_background_service_default_notification,
-              ),
-        );
-      }
-    });
-
     ref.read(viewIntentHandlerProvider).init();
     ref.read(shareIntentUploadProvider.notifier).init();
   }

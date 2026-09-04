@@ -9,7 +9,6 @@ import 'package:immich_mobile/infrastructure/repositories/network.repository.dar
 import 'package:immich_mobile/models/server_info/server_version.model.dart';
 import 'package:immich_mobile/providers/auth.provider.dart';
 import 'package:immich_mobile/providers/background_sync.provider.dart';
-import 'package:immich_mobile/providers/infrastructure/settings.provider.dart';
 import 'package:immich_mobile/providers/server_info.provider.dart';
 import 'package:immich_mobile/utils/debounce.dart';
 import 'package:immich_mobile/utils/debug_print.dart';
@@ -191,15 +190,8 @@ class WebsocketNotifier extends StateNotifier<WebsocketState> {
       return;
     }
 
-    final isSyncAlbumEnabled = _ref.read(appConfigProvider).backup.syncAlbums;
     try {
-      unawaited(
-        _ref.read(backgroundSyncProvider).syncWebsocketBatchV1(_batchedAssetUploadReady.toList()).then((_) {
-          if (isSyncAlbumEnabled) {
-            unawaited(_ref.read(backgroundSyncProvider).syncLinkedAlbum());
-          }
-        }),
-      );
+      unawaited(_ref.read(backgroundSyncProvider).syncWebsocketBatchV1(_batchedAssetUploadReady.toList()));
     } catch (error) {
       _log.severe("Error processing batched AssetUploadReadyV1 events: $error");
     }
@@ -212,15 +204,8 @@ class WebsocketNotifier extends StateNotifier<WebsocketState> {
       return;
     }
 
-    final isSyncAlbumEnabled = _ref.read(appConfigProvider).backup.syncAlbums;
     try {
-      unawaited(
-        _ref.read(backgroundSyncProvider).syncWebsocketBatchV2(_batchedAssetUploadReady.toList()).then((_) {
-          if (isSyncAlbumEnabled) {
-            unawaited(_ref.read(backgroundSyncProvider).syncLinkedAlbum());
-          }
-        }),
-      );
+      unawaited(_ref.read(backgroundSyncProvider).syncWebsocketBatchV2(_batchedAssetUploadReady.toList()));
     } catch (error) {
       _log.severe("Error processing batched AssetUploadReadyV2 events: $error");
     }

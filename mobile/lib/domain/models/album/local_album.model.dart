@@ -4,7 +4,7 @@ import 'package:freezed_annotation/freezed_annotation.dart';
 part 'local_album.model.freezed.dart';
 
 enum BackupSelection {
-  // Used to sort albums based on the backupSelection
+  // Retained for compatibility with existing local databases after automatic backup removal.
   // selected -> none -> excluded
   // Do not change the order of these values
   selected,

@@ -8,7 +8,6 @@ import 'package:immich_mobile/routing/router.dart';
 import 'package:immich_mobile/widgets/settings/advanced_settings.dart';
 import 'package:immich_mobile/widgets/settings/asset_list_settings/asset_list_settings.dart';
 import 'package:immich_mobile/widgets/settings/asset_viewer_settings/asset_viewer_settings.dart';
-import 'package:immich_mobile/widgets/settings/backup_settings/drift_backup_settings.dart';
 import 'package:immich_mobile/widgets/settings/beta_sync_settings/sync_status_and_actions.dart';
 import 'package:immich_mobile/widgets/settings/free_up_space_settings.dart';
 import 'package:immich_mobile/widgets/settings/language_settings.dart';
@@ -20,7 +19,6 @@ import 'package:immich_mobile/widgets/settings/settings_card.dart';
 enum SettingSection {
   advanced('advanced', Icons.build_outlined, "advanced_settings_tile_subtitle"),
   assetViewer('asset_viewer_settings_title', Icons.image_outlined, "asset_viewer_settings_subtitle"),
-  backup('backup', Icons.cloud_upload_outlined, "backup_settings_subtitle"),
   freeUpSpace('free_up_space', Icons.cleaning_services_outlined, "free_up_space_settings_subtitle"),
   languages('language', Icons.language, "setting_languages_subtitle"),
   networking('networking_settings', Icons.wifi, "networking_subtitle"),
@@ -36,7 +34,6 @@ enum SettingSection {
   Widget get widget => switch (this) {
     SettingSection.advanced => const AdvancedSettings(),
     SettingSection.assetViewer => const AssetViewerSettings(),
-    SettingSection.backup => const DriftBackupSettings(),
     SettingSection.freeUpSpace => const FreeUpSpaceSettings(),
     SettingSection.languages => const LanguageSettings(),
     SettingSection.networking => const NetworkingSettings(),

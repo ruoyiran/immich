@@ -3,7 +3,6 @@ import 'dart:typed_data';
 import 'package:flutter/widgets.dart';
 import 'package:immich_mobile/constants/enums.dart';
 import 'package:immich_mobile/domain/models/album/album.model.dart';
-import 'package:immich_mobile/domain/models/album/local_album.model.dart';
 import 'package:immich_mobile/domain/models/asset/base_asset.model.dart';
 import 'package:immich_mobile/domain/models/asset_edit.model.dart';
 import 'package:immich_mobile/domain/models/exif.model.dart';
@@ -79,7 +78,6 @@ class RepositoryMocks {
   }
 
   void _stubLocalAlbumRepository() {
-    when(localAlbum.getBackupAlbums).thenAnswer((_) async => []);
     when(localAlbum.getAssetsToHash).thenAnswer((_) async => []);
   }
 
@@ -239,9 +237,6 @@ extension type const Stub<T extends Mock>(T mockedClass) {
 }
 
 extension type const LocalAlbumRepositoryStub(MockLocalAlbumRepository repo) implements Stub<MockLocalAlbumRepository> {
-  Future<List<LocalAlbum>> Function() get getBackupAlbums =>
-      () => repo.getBackupAlbums();
-
   Future<List<LocalAsset>> Function() get getAssetsToHash =>
       () => repo.getAssetsToHash(any());
 }

@@ -1,7 +1,6 @@
 import 'dart:async';
 
 import 'package:immich_mobile/domain/utils/migrate_cloud_ids.dart' as m;
-import 'package:immich_mobile/domain/utils/sync_linked_album.dart';
 import 'package:immich_mobile/providers/infrastructure/sync.provider.dart';
 import 'package:immich_mobile/utils/isolate.dart';
 import 'package:worker_manager/worker_manager.dart';
@@ -32,7 +31,6 @@ class BackgroundSyncManager {
   Cancelable<void>? _syncWebsocketTask;
   Cancelable<void>? _cloudIdSyncTask;
   Cancelable<void>? _deviceAlbumSyncTask;
-  Cancelable<void>? _linkedAlbumSyncTask;
 
   BackgroundSyncManager({
     this.onRemoteSyncStart,
@@ -51,7 +49,7 @@ class BackgroundSyncManager {
   // stays referenced but frozen, so on resume the dedupe guards would hand back the
   // stale task instead of syncing (#28082). Websocket and cloud-id are excluded - the
   // resume path never restarts them. [_allTasks] builds on this so the lists can't drift.
-  List<Cancelable?> get _resumeSyncTasks => [_syncTask, _deviceAlbumSyncTask, _linkedAlbumSyncTask];
+  List<Cancelable?> get _resumeSyncTasks => [_syncTask, _deviceAlbumSyncTask];
 
   List<Cancelable?> get _allTasks => [_syncWebsocketTask, _cloudIdSyncTask, ..._resumeSyncTasks];
 
@@ -61,7 +59,6 @@ class BackgroundSyncManager {
     _syncTask = null;
     _syncWebsocketTask = null;
     _cloudIdSyncTask = null;
-    _linkedAlbumSyncTask = null;
     _deviceAlbumSyncTask = null;
     await _cancelAll(tasks);
   }
@@ -71,7 +68,6 @@ class BackgroundSyncManager {
     final tasks = _resumeSyncTasks;
     _syncTask = null;
     _deviceAlbumSyncTask = null;
-    _linkedAlbumSyncTask = null;
     await _cancelAll(tasks);
   }
 
@@ -209,25 +205,6 @@ class BackgroundSyncManager {
     return _syncWebsocketTask!.whenComplete(() {
       _syncWebsocketTask = null;
     });
-  }
-
-  Future<void> syncLinkedAlbum() {
-    if (_linkedAlbumSyncTask != null) {
-      return _linkedAlbumSyncTask!.future.catchError((_) {}, test: (error) => error is CanceledError);
-    }
-
-    final task = _linkedAlbumSyncTask = runInIsolateGentle(
-      computation: syncLinkedAlbumsIsolated,
-      debugLabel: 'linked-album-sync',
-    );
-    return task
-        .whenComplete(() {
-          if (identical(_linkedAlbumSyncTask, task)) {
-            _linkedAlbumSyncTask = null;
-          }
-        })
-        // a cancelled resume sync is not a failure; absorb it so the websocket callers don't get an uncaught error
-        .catchError((_) {}, test: (error) => error is CanceledError);
   }
 
   Future<void> syncCloudIds() {

@@ -11,7 +11,7 @@ import 'package:immich_mobile/infrastructure/entities/local_asset.entity.dart';
 import 'package:immich_mobile/infrastructure/entities/local_asset.entity.drift.dart';
 import 'package:immich_mobile/infrastructure/repositories/db.repository.dart';
 
-enum SortLocalAlbumsBy { id, backupSelection, isIosSharedAlbum, name, assetCount, newestAsset }
+enum SortLocalAlbumsBy { id, isIosSharedAlbum, name, assetCount, newestAsset }
 
 class DriftLocalAlbumRepository extends DriftDatabaseRepository {
   final Drift _db;
@@ -45,7 +45,6 @@ class DriftLocalAlbumRepository extends DriftDatabaseRepository {
       for (final sort in sortBy) {
         orderings.add(switch (sort) {
           SortLocalAlbumsBy.id => OrderingTerm.asc(_db.localAlbumEntity.id),
-          SortLocalAlbumsBy.backupSelection => OrderingTerm.asc(_db.localAlbumEntity.backupSelection),
           SortLocalAlbumsBy.isIosSharedAlbum => OrderingTerm.asc(_db.localAlbumEntity.isIosSharedAlbum),
           SortLocalAlbumsBy.name => OrderingTerm.asc(_db.localAlbumEntity.name),
           SortLocalAlbumsBy.assetCount => OrderingTerm.desc(assetCount),
@@ -58,13 +57,6 @@ class DriftLocalAlbumRepository extends DriftDatabaseRepository {
     return query.map((row) => row.readTable(_db.localAlbumEntity).toDto(assetCount: row.read(assetCount) ?? 0));
   }
 
-  Future<List<LocalAlbum>> getBackupAlbums() async {
-    final query = _db.localAlbumEntity.select()
-      ..where((row) => row.backupSelection.equalsValue(BackupSelection.selected));
-
-    return query.map((row) => row.toDto()).get();
-  }
-
   Future<void> delete(String albumId) => transaction(() async {
     // Remove all assets that are only in this particular album
     // We cannot remove all assets in the album because they might be in other albums in iOS
@@ -72,9 +64,7 @@ class DriftLocalAlbumRepository extends DriftDatabaseRepository {
     final assetsToDelete = CurrentPlatform.isIOS ? await _getUniqueAssetsInAlbum(albumId) : await getAssetIds(albumId);
     await _deleteAssets(assetsToDelete);
 
-    await _db.managers.localAlbumEntity
-        .filter((a) => a.id.equals(albumId) & a.backupSelection.equals(BackupSelection.none))
-        .delete();
+    await _db.managers.localAlbumEntity.filter((a) => a.id.equals(albumId)).delete();
   });
 
   Future<void> syncDeletes(String albumId, Iterable<String> assetIdsToKeep) async {
@@ -185,10 +175,7 @@ class DriftLocalAlbumRepository extends DriftDatabaseRepository {
         await deleteSmt.go();
       }
 
-      // Only remove albums that are not explicitly selected or excluded from backups
-      await _db.localAlbumEntity.deleteWhere(
-        (f) => f.marker_.isNotNull() & f.backupSelection.equalsValue(BackupSelection.none),
-      );
+      await _db.localAlbumEntity.deleteWhere((f) => f.marker_.isNotNull());
     });
   }
 

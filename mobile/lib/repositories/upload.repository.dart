@@ -17,7 +17,6 @@ import 'package:immich_mobile/infrastructure/repositories/network.repository.dar
 import 'package:immich_mobile/platform/native_sync_api.g.dart';
 import 'package:immich_mobile/providers/infrastructure/asset.provider.dart';
 import 'package:immich_mobile/services/api.service.dart';
-import 'package:immich_mobile/utils/debug_print.dart';
 import 'package:logging/logging.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
@@ -79,16 +78,6 @@ class UploadRepository {
        _delay = delay ?? Future<void>.delayed {
     if (registerDownloaderCallbacks) {
       FileDownloader().registerCallbacks(
-        group: kBackupGroup,
-        taskStatusCallback: (update) => onUploadStatus?.call(update),
-        taskProgressCallback: (update) => onTaskProgress?.call(update),
-      );
-      FileDownloader().registerCallbacks(
-        group: kBackupLivePhotoGroup,
-        taskStatusCallback: (update) => onUploadStatus?.call(update),
-        taskProgressCallback: (update) => onTaskProgress?.call(update),
-      );
-      FileDownloader().registerCallbacks(
         group: kManualUploadGroup,
         taskStatusCallback: (update) => onUploadStatus?.call(update),
         taskProgressCallback: (update) => onTaskProgress?.call(update),
@@ -127,28 +116,6 @@ class UploadRepository {
 
   Future<void> start() {
     return FileDownloader().start();
-  }
-
-  Future<void> getUploadInfo() async {
-    final [enqueuedTasks, runningTasks, canceledTasks, waitingTasks, pausedTasks] = await Future.wait([
-      FileDownloader().database.allRecordsWithStatus(TaskStatus.enqueued, group: kBackupGroup),
-      FileDownloader().database.allRecordsWithStatus(TaskStatus.running, group: kBackupGroup),
-      FileDownloader().database.allRecordsWithStatus(TaskStatus.canceled, group: kBackupGroup),
-      FileDownloader().database.allRecordsWithStatus(TaskStatus.waitingToRetry, group: kBackupGroup),
-      FileDownloader().database.allRecordsWithStatus(TaskStatus.paused, group: kBackupGroup),
-    ]);
-
-    dPrint(
-      () =>
-          """
-      Upload Info:
-      Enqueued: ${enqueuedTasks.length}
-      Running: ${runningTasks.length}
-      Canceled: ${canceledTasks.length}
-      Waiting: ${waitingTasks.length}
-      Paused: ${pausedTasks.length}
-    """,
-    );
   }
 
   Future<UploadResult> uploadFile({

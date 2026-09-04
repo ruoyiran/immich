@@ -8,14 +8,9 @@ import 'package:immich_mobile/domain/models/asset/asset_metadata.model.dart';
 import 'package:immich_mobile/domain/models/asset/base_asset.model.dart' hide AssetVisibility;
 import 'package:immich_mobile/domain/models/store.model.dart';
 import 'package:immich_mobile/entities/store.entity.dart';
-import 'package:immich_mobile/extensions/network_capability_extensions.dart';
 import 'package:immich_mobile/extensions/platform_extensions.dart';
 import 'package:immich_mobile/extensions/translate_extensions.dart';
-import 'package:immich_mobile/infrastructure/repositories/backup.repository.dart';
-import 'package:immich_mobile/infrastructure/repositories/settings.repository.dart';
 import 'package:immich_mobile/infrastructure/repositories/storage.repository.dart';
-import 'package:immich_mobile/platform/connectivity_api.g.dart';
-import 'package:immich_mobile/providers/infrastructure/platform.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/storage.provider.dart';
 import 'package:immich_mobile/repositories/asset_media.repository.dart';
 import 'package:immich_mobile/repositories/upload.repository.dart';
@@ -40,8 +35,6 @@ final foregroundUploadServiceProvider = Provider((ref) {
   return ForegroundUploadService(
     ref.watch(uploadRepositoryProvider),
     ref.watch(storageRepositoryProvider),
-    ref.watch(backupRepositoryProvider),
-    ref.watch(connectivityApiProvider),
     ref.watch(assetMediaRepositoryProvider),
   );
 });
@@ -49,89 +42,16 @@ final foregroundUploadServiceProvider = Provider((ref) {
 /// Service for handling foreground HTTP uploads
 ///
 /// This service handles synchronous uploads using HTTP client with
-/// concurrent worker pools. Used for manual backups, auto backups
-/// (foreground mode), and share intent uploads.
+/// concurrent worker pools. Used for manual and share intent uploads.
 class ForegroundUploadService {
-  ForegroundUploadService(
-    this._uploadRepository,
-    this._storageRepository,
-    this._backupRepository,
-    this._connectivityApi,
-    this._assetMediaRepository,
-  );
+  ForegroundUploadService(this._uploadRepository, this._storageRepository, this._assetMediaRepository);
 
   final UploadRepository _uploadRepository;
   final StorageRepository _storageRepository;
-  final DriftBackupRepository _backupRepository;
-  final ConnectivityApi _connectivityApi;
   final AssetMediaRepository _assetMediaRepository;
   final Logger _logger = Logger('ForegroundUploadService');
 
   bool shouldAbortUpload = false;
-
-  Future<({int total, int remainder, int processing})> getBackupCounts(String userId) {
-    return _backupRepository.getAllCounts(userId);
-  }
-
-  Future<List<LocalAsset>> getBackupCandidates(String userId, {bool onlyHashed = true}) {
-    return _backupRepository.getCandidates(userId, onlyHashed: onlyHashed);
-  }
-
-  /// Bulk upload of backup candidates from selected albums
-  Future<void> uploadCandidates(
-    String userId,
-    Completer<void> cancelToken, {
-    UploadCallbacks callbacks = const UploadCallbacks(),
-    bool useSequentialUpload = false,
-  }) async {
-    final candidates = await _backupRepository.getCandidates(userId, onlyHashed: false);
-    if (candidates.isEmpty) {
-      return;
-    }
-
-    final networkCapabilities = await _connectivityApi.getCapabilities();
-    final hasWifi = networkCapabilities.isUnmetered;
-    _logger.info('Network capabilities: $networkCapabilities, hasWifi/isUnmetered: $hasWifi');
-
-    if (useSequentialUpload) {
-      await _uploadSequentially(items: candidates, cancelToken: cancelToken, hasWifi: hasWifi, callbacks: callbacks);
-    } else {
-      await _executeWithWorkerPool<LocalAsset>(
-        items: candidates,
-        cancelToken: cancelToken,
-        shouldSkip: (asset) {
-          final requireWifi = _shouldRequireWiFi(asset);
-          return requireWifi && !hasWifi;
-        },
-        processItem: (asset) => uploadSingleAsset(asset, cancelToken, callbacks: callbacks),
-      );
-    }
-  }
-
-  /// Sequential upload - used for background isolate where concurrent HTTP clients may cause issues
-  Future<void> _uploadSequentially({
-    required List<LocalAsset> items,
-    required Completer<void> cancelToken,
-    required bool hasWifi,
-    required UploadCallbacks callbacks,
-  }) async {
-    await _storageRepository.clearCache();
-    shouldAbortUpload = false;
-
-    for (final asset in items) {
-      if (shouldAbortUpload || cancelToken.isCompleted) {
-        break;
-      }
-
-      final requireWifi = _shouldRequireWiFi(asset);
-      if (requireWifi && !hasWifi) {
-        _logger.warning('Skipping upload for ${asset.id} because it requires WiFi');
-        continue;
-      }
-
-      await uploadSingleAsset(asset, cancelToken, callbacks: callbacks);
-    }
-  }
 
   /// Manually upload picked local assets
   Future<void> uploadManual(
@@ -192,13 +112,11 @@ class ForegroundUploadService {
   /// [items] - List of items to process
   /// [cancelToken] - Token to cancel the operation
   /// [processItem] - Function to process each item with an HTTP client
-  /// [shouldSkip] - Optional function to skip items (e.g., WiFi requirement check)
   /// [concurrentWorkers] - Number of concurrent workers (default: 3)
   Future<void> _executeWithWorkerPool<T>({
     required List<T> items,
     required Completer<void>? cancelToken,
     required Future<void> Function(T item) processItem,
-    bool Function(T item)? shouldSkip,
     int concurrentWorkers = 3,
   }) async {
     await _storageRepository.clearCache();
@@ -219,10 +137,6 @@ class ForegroundUploadService {
         currentIndex++;
 
         final item = items[index];
-
-        if (shouldSkip?.call(item) ?? false) {
-          continue;
-        }
 
         await processItem(item);
       }
@@ -537,16 +451,5 @@ class ForegroundUploadService {
     } catch (e) {
       return UploadResult.error(errorMessage: e.toString());
     }
-  }
-
-  bool _shouldRequireWiFi(LocalAsset asset) {
-    final backup = SettingsRepository.instance.appConfig.backup;
-    if (asset.isVideo && backup.useCellularForVideos) {
-      return false;
-    }
-    if (!asset.isVideo && backup.useCellularForPhotos) {
-      return false;
-    }
-    return true;
   }
 }

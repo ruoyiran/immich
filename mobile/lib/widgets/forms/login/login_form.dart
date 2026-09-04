@@ -15,7 +15,6 @@ import 'package:immich_mobile/domain/models/store.model.dart';
 import 'package:immich_mobile/entities/store.entity.dart';
 import 'package:immich_mobile/extensions/build_context_extensions.dart';
 import 'package:immich_mobile/extensions/translate_extensions.dart';
-import 'package:immich_mobile/infrastructure/repositories/settings.repository.dart';
 import 'package:immich_mobile/providers/auth.provider.dart';
 import 'package:immich_mobile/providers/background_sync.provider.dart';
 import 'package:immich_mobile/providers/feature_message.provider.dart';
@@ -190,9 +189,6 @@ class LoginForm extends HookConsumerWidget {
       await backgroundManager.syncLocal(full: true);
       await backgroundManager.syncRemote();
       await viewIntentHandler.flushDeferredViewIntent();
-      if (SettingsRepository.instance.appConfig.backup.syncAlbums) {
-        await backgroundManager.syncLinkedAlbum();
-      }
     }
 
     void startPostLoginSyncFlow() {

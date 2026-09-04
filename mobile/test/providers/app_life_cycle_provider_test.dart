@@ -9,11 +9,9 @@ import 'package:immich_mobile/models/auth/auth_state.model.dart';
 import 'package:immich_mobile/models/server_info/server_version.model.dart';
 import 'package:immich_mobile/providers/app_life_cycle.provider.dart';
 import 'package:immich_mobile/providers/auth.provider.dart';
-import 'package:immich_mobile/providers/backup/drift_backup.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/platform.provider.dart';
 import 'package:immich_mobile/providers/server_info.provider.dart';
 import 'package:immich_mobile/providers/websocket.provider.dart';
-import 'package:immich_mobile/utils/upload_speed_calculator.dart';
 import 'package:mocktail/mocktail.dart';
 
 import '../infrastructure/repository.mock.dart';
@@ -66,10 +64,6 @@ class TestWebsocketNotifier extends WebsocketNotifier {
   void disconnect() => disconnectCount++;
 }
 
-class TestDriftBackupNotifier extends DriftBackupNotifier {
-  TestDriftBackupNotifier() : super(MockForegroundUploadService(), MockBackgroundUploadService(), UploadSpeedManager());
-}
-
 void main() {
   late LogService logService;
   late Completer<ServerVersion?> serverVersion;
@@ -116,7 +110,6 @@ void main() {
         websocketProvider.overrideWith((ref) {
           return websocket = TestWebsocketNotifier(ref);
         }),
-        driftBackupProvider.overrideWith((_) => TestDriftBackupNotifier()),
         backgroundWorkerLockServiceProvider.overrideWithValue(lockService),
       ],
     );

@@ -29,7 +29,7 @@ class DriftLibraryPage extends StatelessWidget {
     return const Scaffold(
       body: CustomScrollView(
         slivers: [
-          ImmichSliverAppBar(snap: false, floating: false, pinned: true, showUploadButton: false),
+          ImmichSliverAppBar(snap: false, floating: false, pinned: true),
           _ActionButtonGrid(),
           _CollectionCards(),
           _QuickAccessButtonList(),

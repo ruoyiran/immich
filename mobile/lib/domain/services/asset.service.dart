@@ -84,8 +84,8 @@ class AssetService {
     return _localRepository.getHashedCount();
   }
 
-  Future<List<LocalAlbum>> getSourceAlbums(String localAssetId, {BackupSelection? backupSelection}) {
-    return _localRepository.getSourceAlbums(localAssetId, backupSelection: backupSelection);
+  Future<List<LocalAlbum>> getSourceAlbums(String localAssetId) {
+    return _localRepository.getSourceAlbums(localAssetId);
   }
 
   Future<void> restoreTrash(List<String> remoteIds) async {
