@@ -15063,6 +15063,256 @@ void main() async {
       },
     );
 
+    _realStackSessionTest(
+      'MOB-MEDIA-072-$_caseSuffix',
+      'moves a photo to trash without mutating the original file',
+      (tester) async {
+        await _loadAuthenticatedApp(
+          tester,
+          overrideCancellation: true,
+          closeDriftOnDispose: false,
+          resetSyncAcksBeforeStart: true,
+        );
+        final container = _containerOfApp(tester);
+        final drift = container.read(driftProvider);
+        final apiService = container.read(apiServiceProvider);
+        final assetsApi = apiService.assetsApi;
+        final searchApi = apiService.searchApi;
+        final assetService = container.read(assetServiceProvider);
+        final user = Store.tryGet(StoreKey.currentUser);
+        expect(user, isNotNull);
+
+        String? uploadedRemoteId;
+        final createdLocalAssetIds = <String>{};
+        addTearDown(() async {
+          final assetId = uploadedRemoteId;
+          if (assetId != null) {
+            await _deleteTestAssetBestEffort(assetsApi, assetId);
+          }
+          unawaited(_deleteLocalTestAssetsBestEffort(createdLocalAssetIds));
+        });
+
+        await container
+            .read(syncApiRepositoryProvider)
+            .deleteSyncAck(_allReplayableSyncAckTypes);
+        await Store.delete(StoreKey.syncMigrationStatus);
+        await container.read(syncStreamRepositoryProvider).reset();
+        final baselineSyncSuccess = await container
+            .read(syncStreamServiceProvider)
+            .sync();
+        expect(baselineSyncSuccess, isTrue);
+
+        final runToken = DateTime.now()
+            .toUtc()
+            .microsecondsSinceEpoch
+            .toString();
+        final fileName = 'immich-e2e-trash-072-photo-$runToken.jpg';
+        final sourceBytes = _generatedJpegBytes(runToken.hashCode);
+        final expectedSourceMd5 = base64Encode(md5.convert(sourceBytes).bytes);
+        expect(
+          await _serverAssetIdsByOriginalFilename(searchApi, fileName),
+          isEmpty,
+          reason: 'The 072 trash filename must be unique before the test',
+        );
+
+        final createdLocal = await container
+            .read(fileMediaRepositoryProvider)
+            .saveLocalAsset(
+              sourceBytes,
+              title: fileName,
+              relativePath: 'Pictures/ImmichE2E072',
+            );
+        expect(
+          createdLocal,
+          isNotNull,
+          reason: 'Expected PhotoManager to inject the 072 gallery fixture',
+        );
+        createdLocalAssetIds.add(createdLocal!.id);
+
+        await container.read(backgroundSyncProvider).syncLocal(full: true);
+        final localUploadSource = await _waitForLocalAssetByNameState(
+          container,
+          fileName,
+          tester,
+          (asset) =>
+              asset.isImage &&
+              asset.isLocalOnly &&
+              asset.contentSize != null &&
+              asset.contentSize! > 0,
+          reason:
+              'Expected 072 gallery fixture to sync with uploadable metadata',
+        );
+        final localFile = await container
+            .read(storageRepositoryProvider)
+            .getFileForAsset(localUploadSource.id);
+        expect(localFile, isNotNull);
+        final localBytes = await localFile!.readAsBytes();
+        expect(localBytes.length, localUploadSource.contentSize);
+        expect(base64Encode(md5.convert(localBytes).bytes), expectedSourceMd5);
+
+        final progressById = <String, List<double>>{};
+        String? remoteAssetId;
+        String? uploadError;
+        await container
+            .read(foregroundUploadServiceProvider)
+            .uploadSingleAsset(
+              localUploadSource,
+              Completer<void>(),
+              callbacks: UploadCallbacks(
+                onProgress: (id, _, bytes, totalBytes) {
+                  final progress = totalBytes > 0 ? bytes / totalBytes : 0.0;
+                  final assetProgress = progressById.putIfAbsent(id, () => []);
+                  expect(progress, inInclusiveRange(0.0, 1.0));
+                  if (assetProgress.isNotEmpty) {
+                    expect(progress, greaterThanOrEqualTo(assetProgress.last));
+                  }
+                  assetProgress.add(progress);
+                },
+                onSuccess: (_, remoteId) => remoteAssetId = remoteId,
+                onError: (_, errorMessage) => uploadError = errorMessage,
+              ),
+            );
+
+        expect(uploadError, isNull);
+        expect(remoteAssetId, isNotNull);
+        final photoId = remoteAssetId!;
+        uploadedRemoteId = photoId;
+        expect(progressById, isNotEmpty);
+
+        await _waitForServerAssetIdsByOriginalFilename(
+          tester,
+          searchApi,
+          fileName,
+          (ids) => ids.length == 1 && ids.contains(photoId),
+          reason: 'Expected 072 photo to be discoverable before trash',
+        );
+        final initialSyncSuccess = await container
+            .read(syncStreamServiceProvider)
+            .sync();
+        expect(initialSyncSuccess, isTrue);
+
+        final localPhoto = await _waitForRemoteAssetState(
+          tester,
+          container,
+          photoId,
+          (asset) =>
+              asset.visibility == AssetVisibility.timeline &&
+              asset.hasRemote &&
+              asset.isImage &&
+              !asset.isTrashed,
+          reason: 'Expected 072 photo to sync locally before trash',
+        );
+        expect(localPhoto.ownerId, user!.id);
+        expect(await _remoteAssetRowCountById(drift, photoId), 1);
+
+        final beforeInfo = await _waitForAssetInfoState(
+          tester,
+          assetsApi,
+          photoId,
+          (asset) =>
+              asset.type == api.AssetTypeEnum.IMAGE &&
+              !asset.isTrashed &&
+              asset.originalPath.isNotEmpty,
+          reason: 'Expected 072 server photo to be active before trash',
+        );
+        final beforeDownload = await _waitForSuccessfulResponse(
+          tester,
+          () => container
+              .read(assetApiRepositoryProvider)
+              .downloadAsset(photoId, edited: false),
+        );
+        final beforeChecksum = base64Encode(
+          md5.convert(beforeDownload.bodyBytes).bytes,
+        );
+        expect(beforeChecksum, beforeInfo.checksum);
+        expect(localPhoto.checksum, beforeChecksum);
+
+        final timelineFactory = container.read(timelineFactoryProvider);
+        final mainTimeline = timelineFactory.main([user.id]);
+        final trashTimeline = timelineFactory.trash(user.id);
+        addTearDown(mainTimeline.dispose);
+        addTearDown(trashTimeline.dispose);
+
+        await _expectTimelineAssetSet(
+          tester,
+          mainTimeline,
+          includes: {photoId},
+          excludes: const {},
+          reason: 'Expected 072 active photo in the main timeline',
+        );
+        await _expectTimelineAssetSet(
+          tester,
+          trashTimeline,
+          includes: const {},
+          excludes: {photoId},
+          reason: 'Expected 072 active photo to be absent from trash',
+        );
+
+        await assetService.trash([photoId]);
+        final trashedInfo = await _waitForAssetInfoState(
+          tester,
+          assetsApi,
+          photoId,
+          (asset) =>
+              asset.isTrashed &&
+              asset.originalPath == beforeInfo.originalPath &&
+              asset.checksum == beforeChecksum,
+          reason:
+              'Expected 072 server photo to be logically trashed without file mutation',
+        );
+        expect(trashedInfo.originalFileName, beforeInfo.originalFileName);
+
+        final trashedLocalPhoto = await _waitForRemoteAssetState(
+          tester,
+          container,
+          photoId,
+          (asset) =>
+              asset.hasRemote &&
+              asset.isImage &&
+              asset.isTrashed &&
+              asset.checksum == beforeChecksum,
+          reason: 'Expected 072 trash action to mark the local photo as trashed',
+        );
+        expect(trashedLocalPhoto.ownerId, user.id);
+        expect(await _remoteAssetRowCountById(drift, photoId), 1);
+
+        await _expectTimelineAssetSet(
+          tester,
+          mainTimeline,
+          includes: const {},
+          excludes: {photoId},
+          reason: 'Expected 072 trashed photo to disappear from main timeline',
+        );
+        await _expectTimelineAssetSet(
+          tester,
+          trashTimeline,
+          includes: {photoId},
+          excludes: const {},
+          reason: 'Expected 072 trashed photo to appear in trash timeline',
+        );
+        await _waitForServerAssetIdsByOriginalFilename(
+          tester,
+          searchApi,
+          fileName,
+          (ids) => !ids.contains(photoId),
+          reason: 'Expected 072 active search to filter trashed photo',
+        );
+
+        const markerCaseId = 'MOB-MEDIA-072-$_caseSuffix';
+        debugPrint(
+          '$markerCaseId:TRASHED ${jsonEncode({
+            'assetId': photoId,
+            'fileName': fileName,
+            'checksum': beforeChecksum,
+            'originalPath': beforeInfo.originalPath,
+            'downloadBytes': beforeDownload.bodyBytes.length,
+          })}',
+        );
+        await _pumpFor(tester, const Duration(seconds: 12));
+        expect(tester.takeException(), isNull);
+      },
+    );
+
     if (_selectedCaseId.isNotEmpty && !_registeredSelectedCase) {
       test(
         _selectedCaseId,
