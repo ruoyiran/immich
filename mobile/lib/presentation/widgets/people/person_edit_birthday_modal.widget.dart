@@ -64,6 +64,7 @@ class _DriftPersonNameEditFormState extends ConsumerState<DriftPersonBirthdayEdi
         style: const TextStyle(fontWeight: FontWeight.bold),
       ),
       content: SizedBox(
+        key: const Key('person-edit-birthday-picker'),
         width: double.maxFinite,
         height: 300,
         child: ClipRRect(
@@ -106,6 +107,7 @@ class _DriftPersonNameEditFormState extends ConsumerState<DriftPersonBirthdayEdi
       ),
       actions: [
         TextButton(
+          key: const Key('person-edit-birthday-cancel'),
           onPressed: () => context.pop(null),
           child: Text(
             "cancel",
@@ -113,6 +115,7 @@ class _DriftPersonNameEditFormState extends ConsumerState<DriftPersonBirthdayEdi
           ).tr(),
         ),
         TextButton(
+          key: const Key('person-edit-birthday-save'),
           onPressed: () => saveBirthday(),
           child: Text(
             "save",

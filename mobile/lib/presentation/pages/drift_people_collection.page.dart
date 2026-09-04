@@ -45,6 +45,7 @@ class _DriftPeopleCollectionPageState extends ConsumerState<DriftPeopleCollectio
             automaticallyImplyLeading: _search == null,
             title: _search != null
                 ? SearchField(
+                    key: const Key('people-collection-search-field'),
                     focusNode: _formFocus,
                     onTapOutside: (_) => _formFocus.unfocus(),
                     onChanged: (value) => setState(() => _search = value),
@@ -55,6 +56,7 @@ class _DriftPeopleCollectionPageState extends ConsumerState<DriftPeopleCollectio
                 : Text('people'.tr()),
             actions: [
               IconButton(
+                key: const Key('people-collection-search-button'),
                 icon: Icon(_search != null ? Icons.close : Icons.search),
                 onPressed: () {
                   setState(() => _search = _search == null ? '' : null);
@@ -87,6 +89,7 @@ class _DriftPeopleCollectionPageState extends ConsumerState<DriftPeopleCollectio
                       key: ValueKey(person.id),
                       children: [
                         GestureDetector(
+                          key: Key('people-person-tile-${person.id}'),
                           onTap: () {
                             unawaited(context.pushRoute(DriftPersonRoute(person: person)));
                           },
@@ -99,11 +102,13 @@ class _DriftPeopleCollectionPageState extends ConsumerState<DriftPeopleCollectio
                               backgroundImage: RemoteImageProvider(
                                 url: getFaceThumbnailUrl(person.id, updatedAt: person.updatedAt),
                               ),
+                              onBackgroundImageError: (_, _) {},
                             ),
                           ),
                         ),
                         const SizedBox(height: 12),
                         GestureDetector(
+                          key: Key('people-person-name-${person.id}'),
                           onTap: () => showNameEditModal(context, person),
                           child: person.name.isEmpty
                               ? Text(
