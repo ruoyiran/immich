@@ -58,8 +58,11 @@ import 'package:immich_mobile/presentation/pages/drift_asset_selection_timeline.
 import 'package:immich_mobile/presentation/pages/drift_favorite.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_library.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_locked_folder.page.dart';
+import 'package:immich_mobile/presentation/pages/drift_recently_added.page.dart';
+import 'package:immich_mobile/presentation/pages/drift_recently_taken.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_remote_album.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_trash.page.dart';
+import 'package:immich_mobile/presentation/pages/drift_video.page.dart';
 import 'package:immich_mobile/presentation/pages/edit/drift_edit.page.dart';
 import 'package:immich_mobile/presentation/pages/edit/editor.provider.dart';
 import 'package:immich_mobile/presentation/pages/search/drift_search.page.dart';
@@ -6239,6 +6242,233 @@ void main() async {
       );
     });
 
+    _realStackSessionTest('MOB-UI-050-$_caseSuffix', 'opens library shortcut collections with isolated populated and empty states', (
+      tester,
+    ) async {
+      tester.view.devicePixelRatio = 1.0;
+      tester.view.physicalSize = const Size(430, 932);
+      addTearDown(tester.view.reset);
+
+      await _loadAuthenticatedApp(tester, overrideCancellation: true, closeDriftOnDispose: false);
+      final container = _containerOfApp(tester);
+      final assetsApi = container.read(apiServiceProvider).assetsApi;
+      final router = container.read(appRouterProvider);
+      final createdRemoteAssetIds = <String>[];
+      final user = Store.tryGet(StoreKey.currentUser);
+      expect(user, isNotNull);
+
+      addTearDown(() async {
+        for (final assetId in createdRemoteAssetIds) {
+          await _deleteTestAssetBestEffort(assetsApi, assetId);
+        }
+      });
+
+      await container.read(syncApiRepositoryProvider).deleteSyncAck(_allReplayableSyncAckTypes);
+      await Store.delete(StoreKey.syncMigrationStatus);
+      await container.read(syncStreamRepositoryProvider).reset();
+      final baselineSyncSuccess = await container.read(syncStreamServiceProvider).sync();
+      expect(baselineSyncSuccess, isTrue);
+      if (Store.tryGet(StoreKey.currentUser) == null) {
+        await Store.put(StoreKey.currentUser, user!);
+      }
+
+      final runToken = DateTime.now().toUtc().microsecondsSinceEpoch.toString();
+      final baseCreatedAt = DateTime.now().toUtc().add(const Duration(days: 3650));
+      final olderTimelineId = await _uploadGeneratedJpegAsSecondClient(
+        'immich-e2e-library-shortcuts-050-older-$runToken.jpg',
+        baseCreatedAt,
+      );
+      createdRemoteAssetIds.add(olderTimelineId);
+      final favoriteId = await _uploadGeneratedJpegAsSecondClient(
+        'immich-e2e-library-shortcuts-050-favorite-$runToken.jpg',
+        baseCreatedAt.add(const Duration(minutes: 1)),
+        isFavorite: true,
+      );
+      createdRemoteAssetIds.add(favoriteId);
+      final archiveId = await _uploadGeneratedJpegAsSecondClient(
+        'immich-e2e-library-shortcuts-050-archive-$runToken.jpg',
+        baseCreatedAt.add(const Duration(minutes: 2)),
+        visibility: api.AssetVisibility.archive,
+      );
+      createdRemoteAssetIds.add(archiveId);
+      final videoId = await _uploadGeneratedMp4AsSecondClient(
+        'immich-e2e-library-shortcuts-050-video-$runToken.mp4',
+        baseCreatedAt.add(const Duration(minutes: 3)),
+      );
+      createdRemoteAssetIds.add(videoId);
+      final newestTimelineId = await _uploadGeneratedJpegAsSecondClient(
+        'immich-e2e-library-shortcuts-050-newest-$runToken.jpg',
+        baseCreatedAt.add(const Duration(minutes: 4)),
+      );
+      createdRemoteAssetIds.add(newestTimelineId);
+
+      final uploadSyncSuccess = await container.read(syncStreamServiceProvider).sync();
+      expect(uploadSyncSuccess, isTrue);
+      await _waitForRemoteAssetState(
+        tester,
+        container,
+        olderTimelineId,
+        (asset) => asset.visibility == AssetVisibility.timeline && !asset.isFavorite && !asset.isTrashed,
+        reason: 'Expected the 050 older control asset to sync as a normal timeline asset',
+      );
+      await _waitForRemoteAssetState(
+        tester,
+        container,
+        favoriteId,
+        (asset) => asset.visibility == AssetVisibility.timeline && asset.isFavorite && !asset.isTrashed,
+        reason: 'Expected the 050 favorite fixture to sync as a favorite timeline asset',
+      );
+      await _waitForRemoteAssetState(
+        tester,
+        container,
+        archiveId,
+        (asset) => asset.visibility == AssetVisibility.archive && !asset.isTrashed,
+        reason: 'Expected the 050 archive fixture to sync as an archived asset',
+      );
+      await _waitForRemoteAssetState(
+        tester,
+        container,
+        videoId,
+        (asset) => asset.visibility == AssetVisibility.timeline && asset.isVideo && !asset.isTrashed,
+        reason: 'Expected the 050 video fixture to sync as a video timeline asset',
+      );
+      await _waitForRemoteAssetState(
+        tester,
+        container,
+        newestTimelineId,
+        (asset) => asset.visibility == AssetVisibility.timeline && !asset.isFavorite && !asset.isTrashed,
+        reason: 'Expected the 050 newest control asset to sync as a normal timeline asset',
+      );
+
+      final timelineFactory = container.read(timelineFactoryProvider);
+      final mainTimeline = timelineFactory.main([user!.id]);
+      final favoriteTimeline = timelineFactory.favorite(user.id);
+      final archiveTimeline = timelineFactory.archive(user.id);
+      final videoTimeline = timelineFactory.video(user.id);
+      final recentlyAddedTimeline = timelineFactory.recentlyAdded(user.id);
+      final recentlyTakenTimeline = timelineFactory.remoteAssets(user.id);
+      final emptyTimeline = timelineFactory.fromAssets(const <BaseAsset>[], TimelineOrigin.favorite);
+      addTearDown(mainTimeline.dispose);
+      addTearDown(favoriteTimeline.dispose);
+      addTearDown(archiveTimeline.dispose);
+      addTearDown(videoTimeline.dispose);
+      addTearDown(recentlyAddedTimeline.dispose);
+      addTearDown(recentlyTakenTimeline.dispose);
+      addTearDown(emptyTimeline.dispose);
+
+      await _expectTimelineAssetSet(
+        tester,
+        mainTimeline,
+        includes: {olderTimelineId, favoriteId, videoId, newestTimelineId},
+        excludes: {archiveId},
+        reason: 'Main timeline should include only unarchived 050 shortcut assets',
+      );
+      final favoriteAssets = await _expectTimelineAssetSet(
+        tester,
+        favoriteTimeline,
+        includes: {favoriteId},
+        excludes: {olderTimelineId, archiveId, videoId, newestTimelineId},
+        reason: 'Favorite shortcut should include only the favorited 050 asset',
+      );
+      final archiveAssets = await _expectTimelineAssetSet(
+        tester,
+        archiveTimeline,
+        includes: {archiveId},
+        excludes: {olderTimelineId, favoriteId, videoId, newestTimelineId},
+        reason: 'Archive shortcut should include only the archived 050 asset',
+      );
+      final videoAssets = await _expectTimelineAssetSet(
+        tester,
+        videoTimeline,
+        includes: {videoId},
+        excludes: {olderTimelineId, favoriteId, archiveId, newestTimelineId},
+        reason: 'Video shortcut should include only the 050 video asset',
+      );
+      await _expectTimelineAssetSet(
+        tester,
+        recentlyAddedTimeline,
+        includes: {olderTimelineId, favoriteId, archiveId, videoId, newestTimelineId},
+        excludes: const {},
+        reason: 'Recently added shortcut should include every non-trashed 050 fixture',
+      );
+      final recentlyTakenAssets = await _expectTimelineAssetSet(
+        tester,
+        recentlyTakenTimeline,
+        includes: {olderTimelineId, favoriteId, videoId, newestTimelineId},
+        excludes: {archiveId},
+        reason: 'Recently taken shortcut should include visible 050 assets and exclude archived assets',
+      );
+      _expectTimelineOrder(
+        recentlyTakenAssets,
+        [newestTimelineId, videoId, favoriteId, olderTimelineId],
+        reason: 'Recently taken shortcut should sort 050 assets by captured time descending',
+      );
+      await _expectTimelineAssetSet(
+        tester,
+        emptyTimeline,
+        includes: const {},
+        excludes: createdRemoteAssetIds.toSet(),
+        reason: 'Empty shortcut timeline should expose no 050 fixture assets',
+      );
+      expect(emptyTimeline.totalAssets, 0, reason: 'Empty shortcut state should have no assets');
+
+      final favoriteAsset = favoriteAssets.singleWhere((asset) => _timelineAssetId(asset) == favoriteId);
+      final archiveAsset = archiveAssets.singleWhere((asset) => _timelineAssetId(asset) == archiveId);
+      final videoAsset = videoAssets.singleWhere((asset) => _timelineAssetId(asset) == videoId);
+      final recentlyTakenAsset = recentlyTakenAssets.singleWhere((asset) => _timelineAssetId(asset) == newestTimelineId);
+
+      await _selectPrimaryNavigationTab(tester, kLibraryTabIndex);
+      await pumpUntilFound(tester, find.byType(DriftLibraryPage), timeout: const Duration(seconds: 30));
+      await _openShortcutEntryAndReturn(
+        tester,
+        sourcePage: DriftLibraryPage,
+        label: 'favorites'.tr(),
+        targetPage: DriftFavoritePage,
+        title: 'favorites'.tr(),
+        assetToOpen: favoriteAsset,
+      );
+      await _openShortcutEntryAndReturn(
+        tester,
+        sourcePage: DriftLibraryPage,
+        label: 'archived'.tr(),
+        targetPage: DriftArchivePage,
+        title: 'archive'.tr(),
+        assetToOpen: archiveAsset,
+      );
+
+      await _selectPrimaryNavigationTab(tester, kSearchTabIndex);
+      await pumpUntilFound(tester, find.byType(DriftSearchPage), timeout: const Duration(seconds: 30));
+      await _openShortcutEntryAndReturn(
+        tester,
+        sourcePage: DriftSearchPage,
+        label: 'videos'.tr(),
+        targetPage: DriftVideoPage,
+        title: 'videos'.tr(),
+        assetToOpen: videoAsset,
+      );
+      await _openShortcutEntryAndReturn(
+        tester,
+        sourcePage: DriftSearchPage,
+        label: 'recently_added'.tr(),
+        targetPage: DriftRecentlyAddedPage,
+        title: 'recently_added'.tr(),
+      );
+      await _openShortcutEntryAndReturn(
+        tester,
+        sourcePage: DriftSearchPage,
+        label: 'recently_taken'.tr(),
+        targetPage: DriftRecentlyTakenPage,
+        title: 'recently_taken'.tr(),
+        assetToOpen: recentlyTakenAsset,
+      );
+
+      expect(router.currentSegments.map((route) => route.name), isNot(contains(DriftFavoriteRoute.name)));
+      expect(router.currentSegments.map((route) => route.name), isNot(contains(DriftArchiveRoute.name)));
+      expect(router.currentSegments.map((route) => route.name), isNot(contains(DriftVideoRoute.name)));
+      expect(router.currentSegments.map((route) => route.name), isNot(contains(DriftRecentlyAddedRoute.name)));
+      expect(router.currentSegments.map((route) => route.name), isNot(contains(DriftRecentlyTakenRoute.name)));
+    });
+
     if (_selectedCaseId.isNotEmpty && !_registeredSelectedCase) {
       test(_selectedCaseId, () => fail('No real stack auth test registered for $_selectedCaseId'));
     }
@@ -6259,6 +6489,64 @@ Future<void> _exerciseTimelineUiPagination(WidgetTester tester) async {
   for (var i = 0; i < 4; i++) {
     await tester.fling(scrollable.first, const Offset(0, 1200), 1500);
     await _pumpFor(tester, const Duration(milliseconds: 700));
+  }
+}
+
+Future<void> _openShortcutEntryAndReturn(
+  WidgetTester tester, {
+  required Type sourcePage,
+  required String label,
+  required Type targetPage,
+  required String title,
+  BaseAsset? assetToOpen,
+}) async {
+  await pumpUntilFound(tester, find.byType(sourcePage), timeout: const Duration(seconds: 30));
+  final entry = find.descendant(of: find.byType(sourcePage), matching: find.text(label));
+  await pumpUntilFound(tester, entry, timeout: const Duration(seconds: 30));
+  await tester.ensureVisible(entry.first);
+  await _pumpFor(tester, const Duration(milliseconds: 250));
+  await tester.tap(entry.first, warnIfMissed: false);
+  await _pumpUntil(
+    tester,
+    () => find.byType(targetPage).evaluate().isNotEmpty,
+    timeout: const Duration(seconds: 30),
+  );
+  await pumpUntilFound(tester, find.byType(Timeline), timeout: const Duration(seconds: 60));
+  await pumpUntilFound(tester, find.text(title), timeout: const Duration(seconds: 30));
+  await _exerciseTimelineUiPagination(tester);
+
+  if (assetToOpen != null) {
+    await _openTimelineAsset(tester, assetToOpen);
+    await tester.binding.handlePopRoute();
+    await _pumpUntil(
+      tester,
+      () => find.byType(AssetViewer).evaluate().isEmpty,
+      timeout: const Duration(seconds: 30),
+    );
+    await pumpUntilFound(tester, find.byType(targetPage), timeout: const Duration(seconds: 30));
+    await pumpUntilFound(
+      tester,
+      _timelineAssetTileForAssetId(_timelineAssetId(assetToOpen)),
+      timeout: const Duration(seconds: 30),
+    );
+  }
+
+  await tester.binding.handlePopRoute();
+  await _pumpUntil(
+    tester,
+    () => find.byType(targetPage).evaluate().isEmpty && find.byType(sourcePage).evaluate().isNotEmpty,
+    timeout: const Duration(seconds: 30),
+  );
+}
+
+void _expectTimelineOrder(List<BaseAsset> assets, List<String> orderedIds, {required String reason}) {
+  var previousIndex = -1;
+  final ids = assets.map(_timelineAssetId).toList(growable: false);
+  for (final assetId in orderedIds) {
+    final index = ids.indexOf(assetId);
+    expect(index, greaterThanOrEqualTo(0), reason: '$reason; missing $assetId in ${ids.join(', ')}');
+    expect(index, greaterThan(previousIndex), reason: '$reason; order was ${ids.join(', ')}');
+    previousIndex = index;
   }
 }
 
