@@ -39,6 +39,7 @@ class GroupSettings extends HookConsumerWidget {
           icon: Icons.group_work_outlined,
         ),
         SettingsRadioListTile(
+          radioKeyPrefix: 'settings-timeline-group-by',
           groups: [
             SettingsRadioGroup(
               title: 'asset_list_layout_settings_group_by_month_day'.t(context: context),

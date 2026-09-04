@@ -12,6 +12,7 @@ class SettingsSwitchListTile extends StatelessWidget {
   final EdgeInsets? contentPadding;
   final TextStyle? titleStyle;
   final TextStyle? subtitleStyle;
+  final Key? tileKey;
 
   const SettingsSwitchListTile({
     required this.valueNotifier,
@@ -23,6 +24,7 @@ class SettingsSwitchListTile extends StatelessWidget {
     this.contentPadding = const EdgeInsets.symmetric(horizontal: 20),
     this.titleStyle,
     this.subtitleStyle,
+    this.tileKey,
     super.key,
   });
 
@@ -38,6 +40,7 @@ class SettingsSwitchListTile extends StatelessWidget {
     }
 
     return SwitchListTile.adaptive(
+      key: tileKey,
       contentPadding: contentPadding,
       selectedTileColor: enabled ? null : context.themeData.disabledColor,
       value: valueNotifier.value,

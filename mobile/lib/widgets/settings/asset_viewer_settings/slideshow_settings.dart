@@ -44,11 +44,13 @@ class SlideshowSettings extends HookConsumerWidget {
           icon: Icons.slideshow_outlined,
         ),
         SettingsSwitchListTile(
+          tileKey: const ValueKey('settings-slideshow-repeat-switch'),
           valueNotifier: useRepeat,
           title: "slideshow_repeat".t(context: context),
           subtitle: "slideshow_repeat_description".t(context: context),
         ),
         SettingsSliderListTile(
+          sliderKey: const ValueKey('settings-slideshow-duration-slider'),
           valueNotifier: useDuration,
           text: "duration".t(context: context),
           minValue: 5,
@@ -60,6 +62,7 @@ class SlideshowSettings extends HookConsumerWidget {
           child: SettingsSubTitle(title: 'look'.t(context: context)),
         ),
         SettingsRadioListTile(
+          radioKeyPrefix: 'settings-slideshow-look',
           groups: [
             SettingsRadioGroup(
               title: 'contain'.t(context: context),
@@ -88,6 +91,7 @@ class SlideshowSettings extends HookConsumerWidget {
         Padding(
           padding: const EdgeInsets.only(bottom: 32),
           child: SettingsRadioListTile(
+            radioKeyPrefix: 'settings-slideshow-direction',
             groups: [
               SettingsRadioGroup(
                 title: 'forward'.t(context: context),

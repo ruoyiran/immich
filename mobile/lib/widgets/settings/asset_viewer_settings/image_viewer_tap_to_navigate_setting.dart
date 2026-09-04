@@ -23,6 +23,7 @@ class ImageViewerTapToNavigateSetting extends HookConsumerWidget {
       children: [
         SettingsSubTitle(title: "setting_image_navigation_title".tr()),
         SettingsSwitchListTile(
+          tileKey: const ValueKey('settings-viewer-tap-to-navigate-switch'),
           valueNotifier: tapToNavigate,
           title: "setting_image_navigation_enable_title".tr(),
           subtitle: "setting_image_navigation_enable_subtitle".tr(),

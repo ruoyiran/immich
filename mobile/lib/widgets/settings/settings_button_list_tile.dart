@@ -11,6 +11,8 @@ class SettingsButtonListTile extends StatelessWidget {
   final String buttonText;
   final Widget? child;
   final void Function()? onButtonTap;
+  final Key? tileKey;
+  final Key? buttonKey;
 
   const SettingsButtonListTile({
     required this.icon,
@@ -21,12 +23,15 @@ class SettingsButtonListTile extends StatelessWidget {
     required this.buttonText,
     this.child,
     this.onButtonTap,
+    this.tileKey,
+    this.buttonKey,
     super.key,
   });
 
   @override
   Widget build(BuildContext context) {
     return ListTile(
+      key: tileKey,
       contentPadding: const EdgeInsets.symmetric(horizontal: 20),
       horizontalTitleGap: 20,
       isThreeLine: true,
@@ -43,7 +48,7 @@ class SettingsButtonListTile extends StatelessWidget {
             ),
           if (subtitle != null) subtitle!,
           const SizedBox(height: 6),
-          child ?? ElevatedButton(onPressed: onButtonTap, child: Text(buttonText)),
+          child ?? ElevatedButton(key: buttonKey, onPressed: onButtonTap, child: Text(buttonText)),
         ],
       ),
     );

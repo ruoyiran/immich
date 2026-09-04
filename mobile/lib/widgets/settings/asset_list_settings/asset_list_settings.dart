@@ -20,6 +20,7 @@ class AssetListSettings extends HookConsumerWidget {
 
     final assetListSetting = [
       SettingsSwitchListTile(
+        tileKey: const ValueKey('settings-timeline-storage-indicator-switch'),
         valueNotifier: storageIndicator,
         title: 'theme_setting_asset_list_storage_indicator_title'.tr(),
         onChanged: (value) {

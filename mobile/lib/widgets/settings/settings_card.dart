@@ -9,12 +9,14 @@ class SettingsCard extends StatelessWidget {
     required this.title,
     required this.subtitle,
     required this.settingRoute,
+    this.tileKey,
   });
 
   final IconData icon;
   final String title;
   final String subtitle;
   final PageRouteInfo settingRoute;
+  final Key? tileKey;
 
   @override
   Widget build(BuildContext context) {
@@ -27,6 +29,7 @@ class SettingsCard extends StatelessWidget {
         shape: const RoundedRectangleBorder(borderRadius: BorderRadius.all(Radius.circular(16))),
         margin: const EdgeInsets.symmetric(vertical: 4.0),
         child: ListTile(
+          key: tileKey,
           contentPadding: const EdgeInsets.symmetric(horizontal: 16.0),
           leading: Container(
             decoration: BoxDecoration(

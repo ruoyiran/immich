@@ -28,6 +28,7 @@ class LayoutSettings extends HookConsumerWidget {
           icon: Icons.view_module_outlined,
         ),
         SettingsSliderListTile(
+          sliderKey: const ValueKey('settings-timeline-tiles-per-row-slider'),
           valueNotifier: tilesPerRow,
           text: 'theme_setting_asset_list_tiles_per_row_title'.tr(namedArgs: {'count': "${tilesPerRow.value}"}),
           label: "${tilesPerRow.value}",

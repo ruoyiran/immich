@@ -36,16 +36,19 @@ class VideoViewerSettings extends HookConsumerWidget {
           icon: Icons.video_camera_back_outlined,
         ),
         SettingsSwitchListTile(
+          tileKey: const ValueKey('settings-viewer-video-autoplay-switch'),
           valueNotifier: useAutoPlayVideo,
           title: "setting_video_viewer_auto_play_title".t(context: context),
           subtitle: "setting_video_viewer_auto_play_subtitle".t(context: context),
         ),
         SettingsSwitchListTile(
+          tileKey: const ValueKey('settings-viewer-video-loop-switch'),
           valueNotifier: useLoopVideo,
           title: "setting_video_viewer_looping_title".t(context: context),
           subtitle: "loop_videos_description".t(context: context),
         ),
         SettingsSwitchListTile(
+          tileKey: const ValueKey('settings-viewer-video-load-original-switch'),
           valueNotifier: useOriginalVideo,
           title: "setting_video_viewer_original_video_title".t(context: context),
           subtitle: "setting_video_viewer_original_video_subtitle".t(context: context),

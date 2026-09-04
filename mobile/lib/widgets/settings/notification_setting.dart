@@ -42,6 +42,8 @@ class NotificationSetting extends HookConsumerWidget {
     final notificationSettings = [
       if (!hasPermission)
         SettingsButtonListTile(
+          tileKey: const ValueKey('settings-notifications-enable-tile'),
+          buttonKey: const ValueKey('settings-notifications-enable-button'),
           icon: Icons.notifications_outlined,
           title: 'notification_permission_list_tile_title'.tr(),
           subtileText: 'notification_permission_list_tile_content'.tr(),
@@ -55,6 +57,8 @@ class NotificationSetting extends HookConsumerWidget {
         )
       else
         SettingsButtonListTile(
+          tileKey: const ValueKey('settings-notifications-open-tile'),
+          buttonKey: const ValueKey('settings-notifications-open-button'),
           icon: Icons.notifications_active_outlined,
           title: 'notification_enabled_list_tile_title'.tr(),
           subtileText: 'notification_enabled_list_tile_content'.tr(),
