@@ -42,6 +42,7 @@ class FilterBottomSheetScaffold extends StatelessWidget {
               mainAxisAlignment: MainAxisAlignment.end,
               children: [
                 OutlinedButton(
+                  key: const Key('search_filter_clear'),
                   onPressed: () {
                     onClear();
                     context.pop();

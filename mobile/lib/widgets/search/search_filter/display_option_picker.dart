@@ -23,14 +23,19 @@ class DisplayOptionPicker extends HookWidget {
       shrinkWrap: true,
       children: [
         CheckboxListTile(
+          key: const Key('search-display-not-in-album'),
           title: const Text('search_filter_display_option_not_in_album').tr(),
           value: options.value[DisplayOption.notInAlbum],
           onChanged: (bool? value) {
-            options.value = {...options.value, DisplayOption.notInAlbum: value!};
+            options.value = {
+              ...options.value,
+              DisplayOption.notInAlbum: value!,
+            };
             onSelect(options.value);
           },
         ),
         CheckboxListTile(
+          key: const Key('search-display-favorite'),
           title: const Text('favorite').tr(),
           value: options.value[DisplayOption.favorite],
           onChanged: (value) {
@@ -39,6 +44,7 @@ class DisplayOptionPicker extends HookWidget {
           },
         ),
         CheckboxListTile(
+          key: const Key('search-display-archive'),
           title: const Text('archive').tr(),
           value: options.value[DisplayOption.archive],
           onChanged: (value) {
