@@ -34,6 +34,7 @@ class DriftMapPage extends StatelessWidget {
             left: 20,
             top: 70,
             child: IconButton.filled(
+              key: const Key('drift-map-back-button'),
               color: Colors.white,
               onPressed: () => ContextHelper(context).pop(),
               icon: const Icon(Icons.arrow_back_ios_new_rounded),
@@ -49,6 +50,7 @@ class DriftMapPage extends StatelessWidget {
             right: 20,
             top: 70,
             child: IconButton.filled(
+              key: const Key('drift-map-settings-button'),
               color: Colors.white,
               onPressed: () => onSettingsPressed(context),
               icon: const Icon(Icons.more_vert_rounded),

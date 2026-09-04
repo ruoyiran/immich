@@ -139,6 +139,7 @@ class _BottomBar extends StatelessWidget {
                 const Icon(Icons.public, size: 18),
                 const SizedBox(width: 15),
                 ValueListenableBuilder(
+                  key: const Key('map-location-picker-selected-coordinates'),
                   valueListenable: selectedLatLng,
                   builder: (_, value, __) =>
                       Text("${value.latitude.toStringAsFixed(4)}, ${value.longitude.toStringAsFixed(4)}"),
@@ -149,10 +150,15 @@ class _BottomBar extends StatelessWidget {
               mainAxisAlignment: MainAxisAlignment.spaceEvenly,
               children: [
                 ElevatedButton(
+                  key: const Key('map-location-picker-use-location'),
                   onPressed: onUseLocation,
                   child: const Text("map_location_picker_page_use_location").tr(),
                 ),
-                ElevatedButton(onPressed: onGetCurrentLocation, child: const Icon(Icons.my_location)),
+                ElevatedButton(
+                  key: const Key('map-location-picker-current-location'),
+                  onPressed: onGetCurrentLocation,
+                  child: const Icon(Icons.my_location),
+                ),
               ],
             ),
           ],

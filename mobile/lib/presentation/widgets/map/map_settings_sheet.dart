@@ -50,17 +50,20 @@ class _DriftMapSettingsSheetState extends ConsumerState<DriftMapSettingsSheet> {
               ),
               const Divider(height: 30, thickness: 1),
               MapSettingsListTile(
+                key: const Key('map-settings-favorite-only'),
                 title: "map_settings_only_show_favorites".t(context: context),
                 selected: mapState.onlyFavorites,
                 onChanged: (favoriteOnly) => ref.read(mapStateProvider.notifier).switchFavoriteOnly(favoriteOnly),
               ),
               MapSettingsListTile(
+                key: const Key('map-settings-include-archived'),
                 title: "map_settings_include_show_archived".t(context: context),
                 selected: mapState.includeArchived,
                 onChanged: (includeArchive) =>
                     ref.read(mapStateProvider.notifier).switchIncludeArchived(includeArchive),
               ),
               MapSettingsListTile(
+                key: const Key('map-settings-with-partners'),
                 title: "map_settings_include_show_partners".t(context: context),
                 selected: mapState.withPartners,
                 onChanged: (withPartners) => ref.read(mapStateProvider.notifier).switchWithPartners(withPartners),

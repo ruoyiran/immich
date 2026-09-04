@@ -27,6 +27,7 @@ import 'package:immich_mobile/domain/models/person.model.dart';
 import 'package:immich_mobile/domain/models/settings_key.dart';
 import 'package:immich_mobile/domain/models/store.model.dart';
 import 'package:immich_mobile/domain/models/sync_event.model.dart';
+import 'package:immich_mobile/domain/models/time_range.model.dart';
 import 'package:immich_mobile/domain/models/timeline.model.dart';
 import 'package:immich_mobile/domain/models/user.model.dart';
 import 'package:immich_mobile/domain/services/asset.service.dart';
@@ -41,6 +42,7 @@ import 'package:immich_mobile/infrastructure/repositories/local_album.repository
 import 'package:immich_mobile/infrastructure/repositories/settings.repository.dart';
 import 'package:immich_mobile/infrastructure/repositories/storage.repository.dart';
 import 'package:immich_mobile/infrastructure/repositories/sync_api.repository.dart';
+import 'package:immich_mobile/infrastructure/repositories/timeline.repository.dart';
 import 'package:immich_mobile/main.dart' as app;
 import 'package:immich_mobile/models/auth/biometric_status.model.dart';
 import 'package:immich_mobile/models/folder/recursive_folder.model.dart';
@@ -60,6 +62,7 @@ import 'package:immich_mobile/pages/library/partner/partner.page.dart';
 import 'package:immich_mobile/pages/library/shared_link/shared_link.page.dart';
 import 'package:immich_mobile/pages/library/shared_link/shared_link_edit.page.dart';
 import 'package:immich_mobile/pages/login/login.page.dart';
+import 'package:immich_mobile/pages/search/map/map_location_picker.page.dart';
 import 'package:immich_mobile/pages/share_intent/share_intent.page.dart';
 import 'package:immich_mobile/presentation/pages/dev/main_timeline.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_activities.page.dart';
@@ -71,8 +74,11 @@ import 'package:immich_mobile/presentation/pages/drift_favorite.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_library.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_local_album.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_locked_folder.page.dart';
+import 'package:immich_mobile/presentation/pages/drift_map.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_memory.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_partner_detail.page.dart';
+import 'package:immich_mobile/presentation/pages/drift_place.page.dart';
+import 'package:immich_mobile/presentation/pages/drift_place_detail.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_recently_added.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_recently_taken.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_remote_album.page.dart';
@@ -100,6 +106,7 @@ import 'package:immich_mobile/presentation/widgets/bottom_sheet/locked_folder_bo
 import 'package:immich_mobile/presentation/widgets/bottom_sheet/remote_album_bottom_sheet.widget.dart';
 import 'package:immich_mobile/presentation/widgets/bottom_sheet/trash_bottom_sheet.widget.dart';
 import 'package:immich_mobile/presentation/widgets/images/thumbnail_tile.widget.dart';
+import 'package:immich_mobile/presentation/widgets/map/map.state.dart';
 import 'package:immich_mobile/presentation/widgets/timeline/header.widget.dart';
 import 'package:immich_mobile/presentation/widgets/timeline/timeline.widget.dart';
 import 'package:immich_mobile/providers/api.provider.dart';
@@ -117,6 +124,7 @@ import 'package:immich_mobile/providers/infrastructure/asset.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/asset_viewer/asset.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/cancel.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/db.provider.dart';
+import 'package:immich_mobile/providers/infrastructure/map.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/memory.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/ocr.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/people.provider.dart';
@@ -158,7 +166,7 @@ import 'package:immich_mobile/widgets/settings/asset_viewer_settings/slideshow_s
 import 'package:immich_mobile/widgets/settings/setting_list_tile.dart';
 import 'package:local_auth/local_auth.dart'
     show BiometricType, LocalAuthentication;
-import 'package:maplibre_gl/maplibre_gl.dart' show LatLng;
+import 'package:maplibre_gl/maplibre_gl.dart' show LatLng, LatLngBounds;
 import 'package:openapi/api.dart' as api;
 import 'package:path_provider/path_provider.dart';
 import 'package:photo_manager/photo_manager.dart' hide AssetType, LatLng;
@@ -12488,6 +12496,348 @@ void main() async {
       },
     );
 
+    _realStackSessionTest(
+      'MOB-UI-060-$_caseSuffix',
+      'browses and filters map locations',
+      (tester) async {
+        tester.view.devicePixelRatio = 1.0;
+        tester.view.physicalSize = const Size(430, 932);
+        addTearDown(tester.view.reset);
+
+        await _loadAuthenticatedApp(
+          tester,
+          overrideCancellation: true,
+          closeDriftOnDispose: false,
+          resetSyncAcksBeforeStart: true,
+        );
+        final container = _containerOfApp(tester);
+        final apiService = container.read(apiServiceProvider);
+        final assetsApi = apiService.assetsApi;
+        final searchApi = apiService.searchApi;
+        final assetService = container.read(assetServiceProvider);
+        final createdRemoteAssetIds = <String>[];
+
+        addTearDown(() async {
+          for (final assetId in createdRemoteAssetIds) {
+            await _deleteTestAssetBestEffort(assetsApi, assetId);
+          }
+        });
+
+        await _resetAndSyncRemoteState(tester, container);
+
+        final currentUser = container.read(currentUserProvider);
+        expect(currentUser, isNotNull);
+        final userId = currentUser!.id;
+
+        final runToken = DateTime.now()
+            .toUtc()
+            .microsecondsSinceEpoch
+            .toString();
+        final sharedNeedle = 'map-060-$runToken';
+        final city = 'E2E Map City 060 $runToken';
+        const state = 'E2E Map State 060';
+        const country = 'E2E Map Country 060';
+        final baseCreatedAt = DateTime.now().toUtc();
+        final oldCreatedAt = baseCreatedAt.subtract(const Duration(days: 90));
+        const targetLocation = LatLng(37.7749, -122.4194);
+        const farLocation = LatLng(35.6895, 139.6917);
+        final bayBounds = LatLngBounds(
+          southwest: const LatLng(37.0, -123.0),
+          northeast: const LatLng(38.2, -121.5),
+        );
+        final tokyoBounds = LatLngBounds(
+          southwest: const LatLng(35.0, 139.0),
+          northeast: const LatLng(36.2, 140.3),
+        );
+
+        Future<String> uploadMapAsset(
+          String label,
+          DateTime createdAt, {
+          LatLng? location,
+          bool isFavorite = false,
+          api.AssetVisibility? visibility,
+          String? assetCity,
+        }) async {
+          final metadata = <String, Object>{
+            'width': 96,
+            'height': 64,
+            'country': country,
+            'state': state,
+            'city': assetCity ?? city,
+            'device_make': 'ImmichE2E060',
+            'device_model': 'MapFlow',
+            if (location != null) ...{
+              'latitude': location.latitude,
+              'longitude': location.longitude,
+            },
+          };
+          final assetId = await _uploadGeneratedJpegAsSecondClient(
+            'immich-e2e-$sharedNeedle-$label.jpg',
+            createdAt,
+            isFavorite: isFavorite,
+            visibility: visibility,
+            sourceMetadata: metadata,
+          );
+          createdRemoteAssetIds.add(assetId);
+          return assetId;
+        }
+
+        final targetId = await uploadMapAsset(
+          'target',
+          baseCreatedAt,
+          location: targetLocation,
+          isFavorite: true,
+        );
+        final sameCoordinateId = await uploadMapAsset(
+          'same-coordinate',
+          baseCreatedAt.add(const Duration(minutes: 1)),
+          location: targetLocation,
+        );
+        final farId = await uploadMapAsset(
+          'far',
+          baseCreatedAt.add(const Duration(minutes: 2)),
+          location: farLocation,
+          assetCity: 'E2E Far Map City 060 $runToken',
+        );
+        final archivedId = await uploadMapAsset(
+          'archived',
+          baseCreatedAt.add(const Duration(minutes: 3)),
+          location: targetLocation,
+          visibility: api.AssetVisibility.archive,
+        );
+        final oldId = await uploadMapAsset(
+          'old',
+          oldCreatedAt,
+          location: const LatLng(37.7800, -122.4100),
+        );
+        final noCoordinateId = await uploadMapAsset(
+          'no-coordinate',
+          baseCreatedAt.add(const Duration(minutes: 4)),
+          assetCity: 'E2E No Coordinate Map City 060 $runToken',
+        );
+
+        final syncSuccess = await container
+            .read(syncStreamServiceProvider)
+            .sync();
+        expect(syncSuccess, isTrue);
+
+        final syncedAssets = <String, BaseAsset>{};
+        for (final assetId in createdRemoteAssetIds) {
+          syncedAssets[assetId] = await _waitForRemoteAssetState(
+            tester,
+            container,
+            assetId,
+            (asset) => !asset.isTrashed,
+            reason: 'Expected 060 fixture asset $assetId to sync locally',
+          );
+        }
+
+        final targetExif = await _waitForRemoteExifState(
+          tester,
+          assetService,
+          syncedAssets[targetId]!,
+          (exif) =>
+              exif.hasCoordinates &&
+              (exif.latitude! - targetLocation.latitude).abs() < 0.0001 &&
+              (exif.longitude! - targetLocation.longitude).abs() < 0.0001,
+          reason: 'Expected 060 target asset to keep GPS metadata locally',
+        );
+        expect(targetExif.city, city);
+
+        final citySearch = await _waitForServerSearchResponse(
+          tester,
+          searchApi,
+          _metadataSearchDto(
+            filename: sharedNeedle,
+            city: city,
+            type: api.AssetTypeEnum.IMAGE,
+            visibility: api.AssetVisibility.timeline,
+          ),
+          (response) {
+            final ids = _serverSearchAssetIds(response);
+            return ids.containsAll({targetId, sameCoordinateId, oldId}) &&
+                !ids.contains(farId) &&
+                !ids.contains(archivedId);
+          },
+          reason: 'Expected 060 city search to match only timeline city assets',
+        );
+        expect(
+          _serverSearchAssetIds(citySearch),
+          containsAll({targetId, sameCoordinateId, oldId}),
+        );
+
+        final places = await _waitForLocalPlacesState(
+          tester,
+          assetService,
+          userId,
+          (places) => places.any((place) => place.$1 == city),
+          reason: 'Expected 060 city to appear in local places',
+        );
+        expect(places.map((place) => place.$1), contains(city));
+
+        final defaultMarkerIds = await _waitForMapMarkerAssetIds(
+          tester,
+          container,
+          (ids) =>
+              ids.containsAll({targetId, sameCoordinateId, oldId}) &&
+              !ids.contains(farId) &&
+              !ids.contains(archivedId) &&
+              !ids.contains(noCoordinateId),
+          bounds: bayBounds,
+          options: TimelineMapOptions(bounds: bayBounds),
+          reason: 'Expected 060 bay bounds to include only timeline GPS assets',
+        );
+        expect(defaultMarkerIds, containsAll({targetId, sameCoordinateId}));
+
+        await _waitForMapMarkerAssetIds(
+          tester,
+          container,
+          (ids) =>
+              ids.contains(targetId) &&
+              !ids.contains(sameCoordinateId) &&
+              !ids.contains(oldId),
+          bounds: bayBounds,
+          options: TimelineMapOptions(bounds: bayBounds, onlyFavorites: true),
+          reason: 'Expected 060 favorite-only map filter to keep target only',
+        );
+
+        await _waitForMapMarkerAssetIds(
+          tester,
+          container,
+          (ids) => ids.contains(archivedId),
+          bounds: bayBounds,
+          options: TimelineMapOptions(bounds: bayBounds, includeArchived: true),
+          reason: 'Expected 060 archived map filter to include archive asset',
+        );
+
+        await _waitForMapMarkerAssetIds(
+          tester,
+          container,
+          (ids) => ids.contains(targetId) && !ids.contains(oldId),
+          bounds: bayBounds,
+          options: TimelineMapOptions(bounds: bayBounds, relativeDays: 30),
+          reason: 'Expected 060 relative date map filter to exclude old asset',
+        );
+
+        await _waitForMapMarkerAssetIds(
+          tester,
+          container,
+          (ids) => ids.contains(oldId) && !ids.contains(targetId),
+          bounds: bayBounds,
+          options: TimelineMapOptions(
+            bounds: bayBounds,
+            timeRange: TimeRange(
+              from: oldCreatedAt.subtract(const Duration(minutes: 1)),
+              to: oldCreatedAt.add(const Duration(minutes: 1)),
+            ),
+          ),
+          reason: 'Expected 060 custom date map filter to isolate old asset',
+        );
+
+        await _waitForMapMarkerAssetIds(
+          tester,
+          container,
+          (ids) => ids.contains(farId) && !ids.contains(targetId),
+          bounds: tokyoBounds,
+          options: TimelineMapOptions(bounds: tokyoBounds),
+          reason: 'Expected 060 panned map bounds to isolate far asset',
+        );
+
+        final router = container.read(appRouterProvider);
+        unawaited(
+          router.push(DriftPlaceRoute(currentLocation: targetLocation)),
+        );
+        await pumpUntilFound(
+          tester,
+          find.byType(DriftPlacePage),
+          timeout: const Duration(seconds: 30),
+        );
+        await pumpUntilFound(
+          tester,
+          find.text(city),
+          timeout: const Duration(seconds: 30),
+        );
+        await _tapHitTestableFinder(
+          tester,
+          find.text(city),
+          reason: 'Expected 060 place tile to be tappable',
+        );
+        await pumpUntilFound(
+          tester,
+          find.byType(DriftPlaceDetailPage),
+          timeout: const Duration(seconds: 30),
+        );
+        await pumpUntilFound(
+          tester,
+          find.text(city),
+          timeout: const Duration(seconds: 30),
+        );
+        await router.maybePop();
+        await router.maybePop();
+
+        unawaited(router.push(DriftMapRoute(initialLocation: targetLocation)));
+        await pumpUntilFound(
+          tester,
+          find.byType(DriftMapPage),
+          timeout: const Duration(seconds: 30),
+        );
+        await pumpUntilFound(
+          tester,
+          find.byKey(const Key('drift-map-settings-button')),
+          timeout: const Duration(seconds: 30),
+        );
+        await _tapHitTestableFinder(
+          tester,
+          find.byKey(const Key('drift-map-settings-button')),
+          reason: 'Expected 060 map settings button to be tappable',
+        );
+        await pumpUntilFound(
+          tester,
+          find.byKey(const Key('map-settings-favorite-only')),
+          timeout: const Duration(seconds: 30),
+        );
+        final favoriteOnlyTile =
+            find.byKey(const Key('map-settings-favorite-only'));
+        await tester.ensureVisible(favoriteOnlyTile.first);
+        await _tapHitTestableFinder(
+          tester,
+          favoriteOnlyTile,
+          reason: 'Expected 060 favorite-only setting tile to be tappable',
+        );
+        await _pumpFor(tester, const Duration(milliseconds: 300));
+        expect(container.read(mapStateProvider).onlyFavorites, isTrue);
+        await router.maybePop();
+        await pumpUntilFound(
+          tester,
+          find.byKey(const Key('drift-map-my-location-button')),
+          timeout: const Duration(seconds: 30),
+        );
+        await router.maybePop();
+
+        final selectedLocation = router.push<LatLng>(
+          MapLocationPickerRoute(initialLatLng: targetLocation),
+        );
+        await pumpUntilFound(
+          tester,
+          find.byType(MapLocationPickerPage),
+          timeout: const Duration(seconds: 30),
+        );
+        await pumpUntilFound(
+          tester,
+          find.text('37.7749, -122.4194'),
+          timeout: const Duration(seconds: 30),
+        );
+        await _tapHitTestableFinder(
+          tester,
+          find.byKey(const Key('map-location-picker-use-location')),
+          reason: 'Expected 060 location picker use button to be tappable',
+        );
+        final picked = await selectedLocation;
+        expect(picked?.latitude, targetLocation.latitude);
+        expect(picked?.longitude, targetLocation.longitude);
+      },
+    );
+
     if (_selectedCaseId.isNotEmpty && !_registeredSelectedCase) {
       test(
         _selectedCaseId,
@@ -17191,6 +17541,35 @@ Future<List<(String, String)>> _waitForLocalPlacesState(
   }
 
   fail('$reason; latest local places=$latest');
+}
+
+Future<Set<String>> _waitForMapMarkerAssetIds(
+  WidgetTester tester,
+  ProviderContainer container,
+  bool Function(Set<String> ids) matches, {
+  required LatLngBounds bounds,
+  required TimelineMapOptions options,
+  required String reason,
+}) async {
+  final currentUser = container.read(currentUserProvider);
+  expect(currentUser, isNotNull);
+  final userId = currentUser!.id;
+
+  var latest = const <String>{};
+  final end = DateTime.now().add(const Duration(seconds: 60));
+  while (DateTime.now().isBefore(end)) {
+    final markers = await container
+        .read(mapFactoryProvider)
+        .remote([userId], options)
+        .getMarkers(bounds);
+    latest = markers.map((marker) => marker.assetId).toSet();
+    if (matches(latest)) {
+      return latest;
+    }
+    await _pumpFor(tester, const Duration(milliseconds: 500));
+  }
+
+  fail('$reason; latest map marker ids=${latest.toList()..sort()}');
 }
 
 Future<int> _remoteAssetFaceRowCount(
