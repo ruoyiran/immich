@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:background_downloader/background_downloader.dart';
@@ -260,6 +261,7 @@ const _resumableCancelAfterBytes = int.fromEnvironment(
   'IMMICH_E2E_RESUMABLE_CANCEL_AFTER_BYTES',
   defaultValue: 512 * 1024,
 );
+const _media070ResumableFixtureBytes = 9 * 1024 * 1024;
 const _lifecycleAssetName = String.fromEnvironment(
   'IMMICH_E2E_LIFECYCLE_ASSET_NAME',
   defaultValue: 'immich-e2e-lifecycle-013.mp4',
@@ -14223,6 +14225,453 @@ void main() async {
       },
     );
 
+    _realStackSessionTest(
+      'MOB-MEDIA-070-$_caseSuffix',
+      'resumes interrupted photo video and live uploads without partial duplicates',
+      (tester) async {
+        tester.view.devicePixelRatio = 1.0;
+        tester.view.physicalSize = const Size(430, 932);
+        addTearDown(tester.view.reset);
+
+        await _loadAuthenticatedApp(
+          tester,
+          overrideCancellation: true,
+          closeDriftOnDispose: false,
+          resetSyncAcksBeforeStart: true,
+        );
+        final container = _containerOfApp(tester);
+        final apiService = container.read(apiServiceProvider);
+        final assetsApi = apiService.assetsApi;
+        final searchApi = apiService.searchApi;
+        final createdRemoteAssetIds = <String>{};
+        final createdLocalAssetIds = <String>{};
+
+        addTearDown(() async {
+          for (final assetId in createdRemoteAssetIds) {
+            await _deleteTestAssetBestEffort(assetsApi, assetId);
+          }
+          unawaited(_deleteLocalTestAssetsBestEffort(createdLocalAssetIds));
+        });
+
+        await _resetAndSyncRemoteState(tester, container);
+
+        final runToken = DateTime.now().toUtc().microsecondsSinceEpoch.toString();
+        final photoName = 'immich-e2e-media-070-photo-$runToken.jpg';
+        final videoName = 'immich-e2e-media-070-video-$runToken.mp4';
+        final liveName = 'immich-e2e-media-070-live-$runToken.jpg';
+        final seed = runToken.hashCode;
+        final photoBytes = _padFixtureBytes(
+          _generatedJpegBytes(seed),
+          _media070ResumableFixtureBytes,
+          seed,
+        );
+        final videoBytes = _padFixtureBytes(
+          _generatedMp4Bytes('MOB-MEDIA-070-$_caseSuffix-video-$runToken'),
+          _media070ResumableFixtureBytes,
+          seed + 70,
+        );
+        final liveStillBytes = _generatedJpegBytes(seed + 700);
+        final liveMotionBytes = _padFixtureBytes(
+          _generatedMp4Bytes('MOB-MEDIA-070-$_caseSuffix-live-$runToken'),
+          _media070ResumableFixtureBytes,
+          seed + 7000,
+        );
+
+        expect(
+          await _serverAssetIdsByOriginalFilename(searchApi, photoName),
+          isEmpty,
+          reason: 'The 070 photo filename must be unique before upload',
+        );
+        expect(
+          await _serverAssetIdsByOriginalFilename(
+            searchApi,
+            videoName,
+            type: api.AssetTypeEnum.VIDEO,
+          ),
+          isEmpty,
+          reason: 'The 070 video filename must be unique before upload',
+        );
+        expect(
+          await _serverAssetIdsByOriginalFilename(searchApi, liveName),
+          isEmpty,
+          reason: 'The 070 Live Photo filename must be unique before upload',
+        );
+
+        final photoEntity = await container
+            .read(fileMediaRepositoryProvider)
+            .saveLocalAsset(
+              photoBytes,
+              title: photoName,
+              relativePath: 'Pictures/ImmichE2E070',
+            );
+        expect(
+          photoEntity,
+          isNotNull,
+          reason: 'Expected PhotoManager to save the 070 photo fixture',
+        );
+        createdLocalAssetIds.add(photoEntity!.id);
+
+        final videoEntity = await _saveLocalTestVideo(
+          container,
+          createdLocalAssetIds,
+          title: videoName,
+          relativePath: 'Movies/ImmichE2E070',
+          bytes: videoBytes,
+        );
+        final liveEntity = await _saveLocalTestLivePhoto(
+          container,
+          createdLocalAssetIds,
+          title: liveName,
+          relativePath: 'Pictures/ImmichE2E070',
+          imageBytes: liveStillBytes,
+          videoBytes: liveMotionBytes,
+        );
+
+        await container.read(backgroundSyncProvider).syncLocal(full: true);
+        final photoAsset = await _waitForLocalAssetByNameState(
+          container,
+          photoName,
+          tester,
+          (asset) =>
+              asset.isImage &&
+              !asset.isMotionPhoto &&
+              asset.contentSize != null &&
+              asset.contentSize! > _resumableCancelAfterBytes,
+          reason: 'Expected the 070 large photo fixture to sync locally',
+        );
+        final videoAsset = await _waitForLocalAssetByNameState(
+          container,
+          videoName,
+          tester,
+          (asset) =>
+              asset.isVideo &&
+              asset.contentSize != null &&
+              asset.contentSize! > _resumableCancelAfterBytes,
+          reason: 'Expected the 070 large video fixture to sync locally',
+        );
+        final liveAsset = await _waitForLocalAssetByNameState(
+          container,
+          liveName,
+          tester,
+          (asset) => asset.isImage && asset.isMotionPhoto,
+          reason: 'Expected the 070 Live Photo fixture to sync locally',
+        );
+
+        expect(videoEntity.id, videoAsset.id);
+        expect(liveEntity.id, liveAsset.id);
+
+        Future<({String remoteId, Map<String, dynamic> state})>
+        interruptResumeAndVerify(
+          LocalAsset asset, {
+          required String label,
+          required String serverFilename,
+          required api.AssetTypeEnum serverType,
+        }) async {
+          await _clearResumableStateFiles();
+          final uploadService = container.read(foregroundUploadServiceProvider);
+          uploadService.shouldAbortUpload = false;
+          final cancel = Completer<void>();
+          final firstProgressByName = <String, List<int>>{};
+          String? interruptedRemoteId;
+          String? interruptedError;
+
+          void recordProgress(
+            Map<String, List<int>> target,
+            String fileName,
+            int bytes,
+            int totalBytes,
+          ) {
+            expect(bytes, inInclusiveRange(0, totalBytes));
+            final progress = target.putIfAbsent(fileName, () => []);
+            if (progress.isNotEmpty) {
+              expect(
+                bytes,
+                greaterThanOrEqualTo(progress.last),
+                reason: '$label progress for $fileName should be monotonic',
+              );
+            }
+            progress.add(bytes);
+          }
+
+          await uploadService.uploadSingleAsset(
+            asset,
+            cancel,
+            callbacks: UploadCallbacks(
+              onProgress: (_, fileName, bytes, totalBytes) {
+                recordProgress(firstProgressByName, fileName, bytes, totalBytes);
+                if (!cancel.isCompleted &&
+                    bytes >= _resumableCancelAfterBytes &&
+                    bytes < totalBytes - 1) {
+                  cancel.complete();
+                }
+              },
+              onSuccess: (_, remoteId) => interruptedRemoteId = remoteId,
+              onError: (_, errorMessage) => interruptedError = errorMessage,
+            ),
+          );
+
+          expect(
+            interruptedRemoteId,
+            isNull,
+            reason: 'Expected $label first upload to stop before completion',
+          );
+          expect(
+            interruptedError,
+            isNull,
+            reason: 'Expected $label cancellation to be non-error',
+          );
+          expect(
+            firstProgressByName.values.expand((values) => values).any(
+                  (bytes) => bytes >= _resumableCancelAfterBytes,
+                ),
+            isTrue,
+            reason: 'Expected $label upload to reach the resumable cancel point',
+          );
+
+          final stateAfterCancel = await _readSingleResumableState();
+          final cancelledOffset = stateAfterCancel['offset'] as int;
+          final cancelledSize = stateAfterCancel['size'] as int;
+          expect(cancelledOffset, greaterThan(0));
+          expect(cancelledOffset, lessThan(cancelledSize));
+          expect(cancelledSize, greaterThan(_resumableCancelAfterBytes));
+          expect(
+            stateAfterCancel['original_name'],
+            isA<String>(),
+            reason: 'Expected $label resumable state to record the source name',
+          );
+          expect(
+            await _serverAssetIdsByOriginalFilename(
+              searchApi,
+              serverFilename,
+              type: serverType,
+            ),
+            isEmpty,
+            reason: 'Interrupted $label upload must not create a partial asset',
+          );
+
+          uploadService.shouldAbortUpload = false;
+          final retryProgressByName = <String, List<int>>{};
+          String? remoteAssetId;
+          String? retryError;
+          await uploadService.uploadSingleAsset(
+            asset,
+            null,
+            callbacks: UploadCallbacks(
+              onProgress: (_, fileName, bytes, totalBytes) {
+                recordProgress(retryProgressByName, fileName, bytes, totalBytes);
+              },
+              onSuccess: (_, remoteId) => remoteAssetId = remoteId,
+              onError: (_, errorMessage) => retryError = errorMessage,
+            ),
+          );
+
+          expect(retryError, isNull, reason: 'Expected $label retry to succeed');
+          expect(
+            remoteAssetId,
+            isNotNull,
+            reason: 'Expected $label retry to return a remote id',
+          );
+          final resumedRemoteId = remoteAssetId!;
+          expect(
+            retryProgressByName.values.any(
+              (values) =>
+                  values.isNotEmpty &&
+                  values.any((bytes) => bytes > 0) &&
+                  values.firstWhere((bytes) => bytes > 0) >= cancelledOffset &&
+                  values.last == cancelledSize,
+            ),
+            isTrue,
+            reason: 'Expected $label retry to resume from persisted offset',
+          );
+          expect(await _resumableStateFiles(), isEmpty);
+
+          final serverIds = await _waitForServerAssetIdsByOriginalFilename(
+            tester,
+            searchApi,
+            serverFilename,
+            (ids) =>
+                ids.length == 1 &&
+                ids.contains(resumedRemoteId),
+            type: serverType,
+            reason: 'Expected resumed $label upload to create one asset',
+          );
+          expect(serverIds, {resumedRemoteId});
+
+          uploadService.shouldAbortUpload = false;
+          String? duplicateRemoteId;
+          String? duplicateError;
+          await uploadService.uploadSingleAsset(
+            asset,
+            null,
+            callbacks: UploadCallbacks(
+              onSuccess: (_, remoteId) => duplicateRemoteId = remoteId,
+              onError: (_, errorMessage) => duplicateError = errorMessage,
+            ),
+          );
+          expect(
+            duplicateError,
+            isNull,
+            reason: 'Expected $label duplicate pass to be non-error',
+          );
+          expect(
+            duplicateRemoteId,
+            remoteAssetId,
+            reason: 'Expected $label duplicate pass to reuse the resumed asset',
+          );
+          await _waitForServerAssetIdsByOriginalFilename(
+            tester,
+            searchApi,
+            serverFilename,
+            (ids) =>
+                ids.length == 1 &&
+                ids.contains(resumedRemoteId),
+            type: serverType,
+            reason: 'Duplicate $label pass must not create another asset',
+          );
+
+          return (remoteId: resumedRemoteId, state: stateAfterCancel);
+        }
+
+        final photoResult = await interruptResumeAndVerify(
+          photoAsset,
+          label: '070 photo',
+          serverFilename: photoName,
+          serverType: api.AssetTypeEnum.IMAGE,
+        );
+        createdRemoteAssetIds.add(photoResult.remoteId);
+        final videoResult = await interruptResumeAndVerify(
+          videoAsset,
+          label: '070 video',
+          serverFilename: videoName,
+          serverType: api.AssetTypeEnum.VIDEO,
+        );
+        createdRemoteAssetIds.add(videoResult.remoteId);
+        final liveResult = await interruptResumeAndVerify(
+          liveAsset,
+          label: '070 Live Photo',
+          serverFilename: liveName,
+          serverType: api.AssetTypeEnum.IMAGE,
+        );
+        createdRemoteAssetIds.add(liveResult.remoteId);
+
+        final photoInfo = await _waitForAssetInfoState(
+          tester,
+          assetsApi,
+          photoResult.remoteId,
+          (asset) =>
+              asset.type == api.AssetTypeEnum.IMAGE &&
+              asset.originalFileName == photoName,
+          reason: 'Expected 070 resumed photo metadata',
+        );
+        final videoInfo = await _waitForAssetInfoState(
+          tester,
+          assetsApi,
+          videoResult.remoteId,
+          (asset) =>
+              asset.type == api.AssetTypeEnum.VIDEO &&
+              asset.originalFileName == videoName,
+          reason: 'Expected 070 resumed video metadata',
+        );
+        final liveInfo = await _waitForAssetInfoState(
+          tester,
+          assetsApi,
+          liveResult.remoteId,
+          (asset) =>
+              asset.type == api.AssetTypeEnum.IMAGE &&
+              asset.originalFileName == liveName &&
+              asset.livePhotoVideoId.orElse(null) != null,
+          reason: 'Expected 070 resumed Live Photo metadata',
+        );
+        final liveMotionId = liveInfo.livePhotoVideoId.orElse(null);
+        expect(liveMotionId, isNotNull);
+        createdRemoteAssetIds.add(liveMotionId!);
+        await _waitForAssetInfoState(
+          tester,
+          assetsApi,
+          liveMotionId,
+          (asset) => asset.type == api.AssetTypeEnum.VIDEO,
+          reason: 'Expected 070 resumed Live Photo motion metadata',
+        );
+
+        await _resetAndSyncRemoteState(tester, container);
+        final syncedPhoto = await _waitForRemoteAssetState(
+          tester,
+          container,
+          photoResult.remoteId,
+          (asset) =>
+              asset.isImage &&
+              asset.hasRemote &&
+              asset.checksum == photoInfo.checksum,
+          reason: 'Expected 070 resumed photo to sync locally',
+        );
+        await _waitForRemoteAssetState(
+          tester,
+          container,
+          videoResult.remoteId,
+          (asset) =>
+              asset.isVideo &&
+              asset.hasRemote &&
+              asset.checksum == videoInfo.checksum,
+          reason: 'Expected 070 resumed video to sync locally',
+        );
+        await _waitForRemoteAssetState(
+          tester,
+          container,
+          liveResult.remoteId,
+          (asset) =>
+              asset.isImage &&
+              asset.isMotionPhoto &&
+              asset.hasRemote &&
+              asset.livePhotoVideoId == liveMotionId,
+          reason: 'Expected 070 resumed Live Photo to sync locally',
+        );
+        await _waitForRemoteAssetState(
+          tester,
+          container,
+          liveMotionId,
+          (asset) => asset.isVideo && asset.hasRemote,
+          reason: 'Expected 070 Live Photo motion asset to sync as a linked video',
+        );
+
+        final timeline = container.read(timelineFactoryProvider).main([
+          syncedPhoto.ownerId,
+        ]);
+        addTearDown(timeline.dispose);
+        final timelineAssets = await _expectTimelineAssetSet(
+          tester,
+          timeline,
+          includes: {
+            photoResult.remoteId,
+            videoResult.remoteId,
+            liveResult.remoteId,
+          },
+          excludes: {liveMotionId},
+          reason:
+              'Expected the 070 timeline to show only resumed photo/video/Live still assets',
+        );
+        final visibleUploadedIds = _timelineAssetIds(timelineAssets).intersection({
+          photoResult.remoteId,
+          videoResult.remoteId,
+          liveResult.remoteId,
+          liveMotionId,
+        });
+        expect(visibleUploadedIds, {
+          photoResult.remoteId,
+          videoResult.remoteId,
+          liveResult.remoteId,
+        });
+        expect(tester.takeException(), isNull);
+
+        debugPrint(
+          'MOB-MEDIA-070-$_caseSuffix resumable uploads completed '
+          'photo=${photoResult.remoteId} offset=${photoResult.state['offset']} '
+          'video=${videoResult.remoteId} offset=${videoResult.state['offset']} '
+          'live=${liveResult.remoteId} motion=$liveMotionId '
+          'motionOffset=${liveResult.state['offset']}',
+        );
+      },
+    );
+
     if (_selectedCaseId.isNotEmpty && !_registeredSelectedCase) {
       test(
         _selectedCaseId,
@@ -18936,6 +19385,27 @@ Uint8List _generatedJpegBytes(int seed) {
     ...comment,
     ...bytes.skip(2),
   ]);
+}
+
+Uint8List _padFixtureBytes(List<int> bytes, int minimumBytes, int seed) {
+  if (bytes.length >= minimumBytes) {
+    return Uint8List.fromList(bytes);
+  }
+
+  final builder = BytesBuilder(copy: false)..add(bytes);
+  var remaining = minimumBytes - bytes.length;
+  var value = seed & 0xff;
+  while (remaining > 0) {
+    final length = remaining > 64 * 1024 ? 64 * 1024 : remaining;
+    final chunk = Uint8List(length);
+    for (var i = 0; i < chunk.length; i++) {
+      value = (value * 1103515245 + 12345) & 0x7fffffff;
+      chunk[i] = value & 0xff;
+    }
+    builder.add(chunk);
+    remaining -= length;
+  }
+  return builder.takeBytes();
 }
 
 Future<Uint8List> _generatedPngBytes(
