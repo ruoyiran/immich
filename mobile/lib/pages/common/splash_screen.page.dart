@@ -12,10 +12,8 @@ import 'package:immich_mobile/entities/store.entity.dart';
 import 'package:immich_mobile/generated/codegen_loader.g.dart';
 import 'package:immich_mobile/generated/translations.g.dart';
 import 'package:immich_mobile/infrastructure/repositories/db.repository.dart';
-import 'package:immich_mobile/infrastructure/repositories/settings.repository.dart';
 import 'package:immich_mobile/providers/auth.provider.dart';
 import 'package:immich_mobile/providers/background_sync.provider.dart';
-import 'package:immich_mobile/providers/backup/drift_backup.provider.dart';
 import 'package:immich_mobile/providers/server_info.provider.dart';
 import 'package:immich_mobile/providers/view_intent/view_intent_handler.provider.dart';
 import 'package:immich_mobile/providers/websocket.provider.dart';
@@ -310,7 +308,6 @@ class SplashScreenPageState extends ConsumerState<SplashScreenPage> {
       final infoProvider = ref.read(serverInfoProvider.notifier);
       final wsProvider = ref.read(websocketProvider.notifier);
       final backgroundManager = ref.read(backgroundSyncProvider);
-      final backupProvider = ref.read(driftBackupProvider.notifier);
       final viewIntentHandler = ref.read(viewIntentHandlerProvider);
 
       unawaited(
@@ -323,21 +320,9 @@ class SplashScreenPageState extends ConsumerState<SplashScreenPage> {
                   wsProvider.connect();
                   unawaited(infoProvider.getServerInfo());
 
-                  bool syncSuccess = false;
-                  await Future.wait([
-                    backgroundManager.syncLocal(full: true),
-                    backgroundManager.syncRemote().then((success) => syncSuccess = success),
-                  ]);
+                  await Future.wait([backgroundManager.syncLocal(full: true), backgroundManager.syncRemote()]);
 
                   await viewIntentHandler.flushDeferredViewIntent();
-
-                  if (syncSuccess) {
-                    await _resumeBackup(backupProvider);
-                  }
-
-                  if (SettingsRepository.instance.appConfig.backup.syncAlbums) {
-                    await backgroundManager.syncLinkedAlbum();
-                  }
                 } catch (e) {
                   log.severe('Failed establishing connection to the server: $e');
                 }
@@ -364,17 +349,6 @@ class SplashScreenPageState extends ConsumerState<SplashScreenPage> {
     // current install not using beta timeline
     if (context.router.current.name == SplashScreenRoute.name) {
       unawaited(context.replaceRoute(const TabShellRoute()));
-    }
-  }
-
-  Future<void> _resumeBackup(DriftBackupNotifier notifier) async {
-    final isEnableBackup = SettingsRepository.instance.appConfig.backup.enabled;
-
-    if (isEnableBackup) {
-      final currentUser = Store.tryGet(StoreKey.currentUser);
-      if (currentUser != null) {
-        unawaited(notifier.startForegroundBackup(currentUser.id));
-      }
     }
   }
 

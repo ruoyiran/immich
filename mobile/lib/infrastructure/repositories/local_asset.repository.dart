@@ -1,8 +1,6 @@
 import 'dart:async';
 
-import 'package:collection/collection.dart';
 import 'package:drift/drift.dart';
-import 'package:immich_mobile/constants/constants.dart';
 import 'package:immich_mobile/constants/enums.dart';
 import 'package:immich_mobile/domain/models/album/local_album.model.dart';
 import 'package:immich_mobile/domain/models/asset/base_asset.model.dart';
@@ -122,7 +120,7 @@ class DriftLocalAssetRepository extends DriftDatabaseRepository {
     return _db.managers.localAssetEntity.filter((e) => e.checksum.isNull().not()).count();
   }
 
-  Future<List<LocalAlbum>> getSourceAlbums(String localAssetId, {BackupSelection? backupSelection}) {
+  Future<List<LocalAlbum>> getSourceAlbums(String localAssetId) {
     final query = _db.localAlbumEntity.select()
       ..where(
         (lae) => existsQuery(
@@ -135,47 +133,7 @@ class DriftLocalAssetRepository extends DriftDatabaseRepository {
         ),
       )
       ..orderBy([(lae) => OrderingTerm.asc(lae.name)]);
-    if (backupSelection != null) {
-      query.where((lae) => lae.backupSelection.equalsValue(backupSelection));
-    }
     return query.map((localAlbum) => localAlbum.toDto()).get();
-  }
-
-  Future<Map<String, List<LocalAsset>>> getAssetsFromBackupAlbums(Iterable<String> remoteIds) async {
-    if (remoteIds.isEmpty) {
-      return {};
-    }
-
-    final result = <String, List<LocalAsset>>{};
-
-    for (final slice in remoteIds.toSet().slices(kDriftMaxChunk)) {
-      final rows =
-          await (_db.select(_db.localAlbumAssetEntity).join([
-                innerJoin(
-                  _db.localAlbumEntity,
-                  _db.localAlbumAssetEntity.albumId.equalsExp(_db.localAlbumEntity.id),
-                  useColumns: false,
-                ),
-                innerJoin(_db.localAssetEntity, _db.localAlbumAssetEntity.assetId.equalsExp(_db.localAssetEntity.id)),
-                innerJoin(
-                  _db.remoteAssetEntity,
-                  _db.localAssetEntity.checksum.equalsExp(_db.remoteAssetEntity.checksum),
-                  useColumns: false,
-                ),
-              ])..where(
-                _db.localAlbumEntity.backupSelection.equalsValue(BackupSelection.selected) &
-                    _db.remoteAssetEntity.id.isIn(slice),
-              ))
-              .get();
-
-      for (final row in rows) {
-        final albumId = row.readTable(_db.localAlbumAssetEntity).albumId;
-        final asset = row.readTable(_db.localAssetEntity).toDto();
-        (result[albumId] ??= <LocalAsset>[]).add(asset);
-      }
-    }
-
-    return result;
   }
 
   Future<RemovalCandidatesResult> getRemovalCandidates(

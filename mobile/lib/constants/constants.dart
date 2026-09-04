@@ -19,8 +19,6 @@ const String kSecuredPinCode = "secured_pin_code";
 
 // background_downloader task groups
 const String kManualUploadGroup = 'manual_upload_group';
-const String kBackupGroup = 'backup_group';
-const String kBackupLivePhotoGroup = 'backup_live_photo_group';
 const String kDownloadGroupImage = 'group_image';
 const String kDownloadGroupVideo = 'group_video';
 const String kDownloadGroupLivePhoto = 'group_livephoto';

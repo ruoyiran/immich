@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:math' as math;
 
-import 'package:auto_route/auto_route.dart';
 import 'package:easy_localization/easy_localization.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -9,22 +8,18 @@ import 'package:flutter_svg/svg.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:immich_mobile/extensions/build_context_extensions.dart';
 import 'package:immich_mobile/models/server_info/server_info.model.dart';
-import 'package:immich_mobile/providers/backup/drift_backup.provider.dart';
 import 'package:immich_mobile/providers/cast.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/readonly_mode.provider.dart';
-import 'package:immich_mobile/providers/infrastructure/settings.provider.dart';
 import 'package:immich_mobile/providers/server_info.provider.dart';
 import 'package:immich_mobile/providers/sync_status.provider.dart';
 import 'package:immich_mobile/providers/timeline/multiselect.provider.dart';
 import 'package:immich_mobile/providers/user.provider.dart';
-import 'package:immich_mobile/routing/router.dart';
 import 'package:immich_mobile/widgets/asset_viewer/cast_dialog.dart';
 import 'package:immich_mobile/widgets/common/app_bar_dialog/app_bar_dialog.dart';
 import 'package:immich_mobile/widgets/common/user_circle_avatar.dart';
 
 class ImmichSliverAppBar extends ConsumerWidget {
   final List<Widget>? actions;
-  final bool showUploadButton;
   final bool floating;
   final bool pinned;
   final bool snap;
@@ -34,7 +29,6 @@ class ImmichSliverAppBar extends ConsumerWidget {
   const ImmichSliverAppBar({
     super.key,
     this.actions,
-    this.showUploadButton = true,
     this.floating = true,
     this.pinned = false,
     this.snap = true,
@@ -74,7 +68,6 @@ class ImmichSliverAppBar extends ConsumerWidget {
                 icon: Icon(isCasting ? Icons.cast_connected_rounded : Icons.cast_rounded),
               ),
             if (actions != null) ...actions!,
-            if (showUploadButton && !isReadonlyModeEnabled) const _BackupIndicator(),
             const _ProfileIndicator(),
             const SizedBox(width: 8),
           ],
@@ -172,81 +165,10 @@ class _ProfileIndicator extends ConsumerWidget {
 
 const double _kBadgeWidgetSize = 30.0;
 
-class _BackupIndicator extends ConsumerWidget {
-  const _BackupIndicator();
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final indicatorIcon = _getBackupBadgeIcon(context, ref);
-
-    return IconButton(
-      onPressed: () => context.pushRoute(const DriftBackupRoute()),
-      icon: Badge(
-        label: indicatorIcon,
-        backgroundColor: Colors.transparent,
-        alignment: Alignment.bottomRight,
-        isLabelVisible: indicatorIcon != null,
-        offset: const Offset(-2, -12),
-        child: Icon(Icons.backup_rounded, size: _kBadgeWidgetSize, color: context.primaryColor),
-      ),
-    );
-  }
-
-  Widget? _getBackupBadgeIcon(BuildContext context, WidgetRef ref) {
-    final backupEnabled = ref.read(appConfigProvider.select((c) => c.backup.enabled));
-    final hasError = ref.read(driftBackupProvider.select((state) => state.error != BackupError.none));
-    final isDarkTheme = context.isDarkTheme;
-    final iconColor = isDarkTheme ? Colors.white : Colors.black;
-    final isUploading = ref.read(driftBackupProvider.select((state) => state.uploadItems.isNotEmpty));
-
-    if (!backupEnabled) {
-      return _BadgeLabel(
-        Icon(Icons.cloud_off_rounded, size: 9, color: iconColor, semanticLabel: 'backup_controller_page_backup'.tr()),
-      );
-    }
-
-    if (hasError) {
-      return _BadgeLabel(
-        Icon(
-          Icons.warning_rounded,
-          size: 12,
-          color: context.colorScheme.error,
-          semanticLabel: 'backup_controller_page_backup'.tr(),
-        ),
-        backgroundColor: context.colorScheme.errorContainer,
-      );
-    }
-
-    if (isUploading) {
-      return _BadgeLabel(
-        Container(
-          padding: const EdgeInsets.all(3.5),
-          child: Theme(
-            data: context.themeData.copyWith(
-              progressIndicatorTheme: context.themeData.progressIndicatorTheme.copyWith(year2023: true),
-            ),
-            child: CircularProgressIndicator(
-              strokeWidth: 2,
-              strokeCap: StrokeCap.round,
-              valueColor: AlwaysStoppedAnimation<Color>(iconColor),
-              semanticsLabel: 'backup_controller_page_backup'.tr(),
-            ),
-          ),
-        ),
-      );
-    }
-
-    return _BadgeLabel(
-      Icon(Icons.check_outlined, size: 9, color: iconColor, semanticLabel: 'backup_controller_page_backup'.tr()),
-    );
-  }
-}
-
 class _BadgeLabel extends StatelessWidget {
   final Widget indicator;
-  final Color? backgroundColor;
 
-  const _BadgeLabel(this.indicator, {this.backgroundColor});
+  const _BadgeLabel(this.indicator);
 
   @override
   Widget build(BuildContext context) {
@@ -256,7 +178,7 @@ class _BadgeLabel extends StatelessWidget {
       width: _kBadgeWidgetSize / 2,
       height: _kBadgeWidgetSize / 2,
       decoration: BoxDecoration(
-        color: (backgroundColor ?? context.colorScheme.surfaceContainer).withValues(alpha: opacity),
+        color: context.colorScheme.surfaceContainer.withValues(alpha: opacity),
         border: Border.all(color: context.colorScheme.outline.withValues(alpha: .3 * opacity)),
         borderRadius: BorderRadius.circular(_kBadgeWidgetSize / 2),
       ),
