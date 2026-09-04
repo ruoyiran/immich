@@ -134,6 +134,7 @@ import 'package:immich_mobile/providers/infrastructure/people.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/remote_album.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/search.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/settings.provider.dart';
+import 'package:immich_mobile/providers/infrastructure/storage.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/sync.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/tag.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/timeline.provider.dart';
@@ -12779,6 +12780,213 @@ void main() async {
       },
     );
 
+    _realStackSessionTest(
+      'MOB-MEDIA-065-$_caseSuffix',
+      'uploads one gallery photo and verifies client/server consistency',
+      (tester) async {
+        tester.view.devicePixelRatio = 1.0;
+        tester.view.physicalSize = const Size(430, 932);
+        addTearDown(tester.view.reset);
+
+        await _loadAuthenticatedApp(
+          tester,
+          overrideCancellation: true,
+          closeDriftOnDispose: false,
+          resetSyncAcksBeforeStart: true,
+        );
+        final container = _containerOfApp(tester);
+        final apiService = container.read(apiServiceProvider);
+        final assetsApi = apiService.assetsApi;
+        final searchApi = apiService.searchApi;
+        final createdRemoteAssetIds = <String>[];
+        final createdLocalAssetIds = <String>{};
+
+        addTearDown(() async {
+          for (final assetId in createdRemoteAssetIds) {
+            await _deleteTestAssetBestEffort(assetsApi, assetId);
+          }
+          unawaited(_deleteLocalTestAssetsBestEffort(createdLocalAssetIds));
+        });
+
+        await _resetAndSyncRemoteState(tester, container);
+
+        final runToken = DateTime.now().toUtc().microsecondsSinceEpoch.toString();
+        final localName = 'immich-e2e-media-065-upload-$runToken.jpg';
+        final sourceBytes = _generatedJpegBytes(runToken.hashCode);
+        final expectedSourceMd5 = base64Encode(md5.convert(sourceBytes).bytes);
+        expect(
+          await _serverAssetIdsByOriginalFilename(searchApi, localName),
+          isEmpty,
+          reason: 'The 065 upload filename must be unique before the test',
+        );
+
+        final createdLocal = await container.read(fileMediaRepositoryProvider).saveLocalAsset(
+          sourceBytes,
+          title: localName,
+          relativePath: 'Pictures/ImmichE2E065',
+        );
+        expect(
+          createdLocal,
+          isNotNull,
+          reason: 'Expected PhotoManager to inject the 065 gallery fixture',
+        );
+        createdLocalAssetIds.add(createdLocal!.id);
+
+        await container.read(backgroundSyncProvider).syncLocal(full: true);
+        final localAsset = await _waitForLocalAssetByNameState(
+          container,
+          localName,
+          tester,
+          (asset) => asset.isImage && asset.contentSize != null && asset.contentSize! > 0,
+          reason:
+              'Expected the 065 gallery fixture to sync with uploadable metadata',
+        );
+        expect(localAsset.isLocalOnly, isTrue);
+
+        final localFile = await container.read(storageRepositoryProvider).getFileForAsset(localAsset.id);
+        expect(localFile, isNotNull);
+        final localBytes = await localFile!.readAsBytes();
+        final localMd5 = base64Encode(md5.convert(localBytes).bytes);
+        expect(localBytes.length, localAsset.contentSize);
+        expect(
+          localMd5,
+          expectedSourceMd5,
+          reason:
+              'Expected Android MediaStore to preserve the generated 065 JPEG bytes',
+        );
+
+        final progressById = <String, List<double>>{};
+        String? remoteAssetId;
+        String? uploadError;
+        await container.read(foregroundUploadServiceProvider).uploadSingleAsset(
+          localAsset,
+          Completer<void>(),
+          callbacks: UploadCallbacks(
+            onProgress: (id, _, bytes, totalBytes) {
+              final progress = totalBytes > 0 ? bytes / totalBytes : 0.0;
+              final assetProgress = progressById.putIfAbsent(id, () => []);
+              expect(progress, inInclusiveRange(0.0, 1.0));
+              if (assetProgress.isNotEmpty) {
+                expect(progress, greaterThanOrEqualTo(assetProgress.last));
+              }
+              assetProgress.add(progress);
+            },
+            onSuccess: (_, remoteId) => remoteAssetId = remoteId,
+            onError: (_, errorMessage) => uploadError = errorMessage,
+          ),
+        );
+
+        expect(uploadError, isNull);
+        expect(remoteAssetId, isNotNull);
+        createdRemoteAssetIds.add(remoteAssetId!);
+
+        final serverIds = await _waitForServerAssetIdsByOriginalFilename(
+          tester,
+          searchApi,
+          localName,
+          (ids) => ids.contains(remoteAssetId),
+          reason:
+              'Expected the 065 uploaded photo to be indexed by filename on the real server',
+        );
+        expect(serverIds, hasLength(1));
+
+        final info = await _waitForAssetInfoState(
+          tester,
+          assetsApi,
+          remoteAssetId!,
+          (asset) =>
+              asset.type == api.AssetTypeEnum.IMAGE &&
+              asset.originalFileName == localName &&
+              asset.width != null &&
+              asset.height != null,
+          reason:
+              'Expected the 065 uploaded photo to expose server metadata',
+        );
+        expect(info.fileCreatedAt.toUtc(), localAsset.createdAt.toUtc());
+        expect(info.width, localAsset.width);
+        expect(info.height, localAsset.height);
+
+        final original = await _waitForSuccessfulResponse(
+          tester,
+          () => container
+              .read(assetApiRepositoryProvider)
+              .downloadAsset(remoteAssetId!, edited: false),
+          timeout: const Duration(minutes: 3),
+        );
+        expect(original.bodyBytes.length, localBytes.length);
+        expect(base64Encode(md5.convert(original.bodyBytes).bytes), localMd5);
+
+        final thumbnail = await _waitForSuccessfulResponse(
+          tester,
+          () => assetsApi.viewAssetWithHttpInfo(
+            remoteAssetId!,
+            size: api.AssetMediaSize.thumbnail,
+          ),
+          timeout: const Duration(minutes: 3),
+        );
+        expect(thumbnail.bodyBytes, isNotEmpty);
+
+        await _resetAndSyncRemoteState(tester, container);
+        final syncedAsset = await _waitForRemoteAssetState(
+          tester,
+          container,
+          remoteAssetId!,
+          (asset) =>
+              asset.isImage &&
+              asset.hasLocal &&
+              asset.hasRemote &&
+              asset.checksum == localMd5,
+          reason:
+              'Expected the 065 upload to sync back as one merged local/remote asset',
+        );
+
+        final timeline = container.read(timelineFactoryProvider).main([
+          syncedAsset.ownerId,
+        ]);
+        addTearDown(timeline.dispose);
+        final timelineAssets = await _expectTimelineAssetSet(
+          tester,
+          timeline,
+          includes: {remoteAssetId!},
+          excludes: const {},
+          reason:
+              'Expected the 065 uploaded photo to appear in the client timeline',
+        );
+        final timelineMatches = timelineAssets
+            .where(
+              (asset) =>
+                  _timelineAssetId(asset) == remoteAssetId ||
+                  asset.refersToSameAsset(syncedAsset),
+            )
+            .toList();
+        expect(
+          timelineMatches,
+          hasLength(1),
+          reason:
+              'Expected exactly one visible client asset for the 065 upload',
+        );
+        expect(timelineMatches.single.hasRemote, isTrue);
+        expect(timelineMatches.single.hasLocal, isTrue);
+
+        await _openTimelineAsset(tester, syncedAsset);
+        await pumpUntilFound(
+          tester,
+          find.byType(AssetViewer),
+          timeout: const Duration(seconds: 60),
+        );
+        EventStream.shared.emit(const ViewerShowDetailsEvent());
+        await _pumpFor(tester, const Duration(seconds: 1));
+        expect(container.read(assetViewerProvider).showingDetails, isTrue);
+        expect(tester.takeException(), isNull);
+
+        debugPrint(
+          'MOB-MEDIA-065-A uploaded remoteId=$remoteAssetId '
+          'sourceFilename=$localName syncedFilename=${syncedAsset.name} '
+          'md5=$localMd5 size=${localBytes.length}',
+        );
+      },
+    );
+
     if (_selectedCaseId.isNotEmpty && !_registeredSelectedCase) {
       test(
         _selectedCaseId,
@@ -14470,6 +14678,27 @@ Future<LocalAsset> _waitForLocalAssetByName(
 
   final sorted = lastSeen.toList()..sort();
   fail('Local asset $name was not discovered; saw ${sorted.join(', ')}');
+}
+
+Future<LocalAsset> _waitForLocalAssetByNameState(
+  ProviderContainer container,
+  String name,
+  WidgetTester tester,
+  bool Function(LocalAsset asset) matches, {
+  required String reason,
+}) async {
+  LocalAsset? latest;
+  for (var attempt = 0; attempt < 12; attempt++) {
+    await container.read(backgroundSyncProvider).syncLocal(full: true);
+    final assets = await _localAssets(container);
+    latest = assets.where((asset) => asset.name == name).firstOrNull;
+    if (latest != null && matches(latest)) {
+      return latest;
+    }
+    await _pumpFor(tester, const Duration(seconds: 2));
+  }
+
+  fail('$reason; latest local asset=$latest');
 }
 
 Future<LocalAsset> _saveLocalTestImage(
