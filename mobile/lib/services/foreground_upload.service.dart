@@ -213,6 +213,10 @@ class ForegroundUploadService {
         );
         return;
       }
+      final androidMotionPhotoUsesServerSplit =
+          CurrentPlatform.isAndroid && asset.isMotionPhoto && _isHeicFileName(asset.name);
+      final shouldUploadAsLivePhoto =
+          entity.isLivePhoto || (CurrentPlatform.isAndroid && asset.isMotionPhoto && !androidMotionPhotoUsesServerSplit);
 
       final isAvailableLocally = await _storageRepository.isAssetAvailableLocally(asset.id);
 
@@ -230,7 +234,7 @@ class ForegroundUploadService {
 
         try {
           file = await _storageRepository.loadFileFromCloud(asset.id, progressHandler: progressHandler);
-          if (entity.isLivePhoto) {
+          if (shouldUploadAsLivePhoto) {
             livePhotoFile = await _storageRepository.loadMotionFileFromCloud(
               asset.id,
               progressHandler: progressHandler,
@@ -241,7 +245,7 @@ class ForegroundUploadService {
         }
       } else {
         // Get files locally
-        if (entity.isLivePhoto && CurrentPlatform.isAndroid) {
+        if (shouldUploadAsLivePhoto && CurrentPlatform.isAndroid) {
           final liveFiles = await _storageRepository.getLivePhotoFilesForAsset(asset);
           file = liveFiles?.still;
           livePhotoFile = liveFiles?.motion;
@@ -259,7 +263,7 @@ class ForegroundUploadService {
         }
 
         // For live photos, get the motion video file
-        if (entity.isLivePhoto && livePhotoFile == null) {
+        if (shouldUploadAsLivePhoto && livePhotoFile == null) {
           livePhotoFile = await _storageRepository.getMotionFileForAsset(asset);
           if (livePhotoFile == null) {
             _logger.warning("Failed to obtain motion part of the livePhoto - ${asset.name}");
@@ -319,7 +323,7 @@ class ForegroundUploadService {
         'sourceMetadata': buildUploadSourceMetadata(asset, originalName: originalFileName, deviceId: deviceId),
       };
 
-      if (entity.isLivePhoto) {
+      if (shouldUploadAsLivePhoto) {
         if (livePhotoFile == null) {
           return;
         }
@@ -452,4 +456,9 @@ class ForegroundUploadService {
       return UploadResult.error(errorMessage: e.toString());
     }
   }
+}
+
+bool _isHeicFileName(String filename) {
+  final extension = p.extension(filename).toLowerCase();
+  return extension == '.heic' || extension == '.heif';
 }
