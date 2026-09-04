@@ -57,6 +57,7 @@ import 'package:immich_mobile/pages/login/login.page.dart';
 import 'package:immich_mobile/pages/share_intent/share_intent.page.dart';
 import 'package:immich_mobile/presentation/pages/dev/main_timeline.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_album.page.dart';
+import 'package:immich_mobile/presentation/pages/drift_album_options.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_archive.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_asset_selection_timeline.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_favorite.page.dart';
@@ -6875,6 +6876,290 @@ void main() async {
       expect(refreshedMemories.map((memory) => memory.id), contains(otherMemory.id));
     });
 
+    _realStackSessionTest(
+      'MOB-UI-053-$_caseSuffix',
+      'edits album details, cover, ordering, permissions, and deletion',
+      (tester) async {
+        tester.view.devicePixelRatio = 1.0;
+        tester.view.physicalSize = const Size(430, 932);
+        addTearDown(tester.view.reset);
+
+        await _loadAuthenticatedApp(tester, overrideCancellation: true, closeDriftOnDispose: false);
+        final container = _containerOfApp(tester);
+        final drift = container.read(driftProvider);
+        final apiService = container.read(apiServiceProvider);
+        final albumsApi = apiService.albumsApi;
+        final assetsApi = apiService.assetsApi;
+        final router = container.read(appRouterProvider);
+        final createdRemoteAssetIds = <String>[];
+        String? ownedAlbumId;
+        final user = Store.tryGet(StoreKey.currentUser);
+        expect(user, isNotNull);
+
+        addTearDown(() async {
+          final albumId = ownedAlbumId;
+          if (albumId != null) {
+            await _deleteAlbumBestEffort(albumsApi, albumId);
+          }
+          for (final assetId in createdRemoteAssetIds) {
+            await _deleteTestAssetBestEffort(assetsApi, assetId);
+          }
+        });
+
+        await container.read(syncApiRepositoryProvider).deleteSyncAck(_allReplayableSyncAckTypes);
+        await Store.delete(StoreKey.syncMigrationStatus);
+        await container.read(syncStreamRepositoryProvider).reset();
+        final baselineSyncSuccess = await container.read(syncStreamServiceProvider).sync();
+        expect(baselineSyncSuccess, isTrue);
+
+        final runToken = DateTime.now().toUtc().microsecondsSinceEpoch.toString();
+        final shortToken = runToken.substring(runToken.length - 8);
+        final baseCreatedAt = DateTime.now().toUtc().add(const Duration(days: 3650));
+        final assetIds = <String>[];
+        for (var index = 0; index < 8; index++) {
+          final assetId = await _uploadGeneratedJpegAsSecondClient(
+            'immich-e2e-album-edit-053-$index-$runToken.jpg',
+            baseCreatedAt.subtract(Duration(days: index)),
+          );
+          createdRemoteAssetIds.add(assetId);
+          assetIds.add(assetId);
+        }
+
+        for (final assetId in assetIds) {
+          await _waitForSuccessfulResponse(
+            tester,
+            () => _authenticatedApiGet('/assets/$assetId/thumbnail?size=thumbnail&edited=false&c=$runToken'),
+            timeout: const Duration(minutes: 3),
+          );
+        }
+
+        final originalAlbumName = 'immich-e2e-album-edit-053-$shortToken';
+        final createdAlbum = await albumsApi.createAlbum(
+          api.CreateAlbumDto(albumName: originalAlbumName, assetIds: api.Optional.present(assetIds)),
+        );
+        expect(createdAlbum, isNotNull);
+        ownedAlbumId = createdAlbum!.id;
+
+        await _waitForAlbumInfoState(
+          tester,
+          albumsApi,
+          ownedAlbumId,
+          (album) => album.albumName == originalAlbumName && album.assetCount == 8,
+          reason: 'Expected the 053 owned album to start with eight server assets',
+        );
+
+        final initialSyncSuccess = await container.read(syncStreamServiceProvider).sync();
+        expect(initialSyncSuccess, isTrue);
+        final ownedAlbum = await _waitForRemoteAlbumState(
+          tester,
+          container,
+          ownedAlbumId,
+          (album) => album.name == originalAlbumName && album.assetCount == 8,
+          reason: 'Expected the 053 owned album to sync locally before opening',
+        );
+        await _waitForRemoteAlbumAssetIds(
+          tester,
+          container,
+          ownedAlbumId,
+          includes: assetIds.toSet(),
+          excludes: const {},
+          reason: 'Expected the local 053 owned album to contain all fixture assets',
+        );
+
+        unawaited(router.push(RemoteAlbumRoute(album: ownedAlbum)));
+        await pumpUntilFound(tester, find.byType(RemoteAlbumPage), timeout: const Duration(seconds: 30));
+        await pumpUntilFound(tester, find.text(originalAlbumName), timeout: const Duration(seconds: 30));
+
+        final editedAlbumName = 'immich-e2e-album-edit-053-renamed-$shortToken';
+        final editedDescription = 'Album edit description 053 $shortToken';
+        await _tapRemoteAlbumMenuAction(tester, const Key('remote-album-edit-action'));
+        await pumpUntilFound(
+          tester,
+          find.byKey(const Key('remote-album-edit-dialog')),
+          timeout: const Duration(seconds: 30),
+        );
+        await tester.enterText(find.byKey(const Key('remote-album-title-field')), editedAlbumName);
+        await tester.enterText(find.byKey(const Key('remote-album-description-field')), editedDescription);
+        await tester.ensureVisible(find.byKey(const Key('remote-album-edit-save-button')));
+        await tester.tap(find.byKey(const Key('remote-album-edit-save-button')), warnIfMissed: false);
+        await _pumpUntil(
+          tester,
+          () => find.byKey(const Key('remote-album-edit-dialog')).evaluate().isEmpty,
+          timeout: const Duration(seconds: 30),
+        );
+        await _waitForAlbumInfoState(
+          tester,
+          albumsApi,
+          ownedAlbumId,
+          (album) => album.albumName == editedAlbumName && album.description == editedDescription,
+          reason: 'Expected 053 album title and description edits to persist on the server',
+        );
+        await _waitForRemoteAlbumState(
+          tester,
+          container,
+          ownedAlbumId,
+          (album) => album.name == editedAlbumName && album.description == editedDescription,
+          reason: 'Expected 053 album title and description edits to sync locally',
+        );
+        await pumpUntilFound(tester, find.text(editedAlbumName), timeout: const Duration(seconds: 30));
+        await pumpUntilFound(tester, find.text(editedDescription), timeout: const Duration(seconds: 30));
+
+        final coverAssetId = assetIds.first;
+        final albumContainer = ProviderScope.containerOf(tester.element(find.byType(Timeline).last), listen: false);
+        await _selectTimelineAssetsById(tester, albumContainer, [coverAssetId]);
+        expect(_bottomSheetIcon(RemoteAlbumBottomSheet, Icons.image_outlined), findsOneWidget);
+        await _tapBottomSheetAction(tester, RemoteAlbumBottomSheet, Icons.image_outlined);
+        await _waitForAlbumInfoState(
+          tester,
+          albumsApi,
+          ownedAlbumId,
+          (album) => album.albumThumbnailAssetId == coverAssetId,
+          reason: 'Expected 053 album cover selection to persist on the server',
+        );
+        await _waitForRemoteAlbumState(
+          tester,
+          container,
+          ownedAlbumId,
+          (album) => album.thumbnailAssetId == coverAssetId,
+          reason: 'Expected 053 album cover selection to sync locally',
+        );
+
+        final beforeOrder = await albumsApi.getAlbumInfo(ownedAlbumId);
+        final expectedOrder = beforeOrder?.order.orElse(null) == api.AssetOrder.asc
+            ? api.AssetOrder.desc
+            : api.AssetOrder.asc;
+        final expectedLocalOrder = expectedOrder == api.AssetOrder.asc ? AlbumAssetOrder.asc : AlbumAssetOrder.desc;
+        await _tapRemoteAlbumMenuAction(tester, const Key('remote-album-change-order-action'));
+        await _waitForAlbumInfoState(
+          tester,
+          albumsApi,
+          ownedAlbumId,
+          (album) => album.order.orElse(null) == expectedOrder,
+          reason: 'Expected 053 album display order toggle to persist on the server',
+        );
+        final reorderedAlbum = await _waitForRemoteAlbumState(
+          tester,
+          container,
+          ownedAlbumId,
+          (album) => album.order == expectedLocalOrder,
+          reason: 'Expected 053 album display order toggle to sync locally',
+        );
+
+        await router.maybePop();
+        await _pumpUntil(
+          tester,
+          () => find.byType(RemoteAlbumPage).evaluate().isEmpty,
+          timeout: const Duration(seconds: 30),
+        );
+        unawaited(router.push(RemoteAlbumRoute(album: reorderedAlbum)));
+        await pumpUntilFound(tester, find.byType(RemoteAlbumPage), timeout: const Duration(seconds: 30));
+        await pumpUntilFound(tester, find.text(editedAlbumName), timeout: const Duration(seconds: 30));
+        await pumpUntilFound(tester, find.text(editedDescription), timeout: const Duration(seconds: 30));
+        await _waitForRemoteAlbumState(
+          tester,
+          container,
+          ownedAlbumId,
+          (album) =>
+              album.name == editedAlbumName &&
+              album.description == editedDescription &&
+              album.thumbnailAssetId == coverAssetId &&
+              album.order == expectedLocalOrder,
+          reason: 'Expected 053 album metadata, cover, and order to remain stable after reopening',
+        );
+
+        await _tapRemoteAlbumMenuAction(tester, const Key('remote-album-delete-action'));
+        await pumpUntilFound(
+          tester,
+          find.byKey(const Key('remote-album-delete-dialog')),
+          timeout: const Duration(seconds: 30),
+        );
+        await tester.tap(find.byKey(const Key('remote-album-delete-cancel-button')), warnIfMissed: false);
+        await _pumpUntil(
+          tester,
+          () => find.byKey(const Key('remote-album-delete-dialog')).evaluate().isEmpty,
+          timeout: const Duration(seconds: 30),
+        );
+        await _waitForAlbumInfoState(
+          tester,
+          albumsApi,
+          ownedAlbumId,
+          (album) => album.albumName == editedAlbumName && album.assetCount == 8,
+          reason: 'Cancelling 053 album deletion must leave the album on the server',
+        );
+        await _waitForRemoteAlbumRowCount(
+          tester,
+          drift,
+          ownedAlbumId,
+          1,
+          reason: 'Cancelling 053 album deletion must leave the local album row',
+        );
+
+        await _tapRemoteAlbumMenuAction(tester, const Key('remote-album-delete-action'));
+        await pumpUntilFound(
+          tester,
+          find.byKey(const Key('remote-album-delete-dialog')),
+          timeout: const Duration(seconds: 30),
+        );
+        await tester.tap(find.byKey(const Key('remote-album-delete-confirm-button')), warnIfMissed: false);
+        await pumpUntilFound(tester, find.byType(DriftAlbumsPage), timeout: const Duration(seconds: 30));
+        await _waitForServerAlbumIdsByName(
+          tester,
+          albumsApi,
+          editedAlbumName,
+          (ids) => ids.isEmpty,
+          reason: 'Confirmed 053 album deletion should remove only the album',
+        );
+        await _waitForRemoteAlbumRowCount(
+          tester,
+          drift,
+          ownedAlbumId,
+          0,
+          reason: 'Confirmed 053 album deletion should remove the local album row',
+        );
+        for (final assetId in assetIds) {
+          await _waitForAssetInfoState(
+            tester,
+            assetsApi,
+            assetId,
+            (asset) => !asset.isTrashed,
+            reason: 'Deleting the 053 album must not delete or trash asset $assetId',
+          );
+        }
+        ownedAlbumId = null;
+
+        final readOnlyAlbum = RemoteAlbum(
+          id: '00000000-0000-4000-8000-000000000053',
+          name: 'immich-e2e-album-edit-053-readonly-$shortToken',
+          ownerId: '00000000-0000-4000-8000-000000000001',
+          ownerName: 'Read Only Owner',
+          description: 'Read-only shared album fixture',
+          createdAt: DateTime.now().toUtc(),
+          updatedAt: DateTime.now().toUtc(),
+          thumbnailAssetId: coverAssetId,
+          isActivityEnabled: true,
+          order: AlbumAssetOrder.desc,
+          assetCount: 1,
+          isShared: true,
+        );
+        expect(readOnlyAlbum.ownerId, isNot(user!.id));
+        unawaited(router.push(RemoteAlbumRoute(album: readOnlyAlbum)));
+        await pumpUntilFound(tester, find.byType(RemoteAlbumPage), timeout: const Duration(seconds: 30));
+        await pumpUntilFound(tester, find.text(readOnlyAlbum.name), timeout: const Duration(seconds: 30));
+
+        await _openRemoteAlbumMenu(tester);
+        expect(find.byKey(const Key('remote-album-edit-action')), findsNothing);
+        expect(find.byKey(const Key('remote-album-add-photos-action')), findsNothing);
+        expect(find.byKey(const Key('remote-album-add-users-action')), findsNothing);
+        expect(find.byKey(const Key('remote-album-change-order-action')), findsNothing);
+        expect(find.byKey(const Key('remote-album-delete-action')), findsNothing);
+        expect(find.byKey(const Key('remote-album-options-action')), findsOneWidget);
+        await tester.tap(find.byKey(const Key('remote-album-options-action')), warnIfMissed: false);
+        await pumpUntilFound(tester, find.byType(DriftAlbumOptionsPage), timeout: const Duration(seconds: 30));
+        expect(find.byKey(const Key('remote-album-options-activity-switch')), findsNothing);
+        expect(find.byKey(const Key('remote-album-options-invite-people-action')), findsNothing);
+      },
+    );
+
     if (_selectedCaseId.isNotEmpty && !_registeredSelectedCase) {
       test(_selectedCaseId, () => fail('No real stack auth test registered for $_selectedCaseId'));
     }
@@ -6935,6 +7220,23 @@ Future<void> _openShortcutEntryAndReturn(
     () => find.byType(targetPage).evaluate().isEmpty && find.byType(sourcePage).evaluate().isNotEmpty,
     timeout: const Duration(seconds: 30),
   );
+}
+
+Future<void> _openRemoteAlbumMenu(WidgetTester tester) async {
+  final menuButton = find.byKey(const Key('remote-album-menu-button'));
+  await pumpUntilFound(tester, menuButton, timeout: const Duration(seconds: 30));
+  expect(menuButton.hitTestable(), findsWidgets, reason: 'Expected the remote album menu button to be tappable');
+  await tester.tap(menuButton.hitTestable().last, warnIfMissed: false);
+  await _pumpFor(tester, const Duration(milliseconds: 300));
+}
+
+Future<void> _tapRemoteAlbumMenuAction(WidgetTester tester, Key key) async {
+  await _openRemoteAlbumMenu(tester);
+  final action = find.byKey(key);
+  await pumpUntilFound(tester, action, timeout: const Duration(seconds: 30));
+  expect(action.hitTestable(), findsWidgets, reason: 'Expected remote album menu action $key to be tappable');
+  await tester.tap(action.hitTestable().last, warnIfMissed: false);
+  await _pumpFor(tester, const Duration(milliseconds: 500));
 }
 
 Future<void> _ensureTextVisibleInPage(WidgetTester tester, Type pageType, String label, {int maxScrolls = 40}) async {
@@ -10677,6 +10979,26 @@ Future<int> _remoteAlbumRowCountById(Drift drift, String albumId) async {
       )
       .getSingle();
   return row.read<int>('count');
+}
+
+Future<void> _waitForRemoteAlbumRowCount(
+  WidgetTester tester,
+  Drift drift,
+  String albumId,
+  int expected, {
+  required String reason,
+}) async {
+  var latest = -1;
+  final end = DateTime.now().add(const Duration(seconds: 30));
+  while (DateTime.now().isBefore(end)) {
+    latest = await _remoteAlbumRowCountById(drift, albumId);
+    if (latest == expected) {
+      return;
+    }
+    await _pumpFor(tester, const Duration(milliseconds: 500));
+  }
+
+  fail('$reason; expected $expected local album rows but saw $latest');
 }
 
 Future<int> _remoteAlbumAssetRowCountByAlbumId(Drift drift, String albumId) async {

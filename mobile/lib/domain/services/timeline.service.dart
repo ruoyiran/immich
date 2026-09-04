@@ -250,7 +250,7 @@ class TimelineService {
     _buffer = await _assetSource(start, len);
     _bufferOffset = start;
 
-    return getAssets(index, count);
+    return _getAvailableAssets(index, count);
   }
 
   bool hasRange(int index, int count) =>
@@ -264,8 +264,15 @@ class TimelineService {
     if (!hasRange(index, count)) {
       throw RangeError('TimelineService::getAssets Index out of range');
     }
+    return _getAvailableAssets(index, count);
+  }
+
+  List<BaseAsset> _getAvailableAssets(int index, int count) {
     final int start = index - _bufferOffset;
-    return _buffer.slice(start, start + count);
+    if (index < 0 || count <= 0 || start < 0 || start >= _buffer.length) {
+      return [];
+    }
+    return _buffer.slice(start, math.min(start + count, _buffer.length));
   }
 
   // Preload assets around the given index for asset viewer

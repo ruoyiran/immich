@@ -201,6 +201,7 @@ class DriftAlbumOptionsPage extends HookConsumerWidget {
     return ProviderScope(
       overrides: [currentRemoteAlbumScopedProvider.overrideWithValue(album)],
       child: Scaffold(
+        key: const Key('remote-album-options-page'),
         appBar: AppBar(
           leading: IconButton(
             icon: const Icon(Icons.arrow_back_ios_new_rounded),
@@ -214,6 +215,7 @@ class DriftAlbumOptionsPage extends HookConsumerWidget {
             const SizedBox(height: 8),
             if (isOwner)
               SwitchListTile.adaptive(
+                key: const Key('remote-album-options-activity-switch'),
                 value: activityEnabled.value,
                 onChanged: (bool value) async {
                   activityEnabled.value = value;
@@ -233,6 +235,7 @@ class DriftAlbumOptionsPage extends HookConsumerWidget {
             buildSectionTitle("shared_album_section_people_title".t(context: context)),
             if (isOwner) ...[
               ListTile(
+                key: const Key('remote-album-options-invite-people-action'),
                 leading: const Icon(Icons.person_add_rounded),
                 title: Text("invite_people".t(context: context)),
                 onTap: () async => addUsers(),
