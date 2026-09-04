@@ -19,7 +19,9 @@ class StarRatingPicker extends HookWidget {
         if (newValue == null) {
           return;
         }
-        final newFilter = SearchRatingFilter(rating: Option.some(newValue == 0 ? null : newValue));
+        final newFilter = SearchRatingFilter(
+          rating: Option.some(newValue == 0 ? null : newValue),
+        );
         selectedRating.value = newFilter;
         onSelect(newFilter);
       },
@@ -27,7 +29,7 @@ class StarRatingPicker extends HookWidget {
         children: List.generate(
           6,
           (index) => RadioListTile<int>(
-            key: Key("star_$index"),
+            key: Key("search-rating-$index"),
             title: Text('rating_count'.t(args: {'count': index})),
             value: index,
           ),
