@@ -398,6 +398,7 @@ class _QuickAccessButtonList extends ConsumerWidget {
                 onTap: () => context.pushRoute(const DriftLockedFolderRoute()),
               ),
               ListTile(
+                key: const Key('partner-route-tile'),
                 leading: const Icon(Icons.group_outlined, size: 26),
                 title: Text(
                   'partners'.t(context: context),
@@ -430,6 +431,7 @@ class _PartnerList extends StatelessWidget {
         final partner = partners[index];
         final isLastItem = index == partners.length - 1;
         return ListTile(
+          key: Key('partner-shared-with-${partner.id}'),
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.only(
               bottomLeft: Radius.circular(isLastItem ? 20 : 0),

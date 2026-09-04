@@ -33,7 +33,7 @@ class PartnerPage extends ConsumerWidget {
         title: Text(context.t.partners),
         elevation: 0,
         centerTitle: false,
-        actions: const [ActionIconButton(action: PartnerAddAction())],
+        actions: const [ActionIconButton(key: Key('partner-add-action'), action: PartnerAddAction())],
       ),
       body: sharedByAsync.when(
         data: (partners) => PartnerSharedByList(partners: partners.toList(growable: false)),
@@ -85,10 +85,12 @@ class PartnerSharedByList extends StatelessWidget {
       itemBuilder: (_, index) {
         final partner = partners[index];
         return ListTile(
+          key: Key('partner-shared-by-${partner.id}'),
           leading: PartnerUserAvatar(userId: partner.id, name: partner.name),
           title: Text(partner.name),
           subtitle: Text(partner.email),
           trailing: ActionIconButton(
+            key: Key('partner-remove-${partner.id}'),
             action: PartnerRemoveAction(sharedWithId: partner.id, partnerName: partner.name),
           ),
         );

@@ -105,6 +105,7 @@ class _InfoBoxState extends ConsumerState<_InfoBox> {
             child: Padding(
               padding: const EdgeInsets.all(8.0),
               child: ListTile(
+                key: const Key('partner-detail-info-tile'),
                 title: Text(
                   "Show in timeline",
                   style: context.textTheme.titleSmall?.copyWith(color: context.colorScheme.primary),
@@ -113,7 +114,11 @@ class _InfoBoxState extends ConsumerState<_InfoBox> {
                   "Show photos and videos from this user in your timeline",
                   style: context.textTheme.bodyMedium,
                 ),
-                trailing: Switch(value: _inTimeline, onChanged: (_) => _toggleInTimeline()),
+                trailing: Switch(
+                  key: const Key('partner-in-timeline-switch'),
+                  value: _inTimeline,
+                  onChanged: (_) => _toggleInTimeline(),
+                ),
               ),
             ),
           ),

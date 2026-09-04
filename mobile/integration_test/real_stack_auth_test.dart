@@ -55,6 +55,7 @@ import 'package:immich_mobile/pages/backup/drift_upload_detail.page.dart';
 import 'package:immich_mobile/pages/common/settings.page.dart';
 import 'package:immich_mobile/pages/library/folder/folder.page.dart';
 import 'package:immich_mobile/pages/library/locked/pin_auth.page.dart';
+import 'package:immich_mobile/pages/library/partner/partner.page.dart';
 import 'package:immich_mobile/pages/library/shared_link/shared_link.page.dart';
 import 'package:immich_mobile/pages/library/shared_link/shared_link_edit.page.dart';
 import 'package:immich_mobile/pages/login/login.page.dart';
@@ -70,6 +71,7 @@ import 'package:immich_mobile/presentation/pages/drift_library.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_local_album.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_locked_folder.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_memory.page.dart';
+import 'package:immich_mobile/presentation/pages/drift_partner_detail.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_recently_added.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_recently_taken.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_remote_album.page.dart';
@@ -187,6 +189,15 @@ const _albumSharingCollaboratorPasswordOverride = String.fromEnvironment(
   'IMMICH_E2E_ALBUM_SHARING_COLLABORATOR_PASSWORD',
 );
 const _albumSharingViewerPasswordOverride = String.fromEnvironment('IMMICH_E2E_ALBUM_SHARING_VIEWER_PASSWORD');
+const _partnerSharingId = String.fromEnvironment(
+  'IMMICH_E2E_PARTNER_SHARING_ID',
+  defaultValue: 'd5700000-0000-4000-8000-000000000057',
+);
+const _partnerSharingEmail = String.fromEnvironment(
+  'IMMICH_E2E_PARTNER_SHARING_EMAIL',
+  defaultValue: 'immich-e2e-057-partner@example.test',
+);
+const _partnerSharingPasswordOverride = String.fromEnvironment('IMMICH_E2E_PARTNER_SHARING_PASSWORD');
 const _deviceId = String.fromEnvironment('IMMICH_E2E_DEVICE_ID', defaultValue: 'immich-mobile-e2e-device');
 const _uploadAssetName = String.fromEnvironment(
   'IMMICH_E2E_UPLOAD_ASSET_NAME',
@@ -8006,6 +8017,188 @@ void main() async {
       );
     });
 
+    _realStackSessionTest('MOB-UI-057-$_caseSuffix', 'adds browses toggles and removes partner sharing', (
+      tester,
+    ) async {
+      tester.view.devicePixelRatio = 1.0;
+      tester.view.physicalSize = const Size(430, 932);
+      addTearDown(tester.view.reset);
+
+      final partnerPassword = _partnerSharingPasswordOverride.isEmpty ? _password : _partnerSharingPasswordOverride;
+
+      await _loadAuthenticatedApp(tester, overrideCancellation: true, closeDriftOnDispose: false);
+      var container = _containerOfApp(tester);
+      final owner = container.read(currentUserProvider);
+      expect(owner, isNotNull);
+      final ownerId = owner!.id;
+      final ownerName = owner.name;
+      final ownerToken = Store.get(StoreKey.accessToken);
+      final partnerToken = await _loginForAccessToken(_partnerSharingEmail, partnerPassword);
+      addTearDown(() async {
+        await _deletePartnerBestEffortWithToken(_partnerSharingId, ownerToken);
+        await _deletePartnerBestEffortWithToken(ownerId, partnerToken);
+      });
+
+      await _deletePartnerBestEffortWithToken(_partnerSharingId, ownerToken);
+      await _deletePartnerBestEffortWithToken(ownerId, partnerToken);
+
+      await _resetAndSyncRemoteState(tester, container);
+      var drift = container.read(driftProvider);
+      await _waitForUserRow(
+        tester,
+        drift,
+        _partnerSharingId,
+        reason: 'Expected the 057 partner test account to sync before opening the candidate picker',
+      );
+      await _waitForPartnerMissing(
+        tester,
+        drift,
+        ownerId,
+        _partnerSharingId,
+        reason: 'Expected 057 to start without a stale owner-to-partner local relation',
+      );
+
+      var router = container.read(appRouterProvider);
+      unawaited(router.push(const PartnerRoute()));
+      await pumpUntilFound(tester, find.byType(PartnerPage), timeout: const Duration(seconds: 30));
+      await _tapHitTestableFinder(tester, find.byKey(const Key('partner-add-action')));
+      await _tapHitTestableFinder(tester, find.byKey(const Key('partner-candidate-$_partnerSharingId')));
+      await _waitForPartnerRowState(
+        tester,
+        drift,
+        ownerId,
+        _partnerSharingId,
+        expectedInTimeline: false,
+        reason: 'Expected the 057 owner app to persist the new partner share locally',
+      );
+      await pumpUntilFound(
+        tester,
+        find.byKey(const Key('partner-shared-by-$_partnerSharingId')),
+        timeout: const Duration(seconds: 30),
+      );
+
+      final sharedByEntry = await _waitForPartnerListEntry(
+        tester,
+        accessToken: ownerToken,
+        direction: 'shared-by',
+        partnerId: _partnerSharingId,
+        reason: 'Expected the 057 owner API list to include the selected partner',
+      );
+      expect(sharedByEntry['email'], _partnerSharingEmail);
+      await _waitForPartnerListEntry(
+        tester,
+        accessToken: partnerToken,
+        direction: 'shared-with',
+        partnerId: ownerId,
+        reason: 'Expected the 057 partner API list to include the owner after sharing',
+      );
+
+      container = await _restartAuthenticatedApp(tester, email: _partnerSharingEmail, password: partnerPassword);
+      await _resetAndSyncRemoteState(tester, container);
+      drift = container.read(driftProvider);
+      await _waitForPartnerRowState(
+        tester,
+        drift,
+        ownerId,
+        _partnerSharingId,
+        expectedInTimeline: false,
+        reason: 'Expected the 057 partner app to sync the incoming share before opening details',
+      );
+      router = container.read(appRouterProvider);
+      unawaited(router.push(const TabShellRoute(children: [DriftLibraryRoute()])));
+      await pumpUntilFound(tester, find.byType(DriftLibraryPage), timeout: const Duration(seconds: 30));
+      await _ensureKeyVisibleInPage(tester, DriftLibraryPage, Key('partner-shared-with-$ownerId'));
+      await _tapHitTestableFinder(tester, find.byKey(Key('partner-shared-with-$ownerId')));
+      await pumpUntilFound(tester, find.byType(DriftPartnerDetailPage), timeout: const Duration(seconds: 30));
+      await pumpUntilFound(tester, find.text(ownerName), timeout: const Duration(seconds: 30));
+      await _exerciseTimelineUiPagination(tester);
+
+      final inTimelineSwitch = find.byKey(const Key('partner-in-timeline-switch'));
+      await pumpUntilFound(tester, inTimelineSwitch, timeout: const Duration(seconds: 30));
+      expect(tester.widget<Switch>(inTimelineSwitch.last).value, isFalse);
+      await _tapHitTestableFinder(tester, inTimelineSwitch);
+      await _waitForPartnerRowState(
+        tester,
+        drift,
+        ownerId,
+        _partnerSharingId,
+        expectedInTimeline: true,
+        reason: 'Expected the 057 partner app to persist the visible range toggle locally',
+      );
+      final updatedPartnerEntry = await _waitForPartnerListEntry(
+        tester,
+        accessToken: partnerToken,
+        direction: 'shared-with',
+        partnerId: ownerId,
+        reason: 'Expected the 057 partner API list to reflect the visible range toggle',
+      );
+      expect(updatedPartnerEntry['inTimeline'], isTrue);
+
+      container = await _restartAuthenticatedApp(tester, email: _email, password: _password);
+      await _resetAndSyncRemoteState(tester, container);
+      drift = container.read(driftProvider);
+      router = container.read(appRouterProvider);
+      unawaited(router.push(const PartnerRoute()));
+      await pumpUntilFound(tester, find.byType(PartnerPage), timeout: const Duration(seconds: 30));
+      await pumpUntilFound(
+        tester,
+        find.byKey(const Key('partner-shared-by-$_partnerSharingId')),
+        timeout: const Duration(seconds: 30),
+      );
+      await _tapHitTestableFinder(tester, find.byKey(const Key('partner-remove-$_partnerSharingId')));
+      await pumpUntilFound(tester, find.byType(ConfirmDialog), timeout: const Duration(seconds: 30));
+      await tester.tap(find.descendant(of: find.byType(ConfirmDialog), matching: find.byType(TextButton)).last);
+      await _waitForPartnerMissing(
+        tester,
+        drift,
+        ownerId,
+        _partnerSharingId,
+        reason: 'Expected the 057 owner app to remove the partner relation after confirmation',
+      );
+      await _waitForPartnerListMissing(
+        tester,
+        accessToken: ownerToken,
+        direction: 'shared-by',
+        partnerId: _partnerSharingId,
+        reason: 'Expected the 057 owner API list to drop the removed partner',
+      );
+
+      container = await _restartAuthenticatedApp(tester, email: _partnerSharingEmail, password: partnerPassword);
+      await _resetAndSyncRemoteState(tester, container);
+      drift = container.read(driftProvider);
+      await _waitForPartnerMissing(
+        tester,
+        drift,
+        ownerId,
+        _partnerSharingId,
+        reason: 'Expected the 057 partner app to drop the incoming share after refresh',
+      );
+      await _waitForPartnerListMissing(
+        tester,
+        accessToken: partnerToken,
+        direction: 'shared-with',
+        partnerId: ownerId,
+        reason: 'Expected the 057 partner API list to drop the owner after removal',
+      );
+      await _waitForRejectedResponse(
+        tester,
+        () => _authenticatedApiRequest(
+          'PUT',
+          '/partners/$ownerId',
+          accessToken: partnerToken,
+          jsonBody: {'inTimeline': false},
+        ),
+        acceptedStatusCodes: const {404},
+        reason: 'Expected the 057 removed partner to lose update permission without stale cache access',
+      );
+
+      router = container.read(appRouterProvider);
+      unawaited(router.push(const TabShellRoute(children: [DriftLibraryRoute()])));
+      await pumpUntilFound(tester, find.byType(DriftLibraryPage), timeout: const Duration(seconds: 30));
+      await _pumpFor(tester, const Duration(milliseconds: 500));
+      expect(find.byKey(Key('partner-shared-with-$ownerId')), findsNothing);
+    });
+
     if (_selectedCaseId.isNotEmpty && !_registeredSelectedCase) {
       test(_selectedCaseId, () => fail('No real stack auth test registered for $_selectedCaseId'));
     }
@@ -12010,6 +12203,173 @@ Future<void> _waitForSharedLinkDeleted(
   }
 
   fail('$reason; latest shared-link count=$latestCount last error=$lastError');
+}
+
+Future<Map<String, dynamic>> _waitForPartnerListEntry(
+  WidgetTester tester, {
+  required String accessToken,
+  required String direction,
+  required String partnerId,
+  required String reason,
+}) async {
+  List<Map<String, dynamic>> latest = const [];
+  Object? lastError;
+  final end = DateTime.now().add(const Duration(seconds: 60));
+  while (DateTime.now().isBefore(end)) {
+    try {
+      final response = await _authenticatedApiRequest(
+        'GET',
+        '/partners?direction=$direction',
+        accessToken: accessToken,
+      );
+      if (response.statusCode == 200) {
+        latest = (jsonDecode(response.body) as List<dynamic>).cast<Map<String, dynamic>>();
+        for (final partner in latest) {
+          if (partner['id'] == partnerId) {
+            return partner;
+          }
+        }
+      } else {
+        lastError = 'status=${response.statusCode} body=${response.body}';
+      }
+    } catch (error) {
+      lastError = error;
+    }
+    await _pumpFor(tester, const Duration(milliseconds: 500));
+  }
+
+  fail('$reason; latest partners=$latest last error=$lastError');
+}
+
+Future<void> _waitForPartnerListMissing(
+  WidgetTester tester, {
+  required String accessToken,
+  required String direction,
+  required String partnerId,
+  required String reason,
+}) async {
+  List<Map<String, dynamic>> latest = const [];
+  Object? lastError;
+  final end = DateTime.now().add(const Duration(seconds: 60));
+  while (DateTime.now().isBefore(end)) {
+    try {
+      final response = await _authenticatedApiRequest(
+        'GET',
+        '/partners?direction=$direction',
+        accessToken: accessToken,
+      );
+      if (response.statusCode == 200) {
+        latest = (jsonDecode(response.body) as List<dynamic>).cast<Map<String, dynamic>>();
+        if (!latest.any((partner) => partner['id'] == partnerId)) {
+          return;
+        }
+      } else {
+        lastError = 'status=${response.statusCode} body=${response.body}';
+      }
+    } catch (error) {
+      lastError = error;
+    }
+    await _pumpFor(tester, const Duration(milliseconds: 500));
+  }
+
+  fail('$reason; latest partners=$latest last error=$lastError');
+}
+
+Future<void> _deletePartnerBestEffortWithToken(String sharedWithId, String accessToken) async {
+  try {
+    await _authenticatedApiRequest('DELETE', '/partners/$sharedWithId', accessToken: accessToken);
+  } catch (_) {
+    // Best-effort cleanup for a test-created partner relation.
+  }
+}
+
+Future<void> _waitForUserRow(
+  WidgetTester tester,
+  Drift drift,
+  String userId, {
+  required String reason,
+}) async {
+  var latestCount = 0;
+  final end = DateTime.now().add(const Duration(seconds: 60));
+  while (DateTime.now().isBefore(end)) {
+    latestCount = await _rowCountWhere(
+      drift,
+      'user_entity',
+      'id = ?',
+      [Variable.withString(userId)],
+    );
+    if (latestCount > 0) {
+      return;
+    }
+    await _pumpFor(tester, const Duration(milliseconds: 500));
+  }
+
+  fail('$reason; latest user row count=$latestCount');
+}
+
+Future<void> _waitForPartnerRowState(
+  WidgetTester tester,
+  Drift drift,
+  String sharedById,
+  String sharedWithId, {
+  required bool expectedInTimeline,
+  required String reason,
+}) async {
+  bool? latest;
+  final end = DateTime.now().add(const Duration(seconds: 60));
+  while (DateTime.now().isBefore(end)) {
+    latest = await _partnerInTimeline(drift, sharedById: sharedById, sharedWithId: sharedWithId);
+    if (latest == expectedInTimeline) {
+      return;
+    }
+    await _pumpFor(tester, const Duration(milliseconds: 500));
+  }
+
+  fail('$reason; latest inTimeline=$latest expected=$expectedInTimeline');
+}
+
+Future<void> _waitForPartnerMissing(
+  WidgetTester tester,
+  Drift drift,
+  String sharedById,
+  String sharedWithId, {
+  required String reason,
+}) async {
+  bool? latest;
+  final end = DateTime.now().add(const Duration(seconds: 60));
+  while (DateTime.now().isBefore(end)) {
+    latest = await _partnerInTimeline(drift, sharedById: sharedById, sharedWithId: sharedWithId);
+    if (latest == null) {
+      return;
+    }
+    await _pumpFor(tester, const Duration(milliseconds: 500));
+  }
+
+  fail('$reason; latest inTimeline=$latest');
+}
+
+Future<bool?> _partnerInTimeline(Drift drift, {required String sharedById, required String sharedWithId}) async {
+  final rows = await drift
+      .customSelect(
+        '''
+SELECT CASE WHEN in_timeline THEN 1 ELSE 0 END AS in_timeline_value
+FROM partner_entity
+WHERE shared_by_id = ? AND shared_with_id = ?
+''',
+        variables: [Variable.withString(sharedById), Variable.withString(sharedWithId)],
+      )
+      .get();
+  if (rows.isEmpty) {
+    return null;
+  }
+  return rows.single.read<int>('in_timeline_value') != 0;
+}
+
+Future<int> _rowCountWhere(Drift drift, String table, String where, List<Variable> variables) async {
+  final row = await drift
+      .customSelect('SELECT COUNT(*) AS count FROM $table WHERE $where', variables: variables)
+      .getSingle();
+  return row.read<int>('count');
 }
 
 String _sharedLinkLookupQuery(SharedLink link) {

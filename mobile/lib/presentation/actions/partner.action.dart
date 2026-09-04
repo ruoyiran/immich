@@ -95,6 +95,7 @@ class PartnerSelectionDialog extends ConsumerWidget {
           return [
             for (final candidate in users)
               SimpleDialogOption(
+                key: Key('partner-candidate-${candidate.id}'),
                 onPressed: () => Navigator.of(context).pop(candidate),
                 child: Row(
                   children: [
