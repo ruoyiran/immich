@@ -55,6 +55,7 @@ import 'package:immich_mobile/pages/backup/drift_backup_album_selection.page.dar
 import 'package:immich_mobile/pages/backup/drift_backup_asset_detail.page.dart';
 import 'package:immich_mobile/pages/backup/drift_backup_options.page.dart';
 import 'package:immich_mobile/pages/backup/drift_upload_detail.page.dart';
+import 'package:immich_mobile/pages/common/app_log.page.dart';
 import 'package:immich_mobile/pages/common/headers_settings.page.dart';
 import 'package:immich_mobile/pages/common/settings.page.dart';
 import 'package:immich_mobile/pages/library/folder/folder.page.dart';
@@ -65,13 +66,18 @@ import 'package:immich_mobile/pages/library/shared_link/shared_link_edit.page.da
 import 'package:immich_mobile/pages/login/change_password.page.dart';
 import 'package:immich_mobile/pages/login/login.page.dart';
 import 'package:immich_mobile/pages/search/map/map_location_picker.page.dart';
+import 'package:immich_mobile/pages/settings/sync_status.page.dart';
 import 'package:immich_mobile/pages/share_intent/share_intent.page.dart';
+import 'package:immich_mobile/presentation/pages/cleanup_preview.page.dart';
 import 'package:immich_mobile/presentation/pages/dev/main_timeline.page.dart';
+import 'package:immich_mobile/presentation/pages/dev/media_stat.page.dart';
+import 'package:immich_mobile/presentation/pages/download_info.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_activities.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_album.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_album_options.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_archive.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_asset_selection_timeline.page.dart';
+import 'package:immich_mobile/presentation/pages/drift_asset_troubleshoot.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_favorite.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_library.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_local_album.page.dart';
@@ -91,6 +97,7 @@ import 'package:immich_mobile/presentation/pages/drift_trash.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_video.page.dart';
 import 'package:immich_mobile/presentation/pages/edit/drift_edit.page.dart';
 import 'package:immich_mobile/presentation/pages/edit/editor.provider.dart';
+import 'package:immich_mobile/presentation/pages/feature_message/whats_new.page.dart';
 import 'package:immich_mobile/presentation/pages/local_timeline.page.dart';
 import 'package:immich_mobile/presentation/pages/profile/profile_picture_crop.page.dart';
 import 'package:immich_mobile/presentation/pages/search/drift_search.page.dart';
@@ -173,9 +180,11 @@ import 'package:immich_mobile/widgets/common/selection_sliver_app_bar.dart';
 import 'package:immich_mobile/widgets/forms/change_password_form.dart';
 import 'package:immich_mobile/widgets/photo_view/photo_view.dart';
 import 'package:immich_mobile/widgets/settings/asset_viewer_settings/slideshow_settings.dart';
+import 'package:immich_mobile/widgets/settings/beta_sync_settings/sync_status_and_actions.dart';
 import 'package:immich_mobile/widgets/settings/setting_list_tile.dart';
 import 'package:local_auth/local_auth.dart'
     show BiometricType, LocalAuthentication;
+import 'package:logging/logging.dart' show Logger;
 import 'package:maplibre_gl/maplibre_gl.dart' show LatLng, LatLngBounds;
 import 'package:openapi/api.dart' as api;
 import 'package:path_provider/path_provider.dart';
@@ -13545,6 +13554,314 @@ void main() async {
       expect(Store.get(StoreKey.enableHapticFeedback, true), isTrue);
       expect(container.read(apiServiceProvider).apiClient.basePath, _apiEndpoint(_serverUrl));
     });
+
+    _realStackSessionTest(
+      'MOB-UI-064-$_caseSuffix',
+      'opens sync maintenance diagnostics without destructive side effects',
+      (tester) async {
+        tester.view.devicePixelRatio = 1.0;
+        tester.view.physicalSize = const Size(430, 932);
+        addTearDown(tester.view.reset);
+
+        await _loadAuthenticatedApp(
+          tester,
+          overrideCancellation: true,
+          closeDriftOnDispose: false,
+          resetSyncAcksBeforeStart: true,
+        );
+        final container = _containerOfApp(tester);
+        final router = container.read(appRouterProvider);
+        final apiService = container.read(apiServiceProvider);
+        final assetsApi = apiService.assetsApi;
+        final downloadService = container.read(downloadServiceProvider);
+        final downloadRepository = container.read(downloadRepositoryProvider);
+        final downloadUpdates = <TaskStatusUpdate>[];
+        final createdRemoteAssetIds = <String>[];
+        final createdLocalAssetIds = <String>{};
+
+        downloadService.onImageDownloadStatus = downloadUpdates.add;
+        addTearDown(() async {
+          downloadService.onImageDownloadStatus = null;
+          for (final assetId in createdRemoteAssetIds) {
+            await _deleteTestAssetBestEffort(assetsApi, assetId);
+          }
+        });
+
+        await _resetAndSyncRemoteState(tester, container);
+
+        final now = DateTime.now().toUtc();
+        final runToken = now.microsecondsSinceEpoch.toString();
+        final remoteName = 'immich-e2e-maintenance-064-remote-$runToken.jpg';
+        final localName = 'immich-e2e-maintenance-064-local-$runToken.jpg';
+        final remoteId = await _uploadGeneratedJpegAsSecondClient(
+          remoteName,
+          now,
+          sourceMetadata: const {
+            'width': 128,
+            'height': 96,
+            'device_make': 'ImmichE2E064',
+            'device_model': 'Maintenance',
+          },
+        );
+        createdRemoteAssetIds.add(remoteId);
+        await _waitForSuccessfulResponse(
+          tester,
+          () => _authenticatedApiGet(
+            '/assets/$remoteId/thumbnail?size=thumbnail&edited=false&c=$runToken',
+          ),
+          timeout: const Duration(minutes: 3),
+        );
+
+        final createdLocal = await _saveLocalTestImage(
+          container,
+          createdLocalAssetIds,
+          title: localName,
+          relativePath: 'Pictures/ImmichE2E064',
+          seed: runToken.hashCode,
+        );
+        await container.read(backgroundSyncProvider).syncLocal(full: true);
+        final localOnly = await _waitForLocalAssetByName(
+          container,
+          localName,
+          tester,
+        );
+        expect(localOnly.id, createdLocal.id);
+        expect(localOnly.isLocalOnly, isTrue);
+
+        await _resetAndSyncRemoteState(tester, container);
+        final remoteAsset = await _waitForRemoteAssetState(
+          tester,
+          container,
+          remoteId,
+          (asset) => asset.isRemoteOnly,
+          reason:
+              'Expected the 064 diagnostic image to sync as remote-only before download',
+        );
+
+        final assetCounts = await container
+            .read(assetServiceProvider)
+            .getAssetCounts();
+        expect(
+          assetCounts.$1,
+          greaterThanOrEqualTo(1),
+          reason: 'Expected local sync diagnostics to see local assets',
+        );
+        expect(
+          assetCounts.$2,
+          greaterThanOrEqualTo(1),
+          reason: 'Expected remote sync diagnostics to see remote assets',
+        );
+
+        unawaited(router.push(const SyncStatusRoute()));
+        await _pumpUntilFoundWithReason(
+          tester,
+          find.byType(SyncStatusPage),
+          reason: 'Expected 064 sync status page to open',
+          timeout: const Duration(seconds: 30),
+        );
+        await _pumpUntilFoundWithReason(
+          tester,
+          find.byType(SyncStatusAndActions),
+          reason: 'Expected 064 sync status actions to render',
+          timeout: const Duration(seconds: 30),
+        );
+        await _tapTextEntryInPage(
+          tester,
+          pageType: SyncStatusPage,
+          label: 'sync_local'.tr(),
+        );
+        await _tapTextEntryInPage(
+          tester,
+          pageType: SyncStatusPage,
+          label: 'sync_remote'.tr(),
+        );
+        expect(tester.takeException(), isNull);
+        await _popUntilVisible(tester, MainTimelinePage);
+
+        unawaited(router.push(const LocalMediaSummaryRoute()));
+        await _pumpUntilFoundWithReason(
+          tester,
+          find.byType(LocalMediaSummaryPage),
+          reason: 'Expected 064 local media summary page to open',
+          timeout: const Duration(seconds: 30),
+        );
+        await _pumpUntilFoundWithReason(
+          tester,
+          find.text('Local Assets'),
+          reason: 'Expected 064 local media summary to expose asset counts',
+          timeout: const Duration(seconds: 30),
+        );
+        await _pumpUntilFoundWithReason(
+          tester,
+          find.text('Local Albums'),
+          reason: 'Expected 064 local media summary to expose album counts',
+          timeout: const Duration(seconds: 30),
+        );
+        await _popUntilVisible(tester, MainTimelinePage);
+
+        unawaited(router.push(const RemoteMediaSummaryRoute()));
+        await _pumpUntilFoundWithReason(
+          tester,
+          find.byType(RemoteMediaSummaryPage),
+          reason: 'Expected 064 remote media summary page to open',
+          timeout: const Duration(seconds: 30),
+        );
+        await _pumpUntilFoundWithReason(
+          tester,
+          find.text('Remote Assets'),
+          reason: 'Expected 064 remote media summary to expose asset counts',
+          timeout: const Duration(seconds: 30),
+        );
+        await _pumpUntilFoundWithReason(
+          tester,
+          find.text('Exif Entities'),
+          reason: 'Expected 064 remote media summary to expose exif counts',
+          timeout: const Duration(seconds: 30),
+        );
+        await _popUntilVisible(tester, MainTimelinePage);
+
+        unawaited(router.push(CleanupPreviewRoute(assets: [localOnly])));
+        await _pumpUntilFoundWithReason(
+          tester,
+          find.byType(CleanupPreviewPage),
+          reason: 'Expected 064 cleanup preview page to open',
+          timeout: const Duration(seconds: 30),
+        );
+        await _pumpUntilFoundWithReason(
+          tester,
+          find.byType(Timeline),
+          reason: 'Expected 064 cleanup preview to render a read-only timeline',
+          timeout: const Duration(seconds: 30),
+        );
+        await _pumpUntilFoundWithReason(
+          tester,
+          _timelineAssetTileForAssetId(localOnly.id),
+          reason: 'Expected 064 cleanup preview to show the local-only asset',
+          timeout: const Duration(seconds: 30),
+        );
+        await _popUntilVisible(tester, MainTimelinePage);
+        final retainedLocal = await _waitForLocalAssetByName(
+          container,
+          localName,
+          tester,
+        );
+        expect(
+          retainedLocal.id,
+          localOnly.id,
+          reason: 'Cleanup preview must not delete media without confirmation',
+        );
+
+        await downloadRepository.deleteRecordsWithIds([remoteAsset.id]);
+        final acceptedDownloads = await downloadRepository.downloadAllAssets([
+          remoteAsset,
+        ]);
+        expect(
+          acceptedDownloads,
+          equals([true]),
+          reason: 'Expected 064 remote diagnostic image download to enqueue',
+        );
+        final downloadRecord = await _waitForDownloadRecordStatus(
+          tester,
+          remoteAsset.id,
+          TaskStatus.complete,
+          reason: 'Expected 064 diagnostic image download to complete',
+        );
+        expect(downloadRecord.group, kDownloadGroupImage);
+        expect(downloadRecord.task.filename, remoteAsset.name);
+        await _waitForDownloadUpdateCount(
+          tester,
+          downloadUpdates,
+          remoteAsset.id,
+          TaskStatus.complete,
+          1,
+          reason:
+              'Expected 064 download service to emit a completed image update',
+        );
+        final downloadedLocal = await _waitForLocalAssetByName(
+          container,
+          remoteAsset.name,
+          tester,
+        );
+        createdLocalAssetIds.add(downloadedLocal.id);
+        expect(downloadedLocal.hasLocal, isTrue);
+
+        unawaited(router.push(const DownloadInfoRoute()));
+        await _pumpUntilFoundWithReason(
+          tester,
+          find.byType(DownloadInfoPage),
+          reason: 'Expected 064 download info page to open',
+          timeout: const Duration(seconds: 30),
+        );
+        await _pumpUntilFoundWithReason(
+          tester,
+          find.text('clear_all'.tr()),
+          reason: 'Expected 064 download info clear-all control to render',
+          timeout: const Duration(seconds: 30),
+        );
+        await _popUntilVisible(tester, MainTimelinePage);
+
+        final logMessage = 'MOB-UI-064 diagnostic log $runToken';
+        Logger('MOB-UI-064').warning(logMessage);
+        expect(
+          logMessage.contains(_password),
+          isFalse,
+          reason:
+              'Expected the 064 diagnostic log message to avoid the current test credential',
+        );
+        unawaited(router.push(const AppLogRoute()));
+        await _pumpUntilFoundWithReason(
+          tester,
+          find.byType(AppLogPage),
+          reason: 'Expected 064 app log page to open',
+          timeout: const Duration(seconds: 30),
+        );
+        await _pumpUntilFoundWithReason(
+          tester,
+          find.byIcon(Icons.delete_outline_rounded),
+          reason: 'Expected 064 app log page controls to render',
+          timeout: const Duration(seconds: 30),
+        );
+        await _popUntilVisible(tester, MainTimelinePage);
+
+        unawaited(router.push(AssetTroubleshootRoute(asset: remoteAsset)));
+        await _pumpUntilFoundWithReason(
+          tester,
+          find.byType(AssetTroubleshootPage),
+          reason: 'Expected 064 asset troubleshoot page to open',
+          timeout: const Duration(seconds: 30),
+        );
+        await _pumpUntilFoundWithReason(
+          tester,
+          find.text(remoteAsset.name),
+          reason:
+              'Expected 064 asset troubleshoot page to render asset metadata',
+          timeout: const Duration(seconds: 30),
+        );
+        await _pumpUntilFoundWithReason(
+          tester,
+          find.text('matching_assets'.tr()),
+          reason:
+              'Expected 064 asset troubleshoot page to render matching assets',
+          timeout: const Duration(seconds: 30),
+        );
+        await _popUntilVisible(tester, MainTimelinePage);
+
+        unawaited(router.push(const WhatsNewRoute()));
+        await _pumpUntilFoundWithReason(
+          tester,
+          find.byType(WhatsNewPage),
+          reason: 'Expected 064 whats-new page to open',
+          timeout: const Duration(seconds: 30),
+        );
+        await _pumpUntilFoundWithReason(
+          tester,
+          find.byType(ListView),
+          reason: 'Expected 064 whats-new page to render its highlight list',
+          timeout: const Duration(seconds: 30),
+        );
+        expect(tester.takeException(), isNull);
+      },
+    );
 
     if (_selectedCaseId.isNotEmpty && !_registeredSelectedCase) {
       test(
