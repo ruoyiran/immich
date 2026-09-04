@@ -41,6 +41,8 @@ import 'package:immich_mobile/infrastructure/repositories/settings.repository.da
 import 'package:immich_mobile/infrastructure/repositories/storage.repository.dart';
 import 'package:immich_mobile/main.dart' as app;
 import 'package:immich_mobile/models/auth/biometric_status.model.dart';
+import 'package:immich_mobile/models/folder/recursive_folder.model.dart';
+import 'package:immich_mobile/models/folder/root_folder.model.dart';
 import 'package:immich_mobile/models/search/search_filter.model.dart';
 import 'package:immich_mobile/models/upload/share_intent_attachment.model.dart';
 import 'package:immich_mobile/pages/backup/drift_backup.page.dart';
@@ -48,6 +50,7 @@ import 'package:immich_mobile/pages/backup/drift_backup_album_selection.page.dar
 import 'package:immich_mobile/pages/backup/drift_backup_asset_detail.page.dart';
 import 'package:immich_mobile/pages/backup/drift_backup_options.page.dart';
 import 'package:immich_mobile/pages/backup/drift_upload_detail.page.dart';
+import 'package:immich_mobile/pages/library/folder/folder.page.dart';
 import 'package:immich_mobile/pages/library/locked/pin_auth.page.dart';
 import 'package:immich_mobile/pages/login/login.page.dart';
 import 'package:immich_mobile/pages/share_intent/share_intent.page.dart';
@@ -57,6 +60,7 @@ import 'package:immich_mobile/presentation/pages/drift_archive.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_asset_selection_timeline.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_favorite.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_library.page.dart';
+import 'package:immich_mobile/presentation/pages/drift_local_album.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_locked_folder.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_recently_added.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_recently_taken.page.dart';
@@ -65,6 +69,7 @@ import 'package:immich_mobile/presentation/pages/drift_trash.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_video.page.dart';
 import 'package:immich_mobile/presentation/pages/edit/drift_edit.page.dart';
 import 'package:immich_mobile/presentation/pages/edit/editor.provider.dart';
+import 'package:immich_mobile/presentation/pages/local_timeline.page.dart';
 import 'package:immich_mobile/presentation/pages/search/drift_search.page.dart';
 import 'package:immich_mobile/presentation/pages/search/paginated_search.provider.dart';
 import 'package:immich_mobile/presentation/widgets/album/album_selector.widget.dart';
@@ -92,6 +97,7 @@ import 'package:immich_mobile/providers/asset_viewer/video_player_provider.dart'
 import 'package:immich_mobile/providers/background_sync.provider.dart';
 import 'package:immich_mobile/providers/backup/backup_album.provider.dart';
 import 'package:immich_mobile/providers/backup/drift_backup.provider.dart';
+import 'package:immich_mobile/providers/folder.provider.dart';
 import 'package:immich_mobile/providers/gallery_permission.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/action.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/album.provider.dart';
@@ -6242,7 +6248,239 @@ void main() async {
       );
     });
 
-    _realStackSessionTest('MOB-UI-050-$_caseSuffix', 'opens library shortcut collections with isolated populated and empty states', (
+    _realStackSessionTest(
+      'MOB-UI-050-$_caseSuffix',
+      'opens library shortcut collections with isolated populated and empty states',
+      (tester) async {
+        tester.view.devicePixelRatio = 1.0;
+        tester.view.physicalSize = const Size(430, 932);
+        addTearDown(tester.view.reset);
+
+        await _loadAuthenticatedApp(tester, overrideCancellation: true, closeDriftOnDispose: false);
+        final container = _containerOfApp(tester);
+        final assetsApi = container.read(apiServiceProvider).assetsApi;
+        final router = container.read(appRouterProvider);
+        final createdRemoteAssetIds = <String>[];
+        final user = Store.tryGet(StoreKey.currentUser);
+        expect(user, isNotNull);
+
+        addTearDown(() async {
+          for (final assetId in createdRemoteAssetIds) {
+            await _deleteTestAssetBestEffort(assetsApi, assetId);
+          }
+        });
+
+        await container.read(syncApiRepositoryProvider).deleteSyncAck(_allReplayableSyncAckTypes);
+        await Store.delete(StoreKey.syncMigrationStatus);
+        await container.read(syncStreamRepositoryProvider).reset();
+        final baselineSyncSuccess = await container.read(syncStreamServiceProvider).sync();
+        expect(baselineSyncSuccess, isTrue);
+        if (Store.tryGet(StoreKey.currentUser) == null) {
+          await Store.put(StoreKey.currentUser, user!);
+        }
+
+        final runToken = DateTime.now().toUtc().microsecondsSinceEpoch.toString();
+        final baseCreatedAt = DateTime.now().toUtc().add(const Duration(days: 3650));
+        final olderTimelineId = await _uploadGeneratedJpegAsSecondClient(
+          'immich-e2e-library-shortcuts-050-older-$runToken.jpg',
+          baseCreatedAt,
+        );
+        createdRemoteAssetIds.add(olderTimelineId);
+        final favoriteId = await _uploadGeneratedJpegAsSecondClient(
+          'immich-e2e-library-shortcuts-050-favorite-$runToken.jpg',
+          baseCreatedAt.add(const Duration(minutes: 1)),
+          isFavorite: true,
+        );
+        createdRemoteAssetIds.add(favoriteId);
+        final archiveId = await _uploadGeneratedJpegAsSecondClient(
+          'immich-e2e-library-shortcuts-050-archive-$runToken.jpg',
+          baseCreatedAt.add(const Duration(minutes: 2)),
+          visibility: api.AssetVisibility.archive,
+        );
+        createdRemoteAssetIds.add(archiveId);
+        final videoId = await _uploadGeneratedMp4AsSecondClient(
+          'immich-e2e-library-shortcuts-050-video-$runToken.mp4',
+          baseCreatedAt.add(const Duration(minutes: 3)),
+        );
+        createdRemoteAssetIds.add(videoId);
+        final newestTimelineId = await _uploadGeneratedJpegAsSecondClient(
+          'immich-e2e-library-shortcuts-050-newest-$runToken.jpg',
+          baseCreatedAt.add(const Duration(minutes: 4)),
+        );
+        createdRemoteAssetIds.add(newestTimelineId);
+
+        final uploadSyncSuccess = await container.read(syncStreamServiceProvider).sync();
+        expect(uploadSyncSuccess, isTrue);
+        await _waitForRemoteAssetState(
+          tester,
+          container,
+          olderTimelineId,
+          (asset) => asset.visibility == AssetVisibility.timeline && !asset.isFavorite && !asset.isTrashed,
+          reason: 'Expected the 050 older control asset to sync as a normal timeline asset',
+        );
+        await _waitForRemoteAssetState(
+          tester,
+          container,
+          favoriteId,
+          (asset) => asset.visibility == AssetVisibility.timeline && asset.isFavorite && !asset.isTrashed,
+          reason: 'Expected the 050 favorite fixture to sync as a favorite timeline asset',
+        );
+        await _waitForRemoteAssetState(
+          tester,
+          container,
+          archiveId,
+          (asset) => asset.visibility == AssetVisibility.archive && !asset.isTrashed,
+          reason: 'Expected the 050 archive fixture to sync as an archived asset',
+        );
+        await _waitForRemoteAssetState(
+          tester,
+          container,
+          videoId,
+          (asset) => asset.visibility == AssetVisibility.timeline && asset.isVideo && !asset.isTrashed,
+          reason: 'Expected the 050 video fixture to sync as a video timeline asset',
+        );
+        await _waitForRemoteAssetState(
+          tester,
+          container,
+          newestTimelineId,
+          (asset) => asset.visibility == AssetVisibility.timeline && !asset.isFavorite && !asset.isTrashed,
+          reason: 'Expected the 050 newest control asset to sync as a normal timeline asset',
+        );
+
+        final timelineFactory = container.read(timelineFactoryProvider);
+        final mainTimeline = timelineFactory.main([user!.id]);
+        final favoriteTimeline = timelineFactory.favorite(user.id);
+        final archiveTimeline = timelineFactory.archive(user.id);
+        final videoTimeline = timelineFactory.video(user.id);
+        final recentlyAddedTimeline = timelineFactory.recentlyAdded(user.id);
+        final recentlyTakenTimeline = timelineFactory.remoteAssets(user.id);
+        final emptyTimeline = timelineFactory.fromAssets(const <BaseAsset>[], TimelineOrigin.favorite);
+        addTearDown(mainTimeline.dispose);
+        addTearDown(favoriteTimeline.dispose);
+        addTearDown(archiveTimeline.dispose);
+        addTearDown(videoTimeline.dispose);
+        addTearDown(recentlyAddedTimeline.dispose);
+        addTearDown(recentlyTakenTimeline.dispose);
+        addTearDown(emptyTimeline.dispose);
+
+        await _expectTimelineAssetSet(
+          tester,
+          mainTimeline,
+          includes: {olderTimelineId, favoriteId, videoId, newestTimelineId},
+          excludes: {archiveId},
+          reason: 'Main timeline should include only unarchived 050 shortcut assets',
+        );
+        final favoriteAssets = await _expectTimelineAssetSet(
+          tester,
+          favoriteTimeline,
+          includes: {favoriteId},
+          excludes: {olderTimelineId, archiveId, videoId, newestTimelineId},
+          reason: 'Favorite shortcut should include only the favorited 050 asset',
+        );
+        final archiveAssets = await _expectTimelineAssetSet(
+          tester,
+          archiveTimeline,
+          includes: {archiveId},
+          excludes: {olderTimelineId, favoriteId, videoId, newestTimelineId},
+          reason: 'Archive shortcut should include only the archived 050 asset',
+        );
+        final videoAssets = await _expectTimelineAssetSet(
+          tester,
+          videoTimeline,
+          includes: {videoId},
+          excludes: {olderTimelineId, favoriteId, archiveId, newestTimelineId},
+          reason: 'Video shortcut should include only the 050 video asset',
+        );
+        await _expectTimelineAssetSet(
+          tester,
+          recentlyAddedTimeline,
+          includes: {olderTimelineId, favoriteId, archiveId, videoId, newestTimelineId},
+          excludes: const {},
+          reason: 'Recently added shortcut should include every non-trashed 050 fixture',
+        );
+        final recentlyTakenAssets = await _expectTimelineAssetSet(
+          tester,
+          recentlyTakenTimeline,
+          includes: {olderTimelineId, favoriteId, videoId, newestTimelineId},
+          excludes: {archiveId},
+          reason: 'Recently taken shortcut should include visible 050 assets and exclude archived assets',
+        );
+        _expectTimelineOrder(recentlyTakenAssets, [
+          newestTimelineId,
+          videoId,
+          favoriteId,
+          olderTimelineId,
+        ], reason: 'Recently taken shortcut should sort 050 assets by captured time descending');
+        await _expectTimelineAssetSet(
+          tester,
+          emptyTimeline,
+          includes: const {},
+          excludes: createdRemoteAssetIds.toSet(),
+          reason: 'Empty shortcut timeline should expose no 050 fixture assets',
+        );
+        expect(emptyTimeline.totalAssets, 0, reason: 'Empty shortcut state should have no assets');
+
+        final favoriteAsset = favoriteAssets.singleWhere((asset) => _timelineAssetId(asset) == favoriteId);
+        final archiveAsset = archiveAssets.singleWhere((asset) => _timelineAssetId(asset) == archiveId);
+        final videoAsset = videoAssets.singleWhere((asset) => _timelineAssetId(asset) == videoId);
+        final recentlyTakenAsset = recentlyTakenAssets.singleWhere(
+          (asset) => _timelineAssetId(asset) == newestTimelineId,
+        );
+
+        await _selectPrimaryNavigationTab(tester, kLibraryTabIndex);
+        await pumpUntilFound(tester, find.byType(DriftLibraryPage), timeout: const Duration(seconds: 30));
+        await _openShortcutEntryAndReturn(
+          tester,
+          sourcePage: DriftLibraryPage,
+          label: 'favorites'.tr(),
+          targetPage: DriftFavoritePage,
+          title: 'favorites'.tr(),
+          assetToOpen: favoriteAsset,
+        );
+        await _openShortcutEntryAndReturn(
+          tester,
+          sourcePage: DriftLibraryPage,
+          label: 'archived'.tr(),
+          targetPage: DriftArchivePage,
+          title: 'archive'.tr(),
+          assetToOpen: archiveAsset,
+        );
+
+        await _selectPrimaryNavigationTab(tester, kSearchTabIndex);
+        await pumpUntilFound(tester, find.byType(DriftSearchPage), timeout: const Duration(seconds: 30));
+        await _openShortcutEntryAndReturn(
+          tester,
+          sourcePage: DriftSearchPage,
+          label: 'videos'.tr(),
+          targetPage: DriftVideoPage,
+          title: 'videos'.tr(),
+          assetToOpen: videoAsset,
+        );
+        await _openShortcutEntryAndReturn(
+          tester,
+          sourcePage: DriftSearchPage,
+          label: 'recently_added'.tr(),
+          targetPage: DriftRecentlyAddedPage,
+          title: 'recently_added'.tr(),
+        );
+        await _openShortcutEntryAndReturn(
+          tester,
+          sourcePage: DriftSearchPage,
+          label: 'recently_taken'.tr(),
+          targetPage: DriftRecentlyTakenPage,
+          title: 'recently_taken'.tr(),
+          assetToOpen: recentlyTakenAsset,
+        );
+
+        expect(router.currentSegments.map((route) => route.name), isNot(contains(DriftFavoriteRoute.name)));
+        expect(router.currentSegments.map((route) => route.name), isNot(contains(DriftArchiveRoute.name)));
+        expect(router.currentSegments.map((route) => route.name), isNot(contains(DriftVideoRoute.name)));
+        expect(router.currentSegments.map((route) => route.name), isNot(contains(DriftRecentlyAddedRoute.name)));
+        expect(router.currentSegments.map((route) => route.name), isNot(contains(DriftRecentlyTakenRoute.name)));
+      },
+    );
+
+    _realStackSessionTest('MOB-UI-051-$_caseSuffix', 'browses local albums, server folders, and local timeline', (
       tester,
     ) async {
       tester.view.devicePixelRatio = 1.0;
@@ -6251,222 +6489,206 @@ void main() async {
 
       await _loadAuthenticatedApp(tester, overrideCancellation: true, closeDriftOnDispose: false);
       final container = _containerOfApp(tester);
-      final assetsApi = container.read(apiServiceProvider).assetsApi;
+      final apiService = container.read(apiServiceProvider);
       final router = container.read(appRouterProvider);
+      final createdLocalAssetIds = <String>{};
       final createdRemoteAssetIds = <String>[];
-      final user = Store.tryGet(StoreKey.currentUser);
-      expect(user, isNotNull);
 
       addTearDown(() async {
+        await _deleteLocalTestAssetsBestEffort(createdLocalAssetIds);
         for (final assetId in createdRemoteAssetIds) {
-          await _deleteTestAssetBestEffort(assetsApi, assetId);
+          await _deleteTestAssetBestEffort(apiService.assetsApi, assetId);
         }
       });
 
-      await container.read(syncApiRepositoryProvider).deleteSyncAck(_allReplayableSyncAckTypes);
-      await Store.delete(StoreKey.syncMigrationStatus);
-      await container.read(syncStreamRepositoryProvider).reset();
-      final baselineSyncSuccess = await container.read(syncStreamServiceProvider).sync();
-      expect(baselineSyncSuccess, isTrue);
-      if (Store.tryGet(StoreKey.currentUser) == null) {
-        await Store.put(StoreKey.currentUser, user!);
-      }
-
       final runToken = DateTime.now().toUtc().microsecondsSinceEpoch.toString();
-      final baseCreatedAt = DateTime.now().toUtc().add(const Duration(days: 3650));
-      final olderTimelineId = await _uploadGeneratedJpegAsSecondClient(
-        'immich-e2e-library-shortcuts-050-older-$runToken.jpg',
-        baseCreatedAt,
-      );
-      createdRemoteAssetIds.add(olderTimelineId);
-      final favoriteId = await _uploadGeneratedJpegAsSecondClient(
-        'immich-e2e-library-shortcuts-050-favorite-$runToken.jpg',
-        baseCreatedAt.add(const Duration(minutes: 1)),
-        isFavorite: true,
-      );
-      createdRemoteAssetIds.add(favoriteId);
-      final archiveId = await _uploadGeneratedJpegAsSecondClient(
-        'immich-e2e-library-shortcuts-050-archive-$runToken.jpg',
-        baseCreatedAt.add(const Duration(minutes: 2)),
-        visibility: api.AssetVisibility.archive,
-      );
-      createdRemoteAssetIds.add(archiveId);
-      final videoId = await _uploadGeneratedMp4AsSecondClient(
-        'immich-e2e-library-shortcuts-050-video-$runToken.mp4',
-        baseCreatedAt.add(const Duration(minutes: 3)),
-      );
-      createdRemoteAssetIds.add(videoId);
-      final newestTimelineId = await _uploadGeneratedJpegAsSecondClient(
-        'immich-e2e-library-shortcuts-050-newest-$runToken.jpg',
-        baseCreatedAt.add(const Duration(minutes: 4)),
-      );
-      createdRemoteAssetIds.add(newestTimelineId);
+      final shortToken = runToken.substring(runToken.length - 8);
+      final cameraAlbumName = 'ImmichE2E051Camera$shortToken';
+      final nestedAlbumName = 'ImmichE2E051Nested$shortToken';
+      final sameAlbumName = 'ImmichE2E051Same$shortToken';
+      final emptyAlbumName = 'ImmichE2E051Empty$shortToken';
+      final inaccessibleAlbumName = 'ImmichE2E051Private$shortToken';
+      final cameraAssetName = 'immich-e2e-local-051-camera-$shortToken.jpg';
+      final nestedAssetName = 'immich-e2e-local-051-nested-$shortToken.jpg';
+      final sameAssetNameA = 'immich-e2e-local-051-same-a-$shortToken.jpg';
+      final sameAssetNameB = 'immich-e2e-local-051-same-b-$shortToken.jpg';
+      final refreshAssetName = 'immich-e2e-local-051-refresh-$shortToken.jpg';
+      final folderAssetName = 'immich-e2e-folder-051-$shortToken.jpg';
 
-      final uploadSyncSuccess = await container.read(syncStreamServiceProvider).sync();
-      expect(uploadSyncSuccess, isTrue);
-      await _waitForRemoteAssetState(
-        tester,
+      await _saveLocalTestImage(
         container,
-        olderTimelineId,
-        (asset) => asset.visibility == AssetVisibility.timeline && !asset.isFavorite && !asset.isTrashed,
-        reason: 'Expected the 050 older control asset to sync as a normal timeline asset',
+        createdLocalAssetIds,
+        title: cameraAssetName,
+        relativePath: 'Pictures/$cameraAlbumName',
+        seed: runToken.hashCode,
       );
-      await _waitForRemoteAssetState(
-        tester,
+      await _saveLocalTestImage(
         container,
-        favoriteId,
-        (asset) => asset.visibility == AssetVisibility.timeline && asset.isFavorite && !asset.isTrashed,
-        reason: 'Expected the 050 favorite fixture to sync as a favorite timeline asset',
+        createdLocalAssetIds,
+        title: nestedAssetName,
+        relativePath: 'Pictures/ImmichE2E051Root$shortToken/$nestedAlbumName',
+        seed: runToken.hashCode + 1,
       );
-      await _waitForRemoteAssetState(
-        tester,
+      await _saveLocalTestImage(
         container,
-        archiveId,
-        (asset) => asset.visibility == AssetVisibility.archive && !asset.isTrashed,
-        reason: 'Expected the 050 archive fixture to sync as an archived asset',
+        createdLocalAssetIds,
+        title: sameAssetNameA,
+        relativePath: 'Pictures/ImmichE2E051DupA$shortToken/$sameAlbumName',
+        seed: runToken.hashCode + 2,
       );
-      await _waitForRemoteAssetState(
-        tester,
+      await _saveLocalTestImage(
         container,
-        videoId,
-        (asset) => asset.visibility == AssetVisibility.timeline && asset.isVideo && !asset.isTrashed,
-        reason: 'Expected the 050 video fixture to sync as a video timeline asset',
-      );
-      await _waitForRemoteAssetState(
-        tester,
-        container,
-        newestTimelineId,
-        (asset) => asset.visibility == AssetVisibility.timeline && !asset.isFavorite && !asset.isTrashed,
-        reason: 'Expected the 050 newest control asset to sync as a normal timeline asset',
+        createdLocalAssetIds,
+        title: sameAssetNameB,
+        relativePath: 'DCIM/ImmichE2E051DupB$shortToken/$sameAlbumName',
+        seed: runToken.hashCode + 3,
       );
 
-      final timelineFactory = container.read(timelineFactoryProvider);
-      final mainTimeline = timelineFactory.main([user!.id]);
-      final favoriteTimeline = timelineFactory.favorite(user.id);
-      final archiveTimeline = timelineFactory.archive(user.id);
-      final videoTimeline = timelineFactory.video(user.id);
-      final recentlyAddedTimeline = timelineFactory.recentlyAdded(user.id);
-      final recentlyTakenTimeline = timelineFactory.remoteAssets(user.id);
-      final emptyTimeline = timelineFactory.fromAssets(const <BaseAsset>[], TimelineOrigin.favorite);
-      addTearDown(mainTimeline.dispose);
-      addTearDown(favoriteTimeline.dispose);
-      addTearDown(archiveTimeline.dispose);
-      addTearDown(videoTimeline.dispose);
-      addTearDown(recentlyAddedTimeline.dispose);
-      addTearDown(recentlyTakenTimeline.dispose);
-      addTearDown(emptyTimeline.dispose);
+      final cameraAsset = await _waitForLocalAssetByName(container, cameraAssetName, tester);
+      final nestedAsset = await _waitForLocalAssetByName(container, nestedAssetName, tester);
+      final sameAssetA = await _waitForLocalAssetByName(container, sameAssetNameA, tester);
+      final sameAssetB = await _waitForLocalAssetByName(container, sameAssetNameB, tester);
+      final localAlbums = await _waitForLocalAlbumFixtures(
+        tester,
+        container,
+        requiredNames: {cameraAlbumName, nestedAlbumName, sameAlbumName},
+        duplicatedName: sameAlbumName,
+      );
+      final cameraAlbum = _singleAlbumNamed(localAlbums, cameraAlbumName);
+      final nestedAlbum = _singleAlbumNamed(localAlbums, nestedAlbumName);
+      final sameAlbums = _albumsNamed(localAlbums, sameAlbumName);
+      final albumNames = localAlbums.map((album) => album.name).toSet();
 
-      await _expectTimelineAssetSet(
-        tester,
-        mainTimeline,
-        includes: {olderTimelineId, favoriteId, videoId, newestTimelineId},
-        excludes: {archiveId},
-        reason: 'Main timeline should include only unarchived 050 shortcut assets',
-      );
-      final favoriteAssets = await _expectTimelineAssetSet(
-        tester,
-        favoriteTimeline,
-        includes: {favoriteId},
-        excludes: {olderTimelineId, archiveId, videoId, newestTimelineId},
-        reason: 'Favorite shortcut should include only the favorited 050 asset',
-      );
-      final archiveAssets = await _expectTimelineAssetSet(
-        tester,
-        archiveTimeline,
-        includes: {archiveId},
-        excludes: {olderTimelineId, favoriteId, videoId, newestTimelineId},
-        reason: 'Archive shortcut should include only the archived 050 asset',
-      );
-      final videoAssets = await _expectTimelineAssetSet(
-        tester,
-        videoTimeline,
-        includes: {videoId},
-        excludes: {olderTimelineId, favoriteId, archiveId, newestTimelineId},
-        reason: 'Video shortcut should include only the 050 video asset',
-      );
-      await _expectTimelineAssetSet(
-        tester,
-        recentlyAddedTimeline,
-        includes: {olderTimelineId, favoriteId, archiveId, videoId, newestTimelineId},
-        excludes: const {},
-        reason: 'Recently added shortcut should include every non-trashed 050 fixture',
-      );
-      final recentlyTakenAssets = await _expectTimelineAssetSet(
-        tester,
-        recentlyTakenTimeline,
-        includes: {olderTimelineId, favoriteId, videoId, newestTimelineId},
-        excludes: {archiveId},
-        reason: 'Recently taken shortcut should include visible 050 assets and exclude archived assets',
-      );
-      _expectTimelineOrder(
-        recentlyTakenAssets,
-        [newestTimelineId, videoId, favoriteId, olderTimelineId],
-        reason: 'Recently taken shortcut should sort 050 assets by captured time descending',
-      );
-      await _expectTimelineAssetSet(
-        tester,
-        emptyTimeline,
-        includes: const {},
-        excludes: createdRemoteAssetIds.toSet(),
-        reason: 'Empty shortcut timeline should expose no 050 fixture assets',
-      );
-      expect(emptyTimeline.totalAssets, 0, reason: 'Empty shortcut state should have no assets');
+      expect(cameraAlbum.assetCount, 1);
+      expect(nestedAlbum.assetCount, 1);
+      expect(sameAlbums, hasLength(greaterThanOrEqualTo(2)));
+      expect(sameAlbums.every((album) => album.assetCount == 1), isTrue);
+      expect(albumNames, isNot(contains(emptyAlbumName)));
+      expect(albumNames, isNot(contains(inaccessibleAlbumName)));
+      expect(await _localAssetSourceAlbumNames(container, cameraAsset), contains(cameraAlbumName));
+      expect(await _localAssetSourceAlbumNames(container, nestedAsset), contains(nestedAlbumName));
+      expect(await _localAssetSourceAlbumNames(container, sameAssetA), contains(sameAlbumName));
+      expect(await _localAssetSourceAlbumNames(container, sameAssetB), contains(sameAlbumName));
 
-      final favoriteAsset = favoriteAssets.singleWhere((asset) => _timelineAssetId(asset) == favoriteId);
-      final archiveAsset = archiveAssets.singleWhere((asset) => _timelineAssetId(asset) == archiveId);
-      final videoAsset = videoAssets.singleWhere((asset) => _timelineAssetId(asset) == videoId);
-      final recentlyTakenAsset = recentlyTakenAssets.singleWhere((asset) => _timelineAssetId(asset) == newestTimelineId);
+      final cameraTimeline = container.read(timelineFactoryProvider).localAlbum(albumId: cameraAlbum.id);
+      addTearDown(cameraTimeline.dispose);
+      final cameraTimelineAssets = await _expectTimelineAssetSet(
+        tester,
+        cameraTimeline,
+        includes: {cameraAsset.id},
+        excludes: {nestedAsset.id, sameAssetA.id, sameAssetB.id},
+        reason: 'Local camera album timeline should contain only its 051 fixture asset',
+      );
+      final cameraTimelineAsset = cameraTimelineAssets.singleWhere(
+        (asset) => _timelineAssetId(asset) == cameraAsset.id,
+      );
+      expect(cameraTimelineAsset.isLocalOnly, isTrue);
 
       await _selectPrimaryNavigationTab(tester, kLibraryTabIndex);
       await pumpUntilFound(tester, find.byType(DriftLibraryPage), timeout: const Duration(seconds: 30));
-      await _openShortcutEntryAndReturn(
+      await _tapTextEntryInPage(tester, pageType: DriftLibraryPage, label: 'on_this_device'.tr());
+      await pumpUntilFound(tester, find.byType(DriftLocalAlbumsPage), timeout: const Duration(seconds: 30));
+      await _ensureTextVisibleInPage(tester, DriftLocalAlbumsPage, cameraAlbumName);
+      await _ensureTextVisibleInPage(tester, DriftLocalAlbumsPage, nestedAlbumName);
+      await _ensureTextVisibleInPage(tester, DriftLocalAlbumsPage, sameAlbumName);
+      await _tapTextEntryInPage(tester, pageType: DriftLocalAlbumsPage, label: cameraAlbumName);
+      await pumpUntilFound(tester, find.byType(LocalTimelinePage), timeout: const Duration(seconds: 30));
+      await pumpUntilFound(tester, find.text(cameraAlbumName), timeout: const Duration(seconds: 30));
+      await _exerciseTimelineUiPagination(tester);
+      await _openTimelineAsset(tester, cameraTimelineAsset);
+      await tester.binding.handlePopRoute();
+      await _pumpUntil(
         tester,
-        sourcePage: DriftLibraryPage,
-        label: 'favorites'.tr(),
-        targetPage: DriftFavoritePage,
-        title: 'favorites'.tr(),
-        assetToOpen: favoriteAsset,
+        () => find.byType(AssetViewer).evaluate().isEmpty && find.byType(LocalTimelinePage).evaluate().isNotEmpty,
+        timeout: const Duration(seconds: 30),
       );
-      await _openShortcutEntryAndReturn(
+      await pumpUntilFound(tester, _timelineAssetTileForAssetId(cameraAsset.id), timeout: const Duration(seconds: 30));
+      await tester.binding.handlePopRoute();
+      await _pumpUntil(
         tester,
-        sourcePage: DriftLibraryPage,
-        label: 'archived'.tr(),
-        targetPage: DriftArchivePage,
-        title: 'archive'.tr(),
-        assetToOpen: archiveAsset,
+        () => find.byType(DriftLocalAlbumsPage).evaluate().isNotEmpty,
+        timeout: const Duration(seconds: 30),
       );
-
-      await _selectPrimaryNavigationTab(tester, kSearchTabIndex);
-      await pumpUntilFound(tester, find.byType(DriftSearchPage), timeout: const Duration(seconds: 30));
-      await _openShortcutEntryAndReturn(
+      await _ensureTextVisibleInPage(tester, DriftLocalAlbumsPage, cameraAlbumName);
+      await tester.binding.handlePopRoute();
+      await _pumpUntil(
         tester,
-        sourcePage: DriftSearchPage,
-        label: 'videos'.tr(),
-        targetPage: DriftVideoPage,
-        title: 'videos'.tr(),
-        assetToOpen: videoAsset,
-      );
-      await _openShortcutEntryAndReturn(
-        tester,
-        sourcePage: DriftSearchPage,
-        label: 'recently_added'.tr(),
-        targetPage: DriftRecentlyAddedPage,
-        title: 'recently_added'.tr(),
-      );
-      await _openShortcutEntryAndReturn(
-        tester,
-        sourcePage: DriftSearchPage,
-        label: 'recently_taken'.tr(),
-        targetPage: DriftRecentlyTakenPage,
-        title: 'recently_taken'.tr(),
-        assetToOpen: recentlyTakenAsset,
+        () => find.byType(DriftLibraryPage).evaluate().isNotEmpty,
+        timeout: const Duration(seconds: 30),
       );
 
-      expect(router.currentSegments.map((route) => route.name), isNot(contains(DriftFavoriteRoute.name)));
-      expect(router.currentSegments.map((route) => route.name), isNot(contains(DriftArchiveRoute.name)));
-      expect(router.currentSegments.map((route) => route.name), isNot(contains(DriftVideoRoute.name)));
-      expect(router.currentSegments.map((route) => route.name), isNot(contains(DriftRecentlyAddedRoute.name)));
-      expect(router.currentSegments.map((route) => route.name), isNot(contains(DriftRecentlyTakenRoute.name)));
+      final refreshAsset = await _saveLocalTestImage(
+        container,
+        createdLocalAssetIds,
+        title: refreshAssetName,
+        relativePath: 'Pictures/$cameraAlbumName',
+        seed: runToken.hashCode + 4,
+      );
+      await _waitForLocalAssetByName(container, refreshAssetName, tester);
+      var refreshedAlbums = await _waitForLocalAlbumFixtures(tester, container, requiredNames: {cameraAlbumName});
+      expect(_singleAlbumNamed(refreshedAlbums, cameraAlbumName).assetCount, 2);
+      final deletedLocalAssetIds = await PhotoManager.editor.deleteWithIds([refreshAsset.id]);
+      expect(deletedLocalAssetIds, contains(refreshAsset.id));
+      createdLocalAssetIds.remove(refreshAsset.id);
+      await _waitForLocalAssetGoneByName(container, refreshAssetName, tester);
+      refreshedAlbums = await _waitForLocalAlbumFixtures(tester, container, requiredNames: {cameraAlbumName});
+      expect(_singleAlbumNamed(refreshedAlbums, cameraAlbumName).assetCount, 1);
+
+      final folderAssetId = await _uploadGeneratedJpegAsSecondClient(
+        folderAssetName,
+        DateTime.now().toUtc().add(const Duration(days: 3650)),
+      );
+      createdRemoteAssetIds.add(folderAssetId);
+      await _waitForSuccessfulResponse(
+        tester,
+        () => _authenticatedApiGet('/assets/$folderAssetId/thumbnail?size=thumbnail&edited=false&c=$runToken'),
+        timeout: const Duration(minutes: 3),
+      );
+      final folderPaths = await _waitForFolderPaths(
+        tester,
+        apiService.viewApi,
+        (paths) => paths.any((path) => path.contains(folderAssetId)),
+        reason: 'Server folder view should expose the 051 fixture folder path',
+        timeout: const Duration(seconds: 30),
+      );
+      expect(folderPaths.any((path) => path.contains(inaccessibleAlbumName)), isFalse);
+
+      await _selectPrimaryNavigationTab(tester, kLibraryTabIndex);
+      await pumpUntilFound(tester, find.byType(DriftLibraryPage), timeout: const Duration(seconds: 30));
+      await _tapTextEntryInPage(tester, pageType: DriftLibraryPage, label: 'folders'.tr());
+      await pumpUntilFound(tester, find.byType(FolderPage), timeout: const Duration(seconds: 30));
+      await _tapTextEntryInPage(tester, pageType: FolderPage, label: 'library');
+      await _tapTextEntryInPage(tester, pageType: FolderPage, label: 'photo');
+      await container.read(folderStructureProvider.notifier).fetchFolders(SortOrder.asc);
+      final rootFolderState = container.read(folderStructureProvider);
+      expect(rootFolderState.hasValue, isTrue);
+      final assetFolder = _expectFolderPath(rootFolderState.requireValue, '/library/photo/$folderAssetId');
+      unawaited(router.push(FolderRoute(folder: assetFolder)));
+      await pumpUntilFound(tester, find.text(folderAssetId), timeout: const Duration(seconds: 30));
+      await _ensureTextVisibleInPage(tester, FolderPage, folderAssetName);
+      expect(find.text(inaccessibleAlbumName), findsNothing);
+      await _tapTextEntryInPage(tester, pageType: FolderPage, label: folderAssetName);
+      await pumpUntilFound(tester, find.byType(AssetViewer), timeout: const Duration(seconds: 30));
+      await tester.binding.handlePopRoute();
+      await _pumpUntil(
+        tester,
+        () => find.byType(AssetViewer).evaluate().isEmpty && find.byType(FolderPage).evaluate().isNotEmpty,
+        timeout: const Duration(seconds: 30),
+      );
+      await _ensureTextVisibleInPage(tester, FolderPage, folderAssetName);
+
+      await container.read(folderStructureProvider.notifier).fetchFolders(SortOrder.asc);
+      unawaited(
+        router.push(
+          FolderRoute(
+            folder: RecursiveFolder(path: '/library/photo', name: emptyAlbumName, subfolders: []),
+          ),
+        ),
+      );
+      await pumpUntilFound(tester, find.byType(FolderPage), timeout: const Duration(seconds: 30));
+      await pumpUntilFound(tester, find.text(emptyAlbumName), timeout: const Duration(seconds: 30));
+      await pumpUntilFound(tester, find.text('empty_folder'.tr()), timeout: const Duration(seconds: 30));
+      await _popUntilVisible(tester, DriftLibraryPage);
     });
 
     if (_selectedCaseId.isNotEmpty && !_registeredSelectedCase) {
@@ -6506,11 +6728,7 @@ Future<void> _openShortcutEntryAndReturn(
   await tester.ensureVisible(entry.first);
   await _pumpFor(tester, const Duration(milliseconds: 250));
   await tester.tap(entry.first, warnIfMissed: false);
-  await _pumpUntil(
-    tester,
-    () => find.byType(targetPage).evaluate().isNotEmpty,
-    timeout: const Duration(seconds: 30),
-  );
+  await _pumpUntil(tester, () => find.byType(targetPage).evaluate().isNotEmpty, timeout: const Duration(seconds: 30));
   await pumpUntilFound(tester, find.byType(Timeline), timeout: const Duration(seconds: 60));
   await pumpUntilFound(tester, find.text(title), timeout: const Duration(seconds: 30));
   await _exerciseTimelineUiPagination(tester);
@@ -6518,11 +6736,7 @@ Future<void> _openShortcutEntryAndReturn(
   if (assetToOpen != null) {
     await _openTimelineAsset(tester, assetToOpen);
     await tester.binding.handlePopRoute();
-    await _pumpUntil(
-      tester,
-      () => find.byType(AssetViewer).evaluate().isEmpty,
-      timeout: const Duration(seconds: 30),
-    );
+    await _pumpUntil(tester, () => find.byType(AssetViewer).evaluate().isEmpty, timeout: const Duration(seconds: 30));
     await pumpUntilFound(tester, find.byType(targetPage), timeout: const Duration(seconds: 30));
     await pumpUntilFound(
       tester,
@@ -6537,6 +6751,49 @@ Future<void> _openShortcutEntryAndReturn(
     () => find.byType(targetPage).evaluate().isEmpty && find.byType(sourcePage).evaluate().isNotEmpty,
     timeout: const Duration(seconds: 30),
   );
+}
+
+Future<void> _ensureTextVisibleInPage(WidgetTester tester, Type pageType, String label, {int maxScrolls = 40}) async {
+  await pumpUntilFound(tester, find.byType(pageType), timeout: const Duration(seconds: 30));
+  for (var attempt = 0; attempt < maxScrolls; attempt++) {
+    final page = find.byType(pageType);
+    final target = find.descendant(of: page, matching: find.text(label));
+    if (target.evaluate().isNotEmpty) {
+      await tester.ensureVisible(target.first);
+      await _pumpFor(tester, const Duration(milliseconds: 200));
+      return;
+    }
+
+    var scrollable = find.descendant(of: page, matching: find.byType(Scrollable));
+    if (scrollable.evaluate().isEmpty) {
+      scrollable = find.byType(Scrollable);
+    }
+    if (scrollable.evaluate().isNotEmpty) {
+      await tester.drag(scrollable.last, const Offset(0, -500));
+    }
+    await _pumpFor(tester, const Duration(milliseconds: 250));
+  }
+
+  fail('Expected "$label" to be visible in $pageType');
+}
+
+Future<void> _tapTextEntryInPage(WidgetTester tester, {required Type pageType, required String label}) async {
+  await _ensureTextVisibleInPage(tester, pageType, label);
+  final target = find.descendant(of: find.byType(pageType), matching: find.text(label));
+  await tester.tap(target.first, warnIfMissed: false);
+  await _pumpFor(tester, const Duration(milliseconds: 700));
+}
+
+Future<void> _popUntilVisible(WidgetTester tester, Type pageType, {int maxPops = 8}) async {
+  for (var attempt = 0; attempt < maxPops; attempt++) {
+    if (find.byType(pageType).evaluate().isNotEmpty) {
+      return;
+    }
+    await tester.binding.handlePopRoute();
+    await _pumpFor(tester, const Duration(milliseconds: 700));
+  }
+
+  fail('Could not pop back to $pageType');
 }
 
 void _expectTimelineOrder(List<BaseAsset> assets, List<String> orderedIds, {required String reason}) {
@@ -7431,6 +7688,49 @@ Future<LocalAsset> _waitForLocalAssetByName(ProviderContainer container, String 
   fail('Local asset $name was not discovered; saw ${sorted.join(', ')}');
 }
 
+Future<LocalAsset> _saveLocalTestImage(
+  ProviderContainer container,
+  Set<String> createdLocalAssetIds, {
+  required String title,
+  required String relativePath,
+  required int seed,
+}) async {
+  final created = await container
+      .read(fileMediaRepositoryProvider)
+      .saveLocalAsset(_generatedJpegBytes(seed), title: title, relativePath: relativePath);
+  expect(created, isNotNull, reason: 'Expected PhotoManager to save local fixture $title');
+  createdLocalAssetIds.add(created!.id);
+  return created;
+}
+
+Future<void> _deleteLocalTestAssetsBestEffort(Iterable<String> assetIds) async {
+  final ids = assetIds.toSet().toList(growable: false);
+  if (ids.isEmpty) {
+    return;
+  }
+  try {
+    await PhotoManager.editor.deleteWithIds(ids);
+  } catch (_) {
+    // Best-effort cleanup for app-created local media fixtures.
+  }
+}
+
+Future<void> _waitForLocalAssetGoneByName(ProviderContainer container, String name, WidgetTester tester) async {
+  var lastSeen = const <String>{};
+  for (var attempt = 0; attempt < 12; attempt++) {
+    await container.read(backgroundSyncProvider).syncLocal(full: true);
+    final assets = await _localAssets(container);
+    lastSeen = assets.map((asset) => asset.name).toSet();
+    if (!lastSeen.contains(name)) {
+      return;
+    }
+    await _pumpFor(tester, const Duration(seconds: 2));
+  }
+
+  final sorted = lastSeen.toList()..sort();
+  fail('Local asset $name was still discovered after deletion; saw ${sorted.join(', ')}');
+}
+
 Future<void> _selectOnlyBackupAlbumForAsset(ProviderContainer container, LocalAsset asset) async {
   final albumRepository = container.read(localAlbumRepository);
   final albums = await albumRepository.getAll();
@@ -7500,6 +7800,38 @@ Future<List<LocalAlbum>> _waitForBackupAlbumFixtures(
   fail('Expected backup album fixtures $requiredNames$duplicateExpectation; saw ${seenNames.join(', ')}');
 }
 
+Future<List<LocalAlbum>> _waitForLocalAlbumFixtures(
+  WidgetTester tester,
+  ProviderContainer container, {
+  required Set<String> requiredNames,
+  String? duplicatedName,
+}) async {
+  var visibleAlbums = <LocalAlbum>[];
+  for (var attempt = 0; attempt < 12; attempt++) {
+    await container.read(backgroundSyncProvider).syncLocal(full: true);
+    container.invalidate(localAlbumProvider);
+    final albums = await container.read(localAlbumServiceProvider).getAll();
+    visibleAlbums = albums.where((album) => album.assetCount > 0).toList();
+    final names = visibleAlbums.map((album) => album.name).toSet();
+    final hasRequired = requiredNames.every(names.contains);
+    final hasDuplicatedName =
+        duplicatedName == null || visibleAlbums.where((album) => album.name == duplicatedName).length >= 2;
+    if (hasRequired && hasDuplicatedName) {
+      return visibleAlbums;
+    }
+    await _pumpFor(tester, const Duration(seconds: 2));
+  }
+
+  final seenNames = visibleAlbums.map((album) => album.name).toSet().toList()..sort();
+  final duplicateExpectation = duplicatedName == null ? '' : ' and two "$duplicatedName" albums';
+  fail('Expected local album fixtures $requiredNames$duplicateExpectation; saw ${seenNames.join(', ')}');
+}
+
+Future<Set<String>> _localAssetSourceAlbumNames(ProviderContainer container, LocalAsset asset) async {
+  final sourceAlbums = await container.read(localAssetRepository).getSourceAlbums(asset.id);
+  return sourceAlbums.map((album) => album.name).toSet();
+}
+
 LocalAlbum _singleAlbumNamed(List<LocalAlbum> albums, String name) {
   final matches = _albumsNamed(albums, name);
   expect(matches, hasLength(1), reason: 'Expected exactly one local album named $name');
@@ -7508,6 +7840,31 @@ LocalAlbum _singleAlbumNamed(List<LocalAlbum> albums, String name) {
 
 List<LocalAlbum> _albumsNamed(List<LocalAlbum> albums, String name) {
   return albums.where((album) => album.name == name).toList();
+}
+
+RecursiveFolder _expectFolderPath(RootFolder root, String path) {
+  final normalizedPath = path.startsWith('/') ? path : '/$path';
+
+  RecursiveFolder? visit(RootFolder folder) {
+    for (final subfolder in folder.subfolders) {
+      final fullPath = subfolder.path.isEmpty ? '/${subfolder.name}' : '${subfolder.path}/${subfolder.name}';
+      if (fullPath == normalizedPath) {
+        return subfolder;
+      }
+
+      final nested = visit(subfolder);
+      if (nested != null) {
+        return nested;
+      }
+    }
+    return null;
+  }
+
+  final match = visit(root);
+  if (match == null) {
+    fail('Expected folder path $normalizedPath in server folder structure');
+  }
+  return match;
 }
 
 Future<void> _searchBackupAlbums(WidgetTester tester, String query) async {
@@ -8877,6 +9234,31 @@ Future<http.Response> _waitForSuccessfulResponse(
     fail('Expected HTTP ${acceptedStatusCodes.join('/')} with body, got ${lastResponse.statusCode}');
   }
   fail('Expected HTTP ${acceptedStatusCodes.join('/')} with body, last error: $lastError');
+}
+
+Future<List<String>> _waitForFolderPaths(
+  WidgetTester tester,
+  api.ViewsApi viewApi,
+  bool Function(List<String> paths) matches, {
+  required String reason,
+  Duration timeout = const Duration(seconds: 60),
+}) async {
+  var latest = const <String>[];
+  Object? lastError;
+  final end = DateTime.now().add(timeout);
+  while (DateTime.now().isBefore(end)) {
+    try {
+      latest = await viewApi.getUniqueOriginalPaths() ?? const <String>[];
+      if (matches(latest)) {
+        return latest;
+      }
+    } catch (error) {
+      lastError = error;
+    }
+    await _pumpFor(tester, const Duration(milliseconds: 500));
+  }
+
+  fail('$reason; latest folder paths=${latest.join(', ')}; last error=$lastError');
 }
 
 Future<String> _uploadSingleAssetToServer(ProviderContainer container, LocalAsset asset) async {
