@@ -40,6 +40,7 @@ import 'package:immich_mobile/infrastructure/repositories/local_album.repository
 import 'package:immich_mobile/infrastructure/repositories/settings.repository.dart';
 import 'package:immich_mobile/infrastructure/repositories/storage.repository.dart';
 import 'package:immich_mobile/main.dart' as app;
+import 'package:immich_mobile/models/auth/biometric_status.model.dart';
 import 'package:immich_mobile/models/search/search_filter.model.dart';
 import 'package:immich_mobile/models/upload/share_intent_attachment.model.dart';
 import 'package:immich_mobile/pages/backup/drift_backup.page.dart';
@@ -74,6 +75,7 @@ import 'package:immich_mobile/presentation/widgets/backup/backup_toggle_button.w
 import 'package:immich_mobile/presentation/widgets/bottom_sheet/archive_bottom_sheet.widget.dart';
 import 'package:immich_mobile/presentation/widgets/bottom_sheet/favorite_bottom_sheet.widget.dart';
 import 'package:immich_mobile/presentation/widgets/bottom_sheet/general_bottom_sheet.widget.dart';
+import 'package:immich_mobile/presentation/widgets/bottom_sheet/locked_folder_bottom_sheet.widget.dart';
 import 'package:immich_mobile/presentation/widgets/bottom_sheet/remote_album_bottom_sheet.widget.dart';
 import 'package:immich_mobile/presentation/widgets/images/thumbnail_tile.widget.dart';
 import 'package:immich_mobile/presentation/widgets/timeline/header.widget.dart';
@@ -105,6 +107,7 @@ import 'package:immich_mobile/providers/websocket.provider.dart';
 import 'package:immich_mobile/repositories/asset_api.repository.dart';
 import 'package:immich_mobile/repositories/asset_media.repository.dart';
 import 'package:immich_mobile/repositories/auth_api.repository.dart';
+import 'package:immich_mobile/repositories/biometric.repository.dart';
 import 'package:immich_mobile/repositories/download.repository.dart';
 import 'package:immich_mobile/repositories/file_media.repository.dart';
 import 'package:immich_mobile/routing/router.dart';
@@ -112,6 +115,7 @@ import 'package:immich_mobile/services/api.service.dart';
 import 'package:immich_mobile/services/background_upload.service.dart';
 import 'package:immich_mobile/services/download.service.dart';
 import 'package:immich_mobile/services/foreground_upload.service.dart';
+import 'package:immich_mobile/services/secure_storage.service.dart';
 import 'package:immich_mobile/utils/bootstrap.dart';
 import 'package:immich_mobile/utils/editor.utils.dart';
 import 'package:immich_mobile/utils/option.dart';
@@ -121,6 +125,7 @@ import 'package:immich_mobile/widgets/backup/drift_album_info_list_tile.dart';
 import 'package:immich_mobile/widgets/common/selection_sliver_app_bar.dart';
 import 'package:immich_mobile/widgets/photo_view/photo_view.dart';
 import 'package:immich_mobile/widgets/settings/setting_list_tile.dart';
+import 'package:local_auth/local_auth.dart' show BiometricType, LocalAuthentication;
 import 'package:maplibre_gl/maplibre_gl.dart' show LatLng;
 import 'package:openapi/api.dart' as api;
 import 'package:path_provider/path_provider.dart';
@@ -224,8 +229,33 @@ const _multiSelectRemoteSeedPrefix = String.fromEnvironment(
 const _similarTargetAssetId = String.fromEnvironment('IMMICH_E2E_SIMILAR_TARGET_ASSET_ID');
 const _similarCandidateAssetId = String.fromEnvironment('IMMICH_E2E_SIMILAR_CANDIDATE_ASSET_ID');
 const _similarControlAssetId = String.fromEnvironment('IMMICH_E2E_SIMILAR_CONTROL_ASSET_ID');
+const _lockedFolderPin = '123456';
+const _lockedFolderWrongPin = '000000';
 
 var _registeredSelectedCase = false;
+
+class _ScriptedBiometricRepository extends BiometricRepository {
+  final List<bool> _results;
+  int _index = 0;
+
+  _ScriptedBiometricRepository(this._results) : super(LocalAuthentication());
+
+  @override
+  Future<BiometricStatus> getStatus() async {
+    return const BiometricStatus(availableBiometrics: [BiometricType.fingerprint], canAuthenticate: true);
+  }
+
+  @override
+  Future<bool> authenticate(String? message) async {
+    if (_results.isEmpty) {
+      return true;
+    }
+    final index = _index < _results.length ? _index : _results.length - 1;
+    final value = _results[index];
+    _index++;
+    return value;
+  }
+}
 
 void main() async {
   await ImmichTestHelper.initialize();
@@ -5541,9 +5571,9 @@ void main() async {
       }.entries) {
         expect(entry.value, isNotEmpty, reason: 'Pass --dart-define=${entry.key}=... from the 047 fixture seed');
       }
-      final targetAssetId = _similarTargetAssetId;
-      final candidateAssetId = _similarCandidateAssetId;
-      final controlAssetId = _similarControlAssetId;
+      final targetAssetId = _similarTargetAssetId.trim();
+      final candidateAssetId = _similarCandidateAssetId.trim();
+      final controlAssetId = _similarControlAssetId.trim();
 
       await _loadAuthenticatedApp(tester, overrideCancellation: true, closeDriftOnDispose: false);
       final container = _containerOfApp(tester);
@@ -5717,6 +5747,261 @@ void main() async {
       );
       expect(emptyUiIds, isEmpty);
       await pumpUntilFound(tester, find.text('search_no_result'.tr()), timeout: const Duration(seconds: 30));
+    });
+
+    _realStackSessionTest('MOB-UI-048-$_caseSuffix', 'guards locked folder with PIN biometric and background relock', (
+      tester,
+    ) async {
+      tester.view.devicePixelRatio = 1.0;
+      tester.view.physicalSize = const Size(430, 932);
+      addTearDown(tester.view.reset);
+
+      final scriptedBiometrics = _ScriptedBiometricRepository([false, true]);
+      await _loadAuthenticatedApp(
+        tester,
+        overrideCancellation: true,
+        closeDriftOnDispose: false,
+        extraOverrides: [biometricRepositoryProvider.overrideWithValue(scriptedBiometrics)],
+      );
+      final container = _containerOfApp(tester);
+      final apiService = container.read(apiServiceProvider);
+      final assetsApi = apiService.assetsApi;
+      final authApi = apiService.authenticationApi;
+      final authRepository = container.read(authApiRepositoryProvider);
+      final secureStorage = container.read(secureStorageServiceProvider);
+      final router = container.read(appRouterProvider);
+      final createdRemoteAssetIds = <String>[];
+      final user = Store.tryGet(StoreKey.currentUser);
+      expect(user, isNotNull);
+
+      addTearDown(() async {
+        try {
+          container.read(multiSelectProvider.notifier).reset();
+          await secureStorage.delete(kSecuredPinCode);
+        } catch (_) {
+          // ProviderScope may already be disposed when an earlier expectation fails.
+        }
+        for (final assetId in createdRemoteAssetIds) {
+          try {
+            await assetsApi.updateAssets(
+              api.AssetBulkUpdateDto(
+                ids: [assetId],
+                visibility: const api.Optional.present(api.AssetVisibility.timeline),
+              ),
+            );
+          } catch (_) {
+            // The asset may already be gone or the API may be unavailable during cleanup.
+          }
+          await _deleteTestAssetBestEffort(assetsApi, assetId);
+        }
+      });
+
+      await secureStorage.delete(kSecuredPinCode);
+      await container.read(syncApiRepositoryProvider).deleteSyncAck(_allReplayableSyncAckTypes);
+      await Store.delete(StoreKey.syncMigrationStatus);
+      await container.read(syncStreamRepositoryProvider).reset();
+      var syncSuccess = await container.read(syncStreamServiceProvider).sync();
+      expect(syncSuccess, isTrue);
+
+      await authRepository.setupPinCode(_lockedFolderPin);
+      await _waitForAuthStatus(
+        tester,
+        authApi,
+        (status) => status.pinCode && status.password && status.isElevated,
+        reason: 'Expected PIN setup to enable locked-folder protection and keep the current session elevated',
+      );
+
+      await authRepository.lockPinCode();
+      expect(await authRepository.unlockPinCode(_lockedFolderWrongPin), isFalse);
+      await _waitForAuthStatus(
+        tester,
+        authApi,
+        (status) => status.pinCode && !status.isElevated,
+        reason: 'A wrong PIN must not unlock the current session',
+      );
+      expect(await authRepository.unlockPinCode(_lockedFolderPin), isTrue);
+      await _waitForAuthStatus(
+        tester,
+        authApi,
+        (status) => status.pinCode && status.isElevated,
+        reason: 'The correct PIN should unlock the current session',
+      );
+
+      final runToken = DateTime.now().toUtc().microsecondsSinceEpoch.toString();
+      final assetId = await _uploadGeneratedJpegAsSecondClient(
+        'immich-e2e-locked-folder-048-$runToken.jpg',
+        DateTime.now().toUtc(),
+      );
+      createdRemoteAssetIds.add(assetId);
+
+      await _waitForSuccessfulResponse(
+        tester,
+        () => assetsApi.viewAssetWithHttpInfo(assetId, size: api.AssetMediaSize.thumbnail),
+        timeout: const Duration(minutes: 3),
+      );
+
+      syncSuccess = await container.read(syncStreamServiceProvider).sync();
+      expect(syncSuccess, isTrue);
+      await pumpUntilFound(tester, find.byType(Timeline), timeout: const Duration(seconds: 60));
+
+      final timelineFactory = container.read(timelineFactoryProvider);
+      final mainTimeline = timelineFactory.main([user!.id]);
+      final lockedTimeline = timelineFactory.lockedFolder(user.id);
+      addTearDown(mainTimeline.dispose);
+      addTearDown(lockedTimeline.dispose);
+
+      await _waitForRemoteAssetState(
+        tester,
+        container,
+        assetId,
+        (asset) => asset.visibility == AssetVisibility.timeline && !asset.isTrashed,
+        reason: 'Expected 048 fixture asset to start as a visible timeline asset',
+      );
+      await _expectTimelineAssetSet(
+        tester,
+        mainTimeline,
+        includes: {assetId},
+        excludes: const {},
+        reason: 'Main timeline should include the 048 fixture before locking',
+      );
+      await _expectTimelineAssetSet(
+        tester,
+        lockedTimeline,
+        includes: const {},
+        excludes: {assetId},
+        reason: 'Locked folder timeline should start empty for the 048 fixture',
+      );
+
+      await _selectTimelineAssetsById(tester, container, [assetId]);
+      expect(_bottomSheetIcon(GeneralBottomSheet, Icons.lock_rounded), findsOneWidget);
+      await _tapBottomSheetAction(tester, GeneralBottomSheet, Icons.lock_rounded);
+      await _waitForMultiSelectCount(tester, container, 0, timeout: const Duration(seconds: 30));
+      await _waitForAssetInfoState(
+        tester,
+        assetsApi,
+        assetId,
+        (asset) => asset.visibility == api.AssetVisibility.locked && !asset.isTrashed,
+        reason: 'Expected the UI lock action to move the 048 asset to locked visibility on the server',
+      );
+      await _waitForRemoteAssetState(
+        tester,
+        container,
+        assetId,
+        (asset) => asset.visibility == AssetVisibility.locked && !asset.isTrashed,
+        reason: 'Expected the UI lock action to update the local 048 asset visibility',
+      );
+      await _expectTimelineAssetSet(
+        tester,
+        mainTimeline,
+        includes: const {},
+        excludes: {assetId},
+        reason: 'Main timeline should not leak the locked 048 asset',
+      );
+      await _expectTimelineAssetSet(
+        tester,
+        lockedTimeline,
+        includes: {assetId},
+        excludes: const {},
+        reason: 'Locked folder timeline should contain the locked 048 asset',
+      );
+
+      unawaited(router.push(const DriftLockedFolderRoute()));
+      await pumpUntilFound(tester, find.byType(DriftLockedFolderPage), timeout: const Duration(seconds: 30));
+      await pumpUntilFound(tester, _timelineAssetTileForAssetId(assetId), timeout: const Duration(seconds: 30));
+
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+      await _pumpFor(tester, const Duration(milliseconds: 500));
+      expect(
+        _timelineAssetTileForAssetId(assetId),
+        findsNothing,
+        reason: 'Locked folder should hide sensitive content while the app is inactive',
+      );
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      await pumpUntilFound(tester, _timelineAssetTileForAssetId(assetId), timeout: const Duration(seconds: 30));
+
+      final lockedFolderLifecycle = tester.state(find.byType(DriftLockedFolderPage)) as WidgetsBindingObserver;
+      lockedFolderLifecycle.didChangeAppLifecycleState(AppLifecycleState.paused);
+      await _pumpFor(tester, const Duration(milliseconds: 500));
+      await _waitForAuthStatus(
+        tester,
+        authApi,
+        (status) => status.pinCode && !status.isElevated,
+        reason: 'Backgrounding from the locked folder should relock the current session',
+      );
+      await _pumpUntil(
+        tester,
+        () => find.byType(DriftLockedFolderPage).evaluate().isEmpty,
+        timeout: const Duration(seconds: 30),
+      );
+
+      unawaited(router.push(const DriftLockedFolderRoute()));
+      await pumpUntilFound(tester, find.byType(PinAuthPage), timeout: const Duration(seconds: 30));
+      expect(find.byType(DriftLockedFolderPage), findsNothing);
+      await pumpUntilFound(tester, find.text('use_biometric'.tr()), timeout: const Duration(seconds: 30));
+
+      await router.replaceAll([
+        const TabShellRoute(children: [MainTimelineRoute()]),
+      ]);
+      await pumpUntilFound(tester, find.byType(MainTimelinePage), timeout: const Duration(seconds: 30));
+      await secureStorage.write(kSecuredPinCode, _lockedFolderPin);
+
+      unawaited(router.push(const DriftLockedFolderRoute()));
+      await _pumpFor(tester, const Duration(seconds: 1));
+      expect(
+        find.byType(DriftLockedFolderPage),
+        findsNothing,
+        reason: 'A failed biometric check must not open locked assets',
+      );
+      await _waitForAuthStatus(
+        tester,
+        authApi,
+        (status) => status.pinCode && !status.isElevated,
+        reason: 'A failed biometric check must leave the session locked',
+      );
+
+      unawaited(router.push(const DriftLockedFolderRoute()));
+      await pumpUntilFound(tester, find.byType(DriftLockedFolderPage), timeout: const Duration(seconds: 30));
+      await _waitForAuthStatus(
+        tester,
+        authApi,
+        (status) => status.pinCode && status.isElevated,
+        reason: 'A successful biometric check should unlock the session using the saved PIN',
+      );
+      await pumpUntilFound(tester, _timelineAssetTileForAssetId(assetId), timeout: const Duration(seconds: 30));
+
+      final lockedContainer = ProviderScope.containerOf(tester.element(find.byType(Timeline).last), listen: false);
+      await _selectTimelineAssetsById(tester, lockedContainer, [assetId]);
+      expect(_bottomSheetIcon(LockedFolderBottomSheet, Icons.lock_open_rounded), findsOneWidget);
+      await _tapBottomSheetAction(tester, LockedFolderBottomSheet, Icons.lock_open_rounded);
+      await _waitForMultiSelectCount(tester, lockedContainer, 0, timeout: const Duration(seconds: 30));
+      await _waitForAssetInfoState(
+        tester,
+        assetsApi,
+        assetId,
+        (asset) => asset.visibility == api.AssetVisibility.timeline && !asset.isTrashed,
+        reason: 'Expected removing the 048 asset from locked folder to restore server timeline visibility',
+      );
+      await _waitForRemoteAssetState(
+        tester,
+        container,
+        assetId,
+        (asset) => asset.visibility == AssetVisibility.timeline && !asset.isTrashed,
+        reason: 'Expected removing the 048 asset from locked folder to restore local timeline visibility',
+      );
+      await _expectTimelineAssetSet(
+        tester,
+        mainTimeline,
+        includes: {assetId},
+        excludes: const {},
+        reason: 'Main timeline should include the 048 asset after removing it from locked folder',
+      );
+      await _expectTimelineAssetSet(
+        tester,
+        lockedTimeline,
+        includes: const {},
+        excludes: {assetId},
+        reason: 'Locked folder timeline should exclude the 048 asset after move out',
+      );
     });
 
     if (_selectedCaseId.isNotEmpty && !_registeredSelectedCase) {
@@ -6458,6 +6743,7 @@ Future<void> _loadAppPreservingStore(
   WidgetTester tester, {
   bool overrideCancellation = false,
   bool closeDriftOnDispose = true,
+  List<Override> extraOverrides = const [],
 }) async {
   await EasyLocalization.ensureInitialized();
   final (drift, _) = await Bootstrap.initDomain();
@@ -6466,6 +6752,7 @@ Future<void> _loadAppPreservingStore(
       overrides: [
         driftProvider.overrideWith(_driftOverrideForTest(drift, closeOnDispose: closeDriftOnDispose)),
         if (overrideCancellation) cancellationProvider.overrideWithValue(Completer()),
+        ...extraOverrides,
       ],
       child: const app.MainWidget(),
     ),
@@ -6477,6 +6764,7 @@ Future<void> _loadAuthenticatedApp(
   WidgetTester tester, {
   bool overrideCancellation = false,
   bool closeDriftOnDispose = true,
+  List<Override> extraOverrides = const [],
 }) async {
   await EasyLocalization.ensureInitialized();
   final (drift, _) = await Bootstrap.initDomain();
@@ -6489,6 +6777,7 @@ Future<void> _loadAuthenticatedApp(
       overrides: [
         driftProvider.overrideWith(_driftOverrideForTest(drift, closeOnDispose: closeDriftOnDispose)),
         if (overrideCancellation) cancellationProvider.overrideWithValue(Completer()),
+        ...extraOverrides,
       ],
       child: const app.MainWidget(),
     ),
@@ -8797,6 +9086,30 @@ Future<api.AssetResponseDto> _waitForAssetInfoState(
   }
 
   fail('$reason; latest server asset=$latest; last error=$lastError');
+}
+
+Future<api.AuthStatusResponseDto> _waitForAuthStatus(
+  WidgetTester tester,
+  api.AuthenticationApi authApi,
+  bool Function(api.AuthStatusResponseDto status) matches, {
+  required String reason,
+}) async {
+  api.AuthStatusResponseDto? latest;
+  Object? lastError;
+  final end = DateTime.now().add(const Duration(seconds: 30));
+  while (DateTime.now().isBefore(end)) {
+    try {
+      latest = await authApi.getAuthStatus();
+      if (latest != null && matches(latest)) {
+        return latest;
+      }
+    } catch (error) {
+      lastError = error;
+    }
+    await _pumpFor(tester, const Duration(milliseconds: 300));
+  }
+
+  fail('$reason; latest auth status=$latest; last error=$lastError');
 }
 
 Future<List<BaseAsset>> _expectTimelineAssetSet(
