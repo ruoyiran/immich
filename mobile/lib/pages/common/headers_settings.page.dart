@@ -42,11 +42,12 @@ class HeaderSettingsPage extends HookConsumerWidget {
     setInitialHeaders.value = true;
 
     final list = [
-      ...headers.value.map((headerValue) {
+      ...headers.value.asMap().entries.map((entry) {
         return HeaderKeyValueSettings(
-          header: headerValue,
+          index: entry.key,
+          header: entry.value,
           onRemove: () {
-            headers.value.remove(headerValue);
+            headers.value.remove(entry.value);
             headers.value = headers.value.toList();
           },
         );
@@ -59,6 +60,7 @@ class HeaderSettingsPage extends HookConsumerWidget {
         centerTitle: false,
         actions: [
           IconButton(
+            key: const Key('header-settings-add-button'),
             onPressed: () {
               headers.value.add(SettingsHeader());
               headers.value = headers.value.toList();
@@ -71,6 +73,7 @@ class HeaderSettingsPage extends HookConsumerWidget {
       body: PopScope(
         onPopInvokedWithResult: (didPop, _) => saveHeaders(ref, headers.value),
         child: ListView.separated(
+          key: const Key('header-settings-list'),
           padding: const EdgeInsets.symmetric(horizontal: 8.0, vertical: 16.0),
           itemCount: list.length,
           itemBuilder: (ctx, index) => list[index],
@@ -100,12 +103,13 @@ class HeaderSettingsPage extends HookConsumerWidget {
 }
 
 class HeaderKeyValueSettings extends StatelessWidget {
+  final int index;
   final TextEditingController keyController;
   final TextEditingController valueController;
   final SettingsHeader header;
   final Function() onRemove;
 
-  HeaderKeyValueSettings({super.key, required this.header, required this.onRemove})
+  HeaderKeyValueSettings({super.key, required this.index, required this.header, required this.onRemove})
     : keyController = TextEditingController(text: header.key),
       valueController = TextEditingController(text: header.value);
 
@@ -127,6 +131,7 @@ class HeaderKeyValueSettings extends StatelessWidget {
             children: [
               Expanded(
                 child: TextFormField(
+                  key: Key('header-settings-key-$index'),
                   controller: keyController,
                   decoration: InputDecoration(
                     labelText: 'header_settings_header_name_input'.tr(),
@@ -143,6 +148,7 @@ class HeaderKeyValueSettings extends StatelessWidget {
               Padding(
                 padding: const EdgeInsets.only(left: 8),
                 child: IconButton(
+                  key: Key('header-settings-delete-$index'),
                   style: ElevatedButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 12)),
                   color: Colors.red[400],
                   onPressed: onRemove,
@@ -155,6 +161,7 @@ class HeaderKeyValueSettings extends StatelessWidget {
         Padding(
           padding: const EdgeInsets.only(left: 8, right: 8, bottom: 12.0),
           child: TextFormField(
+            key: Key('header-settings-value-$index'),
             controller: valueController,
             decoration: InputDecoration(
               labelText: 'header_settings_header_value_input'.tr(),

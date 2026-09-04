@@ -10,6 +10,11 @@ import 'package:immich_mobile/providers/websocket.provider.dart';
 import 'package:immich_mobile/widgets/common/immich_toast.dart';
 
 class ChangePasswordForm extends HookConsumerWidget {
+  static const passwordFieldKey = Key('change-password-new-password');
+  static const confirmPasswordFieldKey = Key('change-password-confirm-password');
+  static const submitButtonKey = Key('change-password-submit');
+  static const backButtonKey = Key('change-password-back');
+
   const ChangePasswordForm({super.key});
 
   @override
@@ -90,6 +95,7 @@ class ChangePasswordForm extends HookConsumerWidget {
                       },
                     ),
                     TextButton.icon(
+                      key: ChangePasswordForm.backButtonKey,
                       icon: const Icon(Icons.arrow_back),
                       onPressed: () => AutoRouter.of(context).back(),
                       label: const Text('back').tr(),
@@ -113,6 +119,7 @@ class PasswordInput extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return TextFormField(
+      key: ChangePasswordForm.passwordFieldKey,
       obscureText: true,
       controller: controller,
       decoration: InputDecoration(
@@ -140,6 +147,7 @@ class ConfirmPasswordInput extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return TextFormField(
+      key: ChangePasswordForm.confirmPasswordFieldKey,
       obscureText: true,
       controller: confirmController,
       decoration: InputDecoration(
@@ -161,6 +169,7 @@ class ChangePasswordButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return ElevatedButton(
+      key: ChangePasswordForm.submitButtonKey,
       style: ElevatedButton.styleFrom(
         visualDensity: VisualDensity.standard,
         padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 25),
