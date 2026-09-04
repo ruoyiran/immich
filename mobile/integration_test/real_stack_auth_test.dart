@@ -61,6 +61,7 @@ import 'package:immich_mobile/presentation/pages/drift_remote_album.page.dart';
 import 'package:immich_mobile/presentation/pages/edit/drift_edit.page.dart';
 import 'package:immich_mobile/presentation/pages/edit/editor.provider.dart';
 import 'package:immich_mobile/presentation/pages/search/drift_search.page.dart';
+import 'package:immich_mobile/presentation/pages/search/paginated_search.provider.dart';
 import 'package:immich_mobile/presentation/widgets/album/album_selector.widget.dart';
 import 'package:immich_mobile/presentation/widgets/asset_viewer/asset_details/date_time_details.widget.dart';
 import 'package:immich_mobile/presentation/widgets/asset_viewer/asset_details/location_details.widget.dart';
@@ -220,6 +221,9 @@ const _multiSelectRemoteSeedPrefix = String.fromEnvironment(
   'IMMICH_E2E_MULTISELECT_REMOTE_SEED_PREFIX',
   defaultValue: 'immich-e2e-multiselect-038-remote-',
 );
+const _similarTargetAssetId = String.fromEnvironment('IMMICH_E2E_SIMILAR_TARGET_ASSET_ID');
+const _similarCandidateAssetId = String.fromEnvironment('IMMICH_E2E_SIMILAR_CANDIDATE_ASSET_ID');
+const _similarControlAssetId = String.fromEnvironment('IMMICH_E2E_SIMILAR_CONTROL_ASSET_ID');
 
 var _registeredSelectedCase = false;
 
@@ -5523,6 +5527,198 @@ void main() async {
       await timeline.dispose();
     });
 
+    _realStackSessionTest('MOB-UI-047-$_caseSuffix', 'opens similar photos and handles no-result assets', (
+      tester,
+    ) async {
+      tester.view.devicePixelRatio = 1.0;
+      tester.view.physicalSize = const Size(430, 932);
+      addTearDown(tester.view.reset);
+
+      for (final entry in {
+        'IMMICH_E2E_SIMILAR_TARGET_ASSET_ID': _similarTargetAssetId,
+        'IMMICH_E2E_SIMILAR_CANDIDATE_ASSET_ID': _similarCandidateAssetId,
+        'IMMICH_E2E_SIMILAR_CONTROL_ASSET_ID': _similarControlAssetId,
+      }.entries) {
+        expect(entry.value, isNotEmpty, reason: 'Pass --dart-define=${entry.key}=... from the 047 fixture seed');
+      }
+      final targetAssetId = _similarTargetAssetId;
+      final candidateAssetId = _similarCandidateAssetId;
+      final controlAssetId = _similarControlAssetId;
+
+      await _loadAuthenticatedApp(tester, overrideCancellation: true, closeDriftOnDispose: false);
+      final container = _containerOfApp(tester);
+      final apiService = container.read(apiServiceProvider);
+      final assetsApi = apiService.assetsApi;
+      final searchApi = apiService.searchApi;
+      final user = Store.tryGet(StoreKey.currentUser);
+      expect(user, isNotNull);
+      final fixtureIds = [targetAssetId, candidateAssetId, controlAssetId];
+
+      addTearDown(() async {
+        try {
+          container.read(multiSelectProvider.notifier).reset();
+        } catch (_) {
+          // ProviderScope may already be disposed when an earlier expectation fails.
+        }
+        for (final assetId in fixtureIds) {
+          await _deleteTestAssetBestEffort(assetsApi, assetId);
+        }
+      });
+
+      await container.read(syncApiRepositoryProvider).deleteSyncAck(_allReplayableSyncAckTypes);
+      await Store.delete(StoreKey.syncMigrationStatus);
+      await container.read(syncStreamRepositoryProvider).reset();
+      var syncSuccess = await container.read(syncStreamServiceProvider).sync();
+      expect(syncSuccess, isTrue);
+
+      for (final assetId in fixtureIds) {
+        await _waitForSuccessfulResponse(
+          tester,
+          () => assetsApi.viewAssetWithHttpInfo(assetId, size: api.AssetMediaSize.thumbnail),
+          timeout: const Duration(minutes: 3),
+        );
+      }
+
+      syncSuccess = await container.read(syncStreamServiceProvider).sync();
+      expect(syncSuccess, isTrue);
+      await pumpUntilFound(tester, find.byType(Timeline), timeout: const Duration(seconds: 60));
+
+      final targetAsset = await _waitForRemoteAssetState(
+        tester,
+        container,
+        targetAssetId,
+        (asset) => asset.isRemoteOnly && asset.isImage && !asset.isTrashed,
+        reason: 'Expected 047 similar target asset to sync as a visible remote image',
+      );
+      await _waitForRemoteAssetState(
+        tester,
+        container,
+        candidateAssetId,
+        (asset) => asset.isRemoteOnly && asset.isImage && !asset.isTrashed,
+        reason: 'Expected 047 similar candidate asset to sync as a visible remote image',
+      );
+      final controlAsset = await _waitForRemoteAssetState(
+        tester,
+        container,
+        controlAssetId,
+        (asset) => asset.isRemoteOnly && asset.isImage && !asset.isTrashed,
+        reason: 'Expected 047 no-result control asset to sync as a visible remote image',
+      );
+
+      final similarDto = api.SmartSearchDto(
+        queryAssetId: api.Optional.present(targetAssetId),
+        visibility: const api.Optional.present(api.AssetVisibility.timeline),
+        page: const api.Optional.present(1),
+        size: const api.Optional.present(10),
+      );
+      final serverSimilar = await _waitForServerSmartSearchResponse(
+        tester,
+        searchApi,
+        similarDto,
+        (response) => _serverSearchAssetIds(response).contains(candidateAssetId),
+        reason: 'Expected smart search queryAssetId to return the paired 047 candidate',
+      );
+      expect(_serverSearchAssetIds(serverSimilar), contains(candidateAssetId));
+      expect(_serverSearchAssetIds(serverSimilar), isNot(contains(targetAssetId)));
+      expect(_serverSearchAssetIds(serverSimilar), isNot(contains(controlAssetId)));
+
+      final serverEmpty = await _waitForServerSmartSearchResponse(
+        tester,
+        searchApi,
+        api.SmartSearchDto(
+          queryAssetId: api.Optional.present(controlAssetId),
+          visibility: const api.Optional.present(api.AssetVisibility.timeline),
+          page: const api.Optional.present(1),
+          size: const api.Optional.present(10),
+        ),
+        (response) => response.assets.total == 0 && response.assets.items.isEmpty,
+        reason: 'Expected smart search for the 047 control asset to return no results',
+      );
+      expect(_serverSearchAssetIds(serverEmpty), isEmpty);
+
+      final serviceIds = await _waitForSearchServiceAssetIds(
+        tester,
+        container.read(searchServiceProvider),
+        _searchFilter().copyWith(assetId: targetAssetId),
+        (ids) => ids.contains(candidateAssetId) && !ids.contains(targetAssetId) && !ids.contains(controlAssetId),
+        reason: 'Expected app search service to mirror server similar-photo candidates',
+      );
+      expect(serviceIds, contains(candidateAssetId));
+
+      await _openTimelineAsset(tester, targetAsset);
+      await _showViewerControls(tester, container);
+      await _tapViewerMenuAction(tester, Icons.compare);
+      await pumpUntilFound(tester, find.byType(DriftSearchPage), timeout: const Duration(seconds: 30));
+      await _waitForPaginatedSearchAssetIds(
+        tester,
+        container,
+        (ids) => ids.contains(candidateAssetId) && !ids.contains(targetAssetId) && !ids.contains(controlAssetId),
+        reason: 'Expected viewer similar-photo action to show only the paired candidate',
+      );
+      await pumpUntilFound(
+        tester,
+        _timelineAssetTileForAssetId(candidateAssetId),
+        timeout: const Duration(seconds: 30),
+      );
+      expect(_timelineAssetTileForAssetId(targetAssetId), findsNothing);
+      expect(_timelineAssetTileForAssetId(controlAssetId), findsNothing);
+
+      final searchTimelineContainer = ProviderScope.containerOf(
+        tester.element(find.byType(Timeline).last),
+        listen: false,
+      );
+      await _selectTimelineAssetsById(tester, searchTimelineContainer, [candidateAssetId]);
+      expect(_bottomSheetIcon(GeneralBottomSheet, Icons.delete_outline), findsOneWidget);
+      await _tapBottomSheetAction(tester, GeneralBottomSheet, Icons.delete_outline);
+      await _waitForMultiSelectCount(tester, searchTimelineContainer, 0, timeout: const Duration(seconds: 30));
+      await _waitForAssetInfoState(
+        tester,
+        assetsApi,
+        candidateAssetId,
+        (asset) => asset.isTrashed,
+        reason: 'Expected processing the non-kept 047 candidate to move it to trash',
+      );
+
+      final timelineFactory = container.read(timelineFactoryProvider);
+      final mainTimeline = timelineFactory.main([user!.id]);
+      final trashTimeline = timelineFactory.trash(user.id);
+      addTearDown(mainTimeline.dispose);
+      addTearDown(trashTimeline.dispose);
+      await _expectTimelineAssetSet(
+        tester,
+        mainTimeline,
+        includes: {targetAssetId, controlAssetId},
+        excludes: {candidateAssetId},
+        reason: 'Expected kept/control 047 assets to remain in timeline after processing the candidate',
+      );
+      await _expectTimelineAssetSet(
+        tester,
+        trashTimeline,
+        includes: {candidateAssetId},
+        excludes: {targetAssetId, controlAssetId},
+        reason: 'Expected processed 047 candidate to appear in trash',
+      );
+
+      final router = container.read(appRouterProvider);
+      for (var attempt = 0; attempt < 3 && !tester.any(find.byType(MainTimelinePage)); attempt++) {
+        await router.maybePop();
+        await _pumpFor(tester, const Duration(milliseconds: 500));
+      }
+      await pumpUntilFound(tester, find.byType(MainTimelinePage), timeout: const Duration(seconds: 30));
+      await _openTimelineAsset(tester, controlAsset);
+      await _showViewerControls(tester, container);
+      await _tapViewerMenuAction(tester, Icons.compare);
+      await pumpUntilFound(tester, find.byType(DriftSearchPage), timeout: const Duration(seconds: 30));
+      final emptyUiIds = await _waitForPaginatedSearchAssetIds(
+        tester,
+        container,
+        (ids) => ids.isEmpty,
+        reason: 'Expected no-result 047 control asset to render an empty similar-photo search',
+      );
+      expect(emptyUiIds, isEmpty);
+      await pumpUntilFound(tester, find.text('search_no_result'.tr()), timeout: const Duration(seconds: 30));
+    });
+
     if (_selectedCaseId.isNotEmpty && !_registeredSelectedCase) {
       test(_selectedCaseId, () => fail('No real stack auth test registered for $_selectedCaseId'));
     }
@@ -8105,6 +8301,31 @@ Future<api.SearchResponseDto> _waitForServerSearchResponse(
   fail('$reason; latest server search=$latest; last error=$lastError');
 }
 
+Future<api.SearchResponseDto> _waitForServerSmartSearchResponse(
+  WidgetTester tester,
+  api.SearchApi searchApi,
+  api.SmartSearchDto dto,
+  bool Function(api.SearchResponseDto response) matches, {
+  required String reason,
+}) async {
+  api.SearchResponseDto? latest;
+  Object? lastError;
+  final end = DateTime.now().add(const Duration(seconds: 60));
+  while (DateTime.now().isBefore(end)) {
+    try {
+      latest = await searchApi.searchSmart(dto);
+      if (latest != null && matches(latest)) {
+        return latest;
+      }
+    } catch (error) {
+      lastError = error;
+    }
+    await _pumpFor(tester, const Duration(milliseconds: 500));
+  }
+
+  fail('$reason; latest server smart search=$latest; last error=$lastError');
+}
+
 Future<Set<String>> _waitForSearchServiceAssetIds(
   WidgetTester tester,
   SearchService searchService,
@@ -8132,6 +8353,29 @@ Future<Set<String>> _waitForSearchServiceAssetIds(
   }
 
   fail('$reason; latest app search ids=${latest.toList()..sort()}; last error=$lastError');
+}
+
+Future<Set<String>> _waitForPaginatedSearchAssetIds(
+  WidgetTester tester,
+  ProviderContainer container,
+  bool Function(Set<String> ids) matches, {
+  required String reason,
+}) async {
+  var latest = const <String>{};
+  final end = DateTime.now().add(const Duration(seconds: 60));
+  while (DateTime.now().isBefore(end)) {
+    final searchState = container.read(paginatedSearchProvider);
+    latest = {
+      for (final asset in searchState.assets)
+        if (asset.remoteId != null) asset.remoteId!,
+    };
+    if (!searchState.isLoading && matches(latest)) {
+      return latest;
+    }
+    await _pumpFor(tester, const Duration(milliseconds: 500));
+  }
+
+  fail('$reason; latest search page ids=${latest.toList()..sort()}');
 }
 
 Future<List<Map<String, dynamic>>> _waitForServerFaces(
