@@ -271,6 +271,7 @@ class _DynamicMyLocationButton extends StatelessWidget {
             opacity: offset < 0.8 ? 1 : 0,
             duration: const Duration(milliseconds: 150),
             child: ElevatedButton(
+              key: const Key('drift-map-my-location-button'),
               onPressed: onZoomToLocation,
               style: ElevatedButton.styleFrom(shape: const CircleBorder()),
               child: const Icon(Icons.my_location),
