@@ -400,6 +400,7 @@ class _DriftSlideshowPageState extends ConsumerState<DriftSlideshowPage> with Si
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      key: const Key('drift-slideshow-page'),
       appBar: PreferredSize(
         preferredSize: Size(AppBar().preferredSize.width, AppBar().preferredSize.height + 5),
         child: IgnorePointer(
@@ -414,10 +415,12 @@ class _DriftSlideshowPageState extends ConsumerState<DriftSlideshowPage> with Si
                   title: Text("slideshow".t(context: context)),
                   actions: [
                     IconButton(
+                      key: Key(_paused ? 'slideshow-play-action' : 'slideshow-pause-action'),
                       onPressed: _paused ? _play : _pause,
                       icon: Icon(_paused ? Icons.play_arrow : Icons.pause),
                     ),
                     IconButton(
+                      key: const Key('slideshow-settings-action'),
                       onPressed: () {
                         _pause();
                         unawaited(context.pushRoute(SettingsSubRoute(section: SettingSection.assetViewer)));
@@ -440,6 +443,7 @@ class _DriftSlideshowPageState extends ConsumerState<DriftSlideshowPage> with Si
           PhotoViewGestureDetectorScope(
             axis: Axis.horizontal,
             child: PageView.builder(
+              key: const Key('slideshow-page-view'),
               controller: _pageController,
               physics: const FastClampingScrollPhysics(),
               itemCount: widget.timeline.totalAssets,

@@ -51,11 +51,13 @@ import 'package:immich_mobile/pages/backup/drift_backup_album_selection.page.dar
 import 'package:immich_mobile/pages/backup/drift_backup_asset_detail.page.dart';
 import 'package:immich_mobile/pages/backup/drift_backup_options.page.dart';
 import 'package:immich_mobile/pages/backup/drift_upload_detail.page.dart';
+import 'package:immich_mobile/pages/common/settings.page.dart';
 import 'package:immich_mobile/pages/library/folder/folder.page.dart';
 import 'package:immich_mobile/pages/library/locked/pin_auth.page.dart';
 import 'package:immich_mobile/pages/login/login.page.dart';
 import 'package:immich_mobile/pages/share_intent/share_intent.page.dart';
 import 'package:immich_mobile/presentation/pages/dev/main_timeline.page.dart';
+import 'package:immich_mobile/presentation/pages/drift_activities.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_album.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_album_options.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_archive.page.dart';
@@ -68,6 +70,7 @@ import 'package:immich_mobile/presentation/pages/drift_memory.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_recently_added.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_recently_taken.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_remote_album.page.dart';
+import 'package:immich_mobile/presentation/pages/drift_slideshow.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_trash.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_video.page.dart';
 import 'package:immich_mobile/presentation/pages/edit/drift_edit.page.dart';
@@ -142,6 +145,7 @@ import 'package:immich_mobile/widgets/backup/drift_album_info_list_tile.dart';
 import 'package:immich_mobile/widgets/common/confirm_dialog.dart';
 import 'package:immich_mobile/widgets/common/selection_sliver_app_bar.dart';
 import 'package:immich_mobile/widgets/photo_view/photo_view.dart';
+import 'package:immich_mobile/widgets/settings/asset_viewer_settings/slideshow_settings.dart';
 import 'package:immich_mobile/widgets/settings/setting_list_tile.dart';
 import 'package:local_auth/local_auth.dart' show BiometricType, LocalAuthentication;
 import 'package:maplibre_gl/maplibre_gl.dart' show LatLng;
@@ -7532,6 +7536,262 @@ void main() async {
       },
     );
 
+    _realStackSessionTest('MOB-UI-055-$_caseSuffix', 'validates shared album activity stream and slideshow controls', (
+      tester,
+    ) async {
+      tester.view.devicePixelRatio = 1.0;
+      tester.view.physicalSize = const Size(430, 932);
+      addTearDown(tester.view.reset);
+
+      final collaboratorPassword = _albumSharingCollaboratorPassword;
+      final viewerPassword = _albumSharingViewerPassword;
+      final collaboratorToken = await _loginForAccessToken(_albumSharingCollaboratorEmail, collaboratorPassword);
+      final viewerToken = await _loginForAccessToken(_albumSharingViewerEmail, viewerPassword);
+
+      await _loadAuthenticatedApp(tester, overrideCancellation: true, closeDriftOnDispose: false);
+      var container = _containerOfApp(tester);
+      var albumsApi = container.read(apiServiceProvider).albumsApi;
+      final ownerToken = Store.get(StoreKey.accessToken);
+      final owner = Store.tryGet(StoreKey.currentUser);
+      expect(owner, isNotNull);
+
+      final originalSlideshowDuration = SettingsRepository.instance.appConfig.slideshow.duration;
+      addTearDown(() async {
+        await SettingsRepository.instance.write(SettingsKey.slideshowDuration, originalSlideshowDuration);
+      });
+      await SettingsRepository.instance.write(SettingsKey.slideshowDuration, 30);
+
+      final createdRemoteAssetIds = <String>[];
+      String? ownedAlbumId;
+      addTearDown(() async {
+        final albumId = ownedAlbumId;
+        if (albumId != null) {
+          await _deleteAlbumBestEffortWithToken(albumId, ownerToken);
+        }
+        for (final assetId in createdRemoteAssetIds) {
+          await _deleteTestAssetBestEffortWithToken(assetId, ownerToken);
+        }
+      });
+
+      await _resetAndSyncRemoteState(tester, container);
+
+      final runToken = DateTime.now().toUtc().microsecondsSinceEpoch.toString();
+      final shortToken = runToken.substring(runToken.length - 8);
+      final photoId = await _uploadGeneratedJpegAsSecondClient(
+        'immich-e2e-activity-slideshow-055-photo-$runToken.jpg',
+        DateTime.now().toUtc().add(const Duration(days: 3652)),
+      );
+      createdRemoteAssetIds.add(photoId);
+      final videoId = await _uploadGeneratedMp4AsSecondClient(
+        'immich-e2e-activity-slideshow-055-video-$runToken.mp4',
+        DateTime.now().toUtc().add(const Duration(days: 3652, seconds: 1)),
+      );
+      createdRemoteAssetIds.add(videoId);
+
+      final albumName = 'immich-e2e-activity-slideshow-055-$shortToken';
+      final createdAlbum = await albumsApi.createAlbum(
+        api.CreateAlbumDto(albumName: albumName, assetIds: api.Optional.present([photoId, videoId])),
+      );
+      expect(createdAlbum, isNotNull);
+      ownedAlbumId = createdAlbum!.id;
+      await _addAlbumUserViaApi(
+        tester,
+        ownedAlbumId,
+        userId: _albumSharingCollaboratorId,
+        role: 'editor',
+        accessToken: ownerToken,
+      );
+      await _addAlbumUserViaApi(
+        tester,
+        ownedAlbumId,
+        userId: _albumSharingViewerId,
+        role: 'viewer',
+        accessToken: ownerToken,
+      );
+      await _waitForAlbumInfoState(
+        tester,
+        albumsApi,
+        ownedAlbumId,
+        (album) => album.isActivityEnabled && album.assetCount == 2 && album.albumUsers.length == 3,
+        reason: 'Expected the 055 shared album to enable activities with image and video assets',
+      );
+
+      await container.read(syncStreamServiceProvider).sync();
+      var ownerAlbum = await _waitForRemoteAlbumState(
+        tester,
+        container,
+        ownedAlbumId,
+        (album) => album.name == albumName && album.isShared && album.isActivityEnabled,
+        reason: 'Expected owner local shared album to show activity controls',
+      );
+      await _waitForRemoteAlbumAssetIds(
+        tester,
+        container,
+        ownedAlbumId,
+        includes: {photoId, videoId},
+        excludes: const {},
+        reason: 'Expected the 055 album to sync both image and video members',
+      );
+
+      var router = container.read(appRouterProvider);
+      unawaited(router.push(RemoteAlbumRoute(album: ownerAlbum)));
+      await pumpUntilFound(tester, find.byType(RemoteAlbumPage), timeout: const Duration(seconds: 30));
+      await pumpUntilFound(tester, find.text(albumName), timeout: const Duration(seconds: 30));
+      await _pressRemoteAlbumAppBarAction(tester, const Key('remote-album-activity-action'));
+      await pumpUntilFound(tester, find.byType(DriftActivitiesPage), timeout: const Duration(seconds: 30));
+      await pumpUntilFound(
+        tester,
+        find.byKey(const Key('drift-activity-comment-field')),
+        timeout: const Duration(seconds: 30),
+      );
+
+      final ownerComment = 'owner activity 055 $shortToken';
+      await tester.enterText(find.byKey(const Key('drift-activity-comment-field')), ownerComment);
+      await _pumpFor(tester, const Duration(milliseconds: 300));
+      await _pressIconButtonByKey(
+        tester,
+        const Key('drift-activity-send-action'),
+        reason: 'Expected the non-empty activity comment to enable the send action',
+      );
+      await pumpUntilFound(tester, find.text(ownerComment), timeout: const Duration(seconds: 30));
+
+      var activities = await _waitForActivityComments(
+        tester,
+        ownedAlbumId,
+        accessToken: ownerToken,
+        includes: {ownerComment},
+        reason: 'Expected the owner UI comment to be persisted by the activity API',
+      );
+      final ownerActivity = _activityWithComment(activities, ownerComment);
+      expect((ownerActivity['user'] as Map<String, dynamic>)['id'], owner!.id);
+
+      final collaboratorComment = 'collaborator reply 055 $shortToken';
+      final collaboratorActivity = await _createAlbumActivityViaApi(
+        ownedAlbumId,
+        comment: collaboratorComment,
+        accessToken: collaboratorToken,
+      );
+      expect((collaboratorActivity['user'] as Map<String, dynamic>)['id'], _albumSharingCollaboratorId);
+      await _waitForRejectedResponse(
+        tester,
+        () => _authenticatedApiRequest('DELETE', '/activities/${collaboratorActivity['id']}', accessToken: viewerToken),
+        reason: 'Expected a viewer member to be unable to delete another user comment',
+        acceptedStatusCodes: const {403, 404},
+      );
+
+      container = await _restartAuthenticatedApp(
+        tester,
+        email: _albumSharingCollaboratorEmail,
+        password: collaboratorPassword,
+      );
+      await _resetAndSyncRemoteState(tester, container);
+      final sharedAlbum = await _waitForRemoteAlbumState(
+        tester,
+        container,
+        ownedAlbumId,
+        (album) => album.name == albumName && album.isShared && album.isActivityEnabled,
+        reason: 'Expected the collaborator to see the 055 shared album after refresh',
+      );
+      router = container.read(appRouterProvider);
+      unawaited(router.push(RemoteAlbumRoute(album: sharedAlbum)));
+      await pumpUntilFound(tester, find.byType(RemoteAlbumPage), timeout: const Duration(seconds: 30));
+      await _pressRemoteAlbumAppBarAction(tester, const Key('remote-album-activity-action'));
+      await pumpUntilFound(tester, find.byType(DriftActivitiesPage), timeout: const Duration(seconds: 30));
+      await pumpUntilFound(tester, find.text(ownerComment), timeout: const Duration(seconds: 30));
+      await pumpUntilFound(tester, find.text(collaboratorComment), timeout: const Duration(seconds: 30));
+
+      activities = await _waitForActivityComments(
+        tester,
+        ownedAlbumId,
+        accessToken: collaboratorToken,
+        includes: {ownerComment, collaboratorComment},
+        reason: 'Expected both comments to be visible to another account',
+      );
+      final createdTimes = activities.map((activity) => DateTime.parse(activity['createdAt'] as String)).toList();
+      expect(createdTimes, orderedEquals([...createdTimes]..sort()));
+
+      container = await _restartAuthenticatedApp(tester, email: _email, password: _password);
+      albumsApi = container.read(apiServiceProvider).albumsApi;
+      await _resetAndSyncRemoteState(tester, container);
+      ownerAlbum = await _waitForRemoteAlbumState(
+        tester,
+        container,
+        ownedAlbumId,
+        (album) => album.name == albumName && album.assetCount == 2 && album.isActivityEnabled,
+        reason: 'Expected the owner album to remain available before activity deletion',
+      );
+      router = container.read(appRouterProvider);
+      unawaited(router.push(RemoteAlbumRoute(album: ownerAlbum)));
+      await pumpUntilFound(tester, find.byType(RemoteAlbumPage), timeout: const Duration(seconds: 30));
+      await _pressRemoteAlbumAppBarAction(tester, const Key('remote-album-activity-action'));
+      await pumpUntilFound(tester, find.byType(DriftActivitiesPage), timeout: const Duration(seconds: 30));
+      await pumpUntilFound(tester, find.text(collaboratorComment), timeout: const Duration(seconds: 30));
+
+      await tester.drag(find.byKey(Key(collaboratorActivity['id'] as String)).first, const Offset(-600, 0));
+      await pumpUntilFound(tester, find.byType(ConfirmDialog), timeout: const Duration(seconds: 30));
+      final deleteButton = find.widgetWithText(TextButton, 'delete'.tr());
+      await pumpUntilFound(tester, deleteButton, timeout: const Duration(seconds: 30));
+      await tester.tap(deleteButton.last, warnIfMissed: false);
+      await _pumpFor(tester, const Duration(milliseconds: 500));
+      await _waitForActivityComments(
+        tester,
+        ownedAlbumId,
+        accessToken: ownerToken,
+        includes: {ownerComment},
+        excludes: {collaboratorComment},
+        reason: 'Expected owner deletion to remove the collaborator comment from the activity API',
+      );
+
+      await tester.binding.handlePopRoute();
+      await pumpUntilFound(tester, find.byType(RemoteAlbumPage), timeout: const Duration(seconds: 30));
+      await _pressRemoteAlbumAppBarAction(tester, const Key('remote-album-slideshow-action'));
+      await pumpUntilFound(tester, find.byType(DriftSlideshowPage), timeout: const Duration(seconds: 30));
+      await pumpUntilFound(tester, find.byKey(const Key('slideshow-page-view')), timeout: const Duration(seconds: 30));
+
+      await _showSlideshowControls(tester);
+      const pauseKey = Key('slideshow-pause-action');
+      const playKey = Key('slideshow-play-action');
+      final firstPlaybackKey = await _waitForAnyKey(tester, const [pauseKey, playKey]);
+      final secondPlaybackKey = firstPlaybackKey == pauseKey ? playKey : pauseKey;
+      await _tapHitTestableFinder(tester, find.byKey(firstPlaybackKey));
+      await _pumpUntil(
+        tester,
+        () => find.byKey(secondPlaybackKey).hitTestable().evaluate().isNotEmpty,
+        timeout: const Duration(seconds: 30),
+      );
+      await _tapHitTestableFinder(tester, find.byKey(secondPlaybackKey));
+      await _pumpUntil(
+        tester,
+        () => find.byKey(firstPlaybackKey).hitTestable().evaluate().isNotEmpty,
+        timeout: const Duration(seconds: 30),
+      );
+      await _tapHitTestableFinder(tester, find.byKey(const Key('slideshow-settings-action')));
+      await pumpUntilFound(tester, find.byType(SettingsSubPage), timeout: const Duration(seconds: 30));
+      await _ensureTextVisibleInPage(tester, SettingsSubPage, 'slideshow'.tr());
+      await pumpUntilFound(tester, find.byType(SlideshowSettings), timeout: const Duration(seconds: 30));
+      final durationSlider = find.descendant(of: find.byType(SlideshowSettings), matching: find.byType(Slider));
+      await pumpUntilFound(tester, durationSlider, timeout: const Duration(seconds: 30));
+      await tester.drag(durationSlider.first, const Offset(-240, 0), warnIfMissed: false);
+      await _pumpFor(tester, const Duration(milliseconds: 500));
+      expect(SettingsRepository.instance.appConfig.slideshow.duration, lessThan(30));
+
+      await tester.binding.handlePopRoute();
+      await pumpUntilFound(tester, find.byType(DriftSlideshowPage), timeout: const Duration(seconds: 30));
+      await tester.binding.handlePopRoute();
+      await pumpUntilFound(tester, find.byType(RemoteAlbumPage), timeout: const Duration(seconds: 30));
+      await pumpUntilFound(tester, find.text(albumName), timeout: const Duration(seconds: 30));
+
+      final ownerActivityDeleted = await _captureError(
+        () async => await _waitForRejectedResponse(
+          tester,
+          () => _authenticatedApiRequest('DELETE', '/activities/${ownerActivity['id']}', accessToken: viewerToken),
+          reason: 'Expected viewer to still be unable to delete the owner comment after slideshow flow',
+          acceptedStatusCodes: const {403, 404},
+        ),
+      );
+      expect(ownerActivityDeleted, isNull);
+    });
+
     if (_selectedCaseId.isNotEmpty && !_registeredSelectedCase) {
       test(_selectedCaseId, () => fail('No real stack auth test registered for $_selectedCaseId'));
     }
@@ -7619,6 +7879,67 @@ Future<void> _tapHitTestableFinder(
   await _pumpUntil(tester, () => finder.hitTestable().evaluate().isNotEmpty, timeout: timeout);
   expect(finder.hitTestable(), findsWidgets, reason: reason);
   await tester.tap(finder.hitTestable().last, warnIfMissed: false);
+}
+
+Future<void> _pressRemoteAlbumAppBarAction(WidgetTester tester, Key key) async {
+  final action = find.byKey(key);
+  await pumpUntilFound(tester, action, timeout: const Duration(seconds: 30));
+  final tappable = action.hitTestable();
+  if (tappable.evaluate().isNotEmpty) {
+    await tester.tap(tappable.last, warnIfMissed: false);
+  } else {
+    final iconButton = tester.widget<IconButton>(action.last);
+    expect(iconButton.onPressed, isNotNull, reason: 'Expected remote album action $key to be enabled');
+    iconButton.onPressed!();
+  }
+  await _pumpFor(tester, const Duration(milliseconds: 500));
+}
+
+Future<void> _pressIconButtonByKey(WidgetTester tester, Key key, {String? reason}) async {
+  final button = find.byKey(key);
+  await pumpUntilFound(tester, button, timeout: const Duration(seconds: 30));
+  final iconButton = tester.widget<IconButton>(button.last);
+  expect(iconButton.onPressed, isNotNull, reason: reason);
+  iconButton.onPressed!();
+  await _pumpFor(tester, const Duration(milliseconds: 500));
+}
+
+Future<void> _showSlideshowControls(WidgetTester tester) async {
+  final settingsAction = find.byKey(const Key('slideshow-settings-action'));
+
+  for (var attempt = 0; attempt < 8; attempt++) {
+    if (settingsAction.hitTestable().evaluate().isNotEmpty) {
+      return;
+    }
+
+    final photoView = find.byType(PhotoView);
+    if (photoView.evaluate().isNotEmpty) {
+      await tester.tap(photoView.last, warnIfMissed: false);
+    } else {
+      await tester.tap(find.byKey(const Key('slideshow-page-view')).first, warnIfMissed: false);
+    }
+    await _pumpFor(tester, const Duration(milliseconds: 400));
+  }
+
+  fail('Expected slideshow controls to become visible and tappable');
+}
+
+Future<Key> _waitForAnyKey(
+  WidgetTester tester,
+  List<Key> keys, {
+  Duration timeout = const Duration(seconds: 30),
+}) async {
+  Key? foundKey;
+  await _pumpUntil(tester, () {
+    for (final key in keys) {
+      if (find.byKey(key).evaluate().isNotEmpty) {
+        foundKey = key;
+        return true;
+      }
+    }
+    return false;
+  }, timeout: timeout);
+  return foundKey!;
 }
 
 Future<void> _ensureTextVisibleInPage(WidgetTester tester, Type pageType, String label, {int maxScrolls = 40}) async {
@@ -11436,6 +11757,65 @@ Future<http.Response> _authenticatedApiRequest(
     request.body = jsonEncode(jsonBody);
   }
   return http.Response.fromStream(await request.send());
+}
+
+Future<Map<String, dynamic>> _createAlbumActivityViaApi(
+  String albumId, {
+  required String comment,
+  required String accessToken,
+}) async {
+  final response = await _authenticatedApiRequest(
+    'POST',
+    '/activities',
+    accessToken: accessToken,
+    jsonBody: {'albumId': albumId, 'type': 'comment', 'comment': comment},
+  );
+  expect(response.statusCode, inInclusiveRange(200, 299), reason: response.body);
+  return jsonDecode(response.body) as Map<String, dynamic>;
+}
+
+Future<List<Map<String, dynamic>>> _waitForActivityComments(
+  WidgetTester tester,
+  String albumId, {
+  required String accessToken,
+  required Set<String> includes,
+  Set<String> excludes = const {},
+  required String reason,
+}) async {
+  List<Map<String, dynamic>> latest = const [];
+  Object? lastError;
+  final end = DateTime.now().add(const Duration(seconds: 60));
+  while (DateTime.now().isBefore(end)) {
+    try {
+      final response = await _authenticatedApiRequest(
+        'GET',
+        '/activities?albumId=$albumId&type=comment',
+        accessToken: accessToken,
+      );
+      if (response.statusCode == 200) {
+        latest = (jsonDecode(response.body) as List<dynamic>).cast<Map<String, dynamic>>();
+        final comments = latest.map((activity) => activity['comment'] as String?).whereType<String>().toSet();
+        if (includes.every(comments.contains) && excludes.every((comment) => !comments.contains(comment))) {
+          return latest;
+        }
+      } else {
+        lastError = 'status=${response.statusCode} body=${response.body}';
+      }
+    } catch (error) {
+      lastError = error;
+    }
+    await _pumpFor(tester, const Duration(milliseconds: 500));
+  }
+
+  final comments = latest.map((activity) => activity['comment']).join(', ');
+  fail('$reason; latest comments=$comments; last error=$lastError');
+}
+
+Map<String, dynamic> _activityWithComment(List<Map<String, dynamic>> activities, String comment) {
+  return activities.singleWhere(
+    (activity) => activity['comment'] == comment,
+    orElse: () => fail('Expected activity comment "$comment" in $activities'),
+  );
 }
 
 Future<void> _addAlbumUserViaApi(

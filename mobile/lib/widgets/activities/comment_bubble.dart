@@ -101,6 +101,7 @@ class CommentBubble extends ConsumerWidget {
           padding: const EdgeInsets.all(10),
           decoration: BoxDecoration(color: bgColor, borderRadius: const BorderRadius.all(Radius.circular(12))),
           child: Text(
+            key: Key('activity-comment-text-${activity.id}'),
             activity.comment ?? '',
             style: context.textTheme.bodyLarge?.copyWith(color: context.colorScheme.onSurface),
           ),
@@ -115,6 +116,7 @@ class CommentBubble extends ConsumerWidget {
       onDismiss: canDelete ? (id) async => await activityNotifier.removeActivity(id) : null,
       activity.id,
       Align(
+        key: Key('activity-comment-${activity.id}'),
         alignment: isOwn ? Alignment.centerRight : Alignment.centerLeft,
         child: ConstrainedBox(
           constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.86),

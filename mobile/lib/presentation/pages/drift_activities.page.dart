@@ -43,6 +43,7 @@ class DriftActivitiesPage extends HookConsumerWidget {
     return ProviderScope(
       overrides: [currentRemoteAlbumScopedProvider.overrideWithValue(album)],
       child: Scaffold(
+        key: const Key('drift-activities-page'),
         appBar: AppBar(
           title: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -70,6 +71,7 @@ class DriftActivitiesPage extends HookConsumerWidget {
               child: Stack(
                 children: [
                   ListView(
+                    key: const Key('drift-activities-list'),
                     controller: listViewScrollController,
                     padding: const EdgeInsets.only(top: 8, bottom: 80),
                     reverse: true,
