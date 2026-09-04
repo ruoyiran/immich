@@ -189,6 +189,7 @@ class SharedLinkItem extends ConsumerWidget {
         return false;
       },
       child: InkWell(
+        key: Key('shared-link-item-${sharedLink.id}'),
         onTap: () => context.pushRoute(SharedLinkEditRoute(existingLink: sharedLink)),
         onLongPress: copyShareLinkToClipboard,
         child: Padding(

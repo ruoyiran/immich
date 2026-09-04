@@ -45,6 +45,7 @@ import 'package:immich_mobile/models/auth/biometric_status.model.dart';
 import 'package:immich_mobile/models/folder/recursive_folder.model.dart';
 import 'package:immich_mobile/models/folder/root_folder.model.dart';
 import 'package:immich_mobile/models/search/search_filter.model.dart';
+import 'package:immich_mobile/models/shared_link/shared_link.model.dart';
 import 'package:immich_mobile/models/upload/share_intent_attachment.model.dart';
 import 'package:immich_mobile/pages/backup/drift_backup.page.dart';
 import 'package:immich_mobile/pages/backup/drift_backup_album_selection.page.dart';
@@ -54,6 +55,8 @@ import 'package:immich_mobile/pages/backup/drift_upload_detail.page.dart';
 import 'package:immich_mobile/pages/common/settings.page.dart';
 import 'package:immich_mobile/pages/library/folder/folder.page.dart';
 import 'package:immich_mobile/pages/library/locked/pin_auth.page.dart';
+import 'package:immich_mobile/pages/library/shared_link/shared_link.page.dart';
+import 'package:immich_mobile/pages/library/shared_link/shared_link_edit.page.dart';
 import 'package:immich_mobile/pages/login/login.page.dart';
 import 'package:immich_mobile/pages/share_intent/share_intent.page.dart';
 import 'package:immich_mobile/presentation/pages/dev/main_timeline.page.dart';
@@ -120,6 +123,7 @@ import 'package:immich_mobile/providers/infrastructure/search.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/sync.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/tag.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/timeline.provider.dart';
+import 'package:immich_mobile/providers/shared_link.provider.dart';
 import 'package:immich_mobile/providers/tab.provider.dart';
 import 'package:immich_mobile/providers/timeline/multiselect.provider.dart';
 import 'package:immich_mobile/providers/user.provider.dart';
@@ -136,10 +140,12 @@ import 'package:immich_mobile/services/background_upload.service.dart';
 import 'package:immich_mobile/services/download.service.dart';
 import 'package:immich_mobile/services/foreground_upload.service.dart';
 import 'package:immich_mobile/services/secure_storage.service.dart';
+import 'package:immich_mobile/services/shared_link.service.dart';
 import 'package:immich_mobile/utils/bootstrap.dart';
 import 'package:immich_mobile/utils/editor.utils.dart';
 import 'package:immich_mobile/utils/option.dart';
 import 'package:immich_mobile/utils/semver.dart';
+import 'package:immich_mobile/utils/url_helper.dart';
 import 'package:immich_mobile/widgets/asset_viewer/video_controls.dart';
 import 'package:immich_mobile/widgets/backup/drift_album_info_list_tile.dart';
 import 'package:immich_mobile/widgets/common/confirm_dialog.dart';
@@ -7792,6 +7798,214 @@ void main() async {
       expect(ownerActivityDeleted, isNull);
     });
 
+    _realStackSessionTest('MOB-UI-056-$_caseSuffix', 'creates edits copies opens and deletes shared links', (
+      tester,
+    ) async {
+      tester.view.devicePixelRatio = 1.0;
+      tester.view.physicalSize = const Size(430, 932);
+      addTearDown(tester.view.reset);
+
+      await _loadAuthenticatedApp(tester, overrideCancellation: true, closeDriftOnDispose: false);
+      final container = _containerOfApp(tester);
+      final albumsApi = container.read(apiServiceProvider).albumsApi;
+      final ownerToken = Store.get(StoreKey.accessToken);
+
+      final createdRemoteAssetIds = <String>[];
+      String? ownedAlbumId;
+      String? sharedLinkId;
+      addTearDown(() async {
+        final linkId = sharedLinkId;
+        if (linkId != null) {
+          await _deleteSharedLinkBestEffortWithToken(linkId, ownerToken);
+        }
+        final albumId = ownedAlbumId;
+        if (albumId != null) {
+          await _deleteAlbumBestEffortWithToken(albumId, ownerToken);
+        }
+        for (final assetId in createdRemoteAssetIds) {
+          await _deleteTestAssetBestEffortWithToken(assetId, ownerToken);
+        }
+      });
+
+      final runToken = DateTime.now().toUtc().microsecondsSinceEpoch.toString();
+      final shortToken = runToken.substring(runToken.length - 8);
+      final photoId = await _uploadGeneratedJpegAsSecondClient(
+        'immich-e2e-shared-link-056-photo-$runToken.jpg',
+        DateTime.now().toUtc().add(const Duration(days: 3653)),
+      );
+      createdRemoteAssetIds.add(photoId);
+
+      final albumName = 'immich-e2e-shared-link-056-$shortToken';
+      final createdAlbum = await albumsApi.createAlbum(
+        api.CreateAlbumDto(albumName: albumName, assetIds: api.Optional.present([photoId])),
+      );
+      expect(createdAlbum, isNotNull);
+      ownedAlbumId = createdAlbum!.id;
+      await _waitForAlbumInfoState(
+        tester,
+        albumsApi,
+        ownedAlbumId,
+        (album) => album.assetCount == 1,
+        reason: 'Expected the 056 album to contain its uploaded fixture before sharing',
+      );
+
+      final createSlug = 'immich-e2e-056-$shortToken';
+      final editSlug = 'immich-e2e-056-edit-$shortToken';
+      final initialDescription = 'shared link 056 initial $shortToken';
+      final editedDescription = 'shared link 056 edited $shortToken';
+      final initialPassword = 'link-056-$shortToken';
+      final editedPassword = 'link-056-edit-$shortToken';
+
+      final router = container.read(appRouterProvider);
+      unawaited(router.push(SharedLinkEditRoute(albumId: ownedAlbumId)));
+      await pumpUntilFound(tester, find.byType(SharedLinkEditPage), timeout: const Duration(seconds: 30));
+
+      await tester.enterText(find.byKey(const Key('shared-link-description-field')), initialDescription);
+      await tester.enterText(find.byKey(const Key('shared-link-password-field')), initialPassword);
+      await tester.enterText(find.byKey(const Key('shared-link-slug-field')), createSlug);
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await _pumpFor(tester, const Duration(milliseconds: 300));
+      await _tapHitTestableFinder(tester, find.byKey(const Key('shared-link-allow-download-switch')));
+      await _tapHitTestableFinder(tester, find.byKey(const Key('shared-link-allow-upload-switch')));
+      await _ensureKeyVisibleInPage(tester, SharedLinkEditPage, const Key('shared-link-expiry-tile'));
+      await _tapHitTestableFinder(tester, find.byKey(const Key('shared-link-expiry-tile')));
+      await pumpUntilFound(
+        tester,
+        find.byKey(const Key('shared-link-expiry-preset-3600')),
+        timeout: const Duration(seconds: 30),
+      );
+      await _tapHitTestableFinder(tester, find.byKey(const Key('shared-link-expiry-preset-3600')));
+      await _ensureKeyVisibleInPage(tester, SharedLinkEditPage, const Key('shared-link-submit-button'));
+      await _tapHitTestableFinder(tester, find.byKey(const Key('shared-link-submit-button')));
+      await pumpUntilFound(
+        tester,
+        find.byKey(const Key('shared-link-copy-field')),
+        timeout: const Duration(seconds: 30),
+      );
+
+      final createdLink = await _waitForSharedLinkState(
+        tester,
+        container,
+        (link) => link.slug == createSlug,
+        reason: 'Expected the 056 shared link to be created from the edit route',
+      );
+      sharedLinkId = createdLink.id;
+      expect(createdLink.description, initialDescription);
+      expect(createdLink.allowDownload, isFalse);
+      expect(createdLink.allowUpload, isTrue);
+      expect(createdLink.showMetadata, isTrue);
+      expect(createdLink.expiresAt, isNotNull);
+      expect(createdLink.password?.isNotEmpty ?? false, isTrue);
+
+      final createdShareUrl = buildSharedLinkUrl(baseUrl: getServerUrl(), slug: createdLink.slug, key: createdLink.key);
+      expect(createdShareUrl, isNotNull);
+      final copiedAfterCreate = await Clipboard.getData('text/plain');
+      expect(copiedAfterCreate?.text, createdShareUrl);
+
+      await _waitForRejectedResponse(
+        tester,
+        () => _publicApiRequest('GET', '/shared-links/me?${_sharedLinkLookupQuery(createdLink)}'),
+        reason: 'Expected the 056 password-protected link to require login before public access',
+        acceptedStatusCodes: const {401},
+      );
+      await _waitForSuccessfulResponse(
+        tester,
+        () => _publicApiRequest(
+          'POST',
+          '/shared-links/login?${_sharedLinkLookupQuery(createdLink)}',
+          jsonBody: {'password': initialPassword},
+        ),
+      );
+
+      await _tapHitTestableFinder(tester, find.byKey(const Key('shared-link-done-button')));
+      await _pumpFor(tester, const Duration(milliseconds: 500));
+      unawaited(router.push(const SharedLinkRoute()));
+      await pumpUntilFound(tester, find.byType(SharedLinkPage), timeout: const Duration(seconds: 30));
+      await container.read(sharedLinksStateProvider.notifier).fetchLinks();
+      await pumpUntilFound(
+        tester,
+        find.byKey(Key('shared-link-item-${createdLink.id}')),
+        timeout: const Duration(seconds: 30),
+      );
+      await tester.longPress(find.byKey(Key('shared-link-item-${createdLink.id}')));
+      await _pumpFor(tester, const Duration(milliseconds: 500));
+      final copiedFromList = await Clipboard.getData('text/plain');
+      expect(copiedFromList?.text, createdShareUrl);
+
+      await _tapHitTestableFinder(tester, find.byKey(Key('shared-link-item-${createdLink.id}')));
+      await pumpUntilFound(tester, find.byType(SharedLinkEditPage), timeout: const Duration(seconds: 30));
+      await pumpUntilFound(
+        tester,
+        find.byKey(const Key('shared-link-copy-field')),
+        timeout: const Duration(seconds: 30),
+      );
+      await tester.binding.handlePopRoute();
+      await pumpUntilFound(tester, find.byType(SharedLinkPage), timeout: const Duration(seconds: 30));
+
+      final serviceEditedLink = await container
+          .read(sharedLinkServiceProvider)
+          .updateSharedLink(
+            createdLink.id,
+            showMeta: false,
+            allowDownload: true,
+            allowUpload: false,
+            description: Option<String?>.some(editedDescription),
+            password: Option<String?>.some(editedPassword),
+            slug: editSlug,
+            expiresAt: const Option<DateTime?>.some(null),
+          );
+      expect(serviceEditedLink, isNotNull);
+      await container.read(sharedLinksStateProvider.notifier).fetchLinks();
+
+      final editedLink = await _waitForSharedLinkState(
+        tester,
+        container,
+        (link) => link.id == createdLink.id && link.slug == editSlug,
+        reason: 'Expected the 056 shared link edits to persist',
+      );
+      expect(editedLink.description, editedDescription);
+      expect(editedLink.allowDownload, isTrue);
+      expect(editedLink.allowUpload, isFalse);
+      expect(editedLink.showMetadata, isFalse);
+      expect(editedLink.expiresAt, isNull);
+      expect(editedLink.password?.isNotEmpty ?? false, isTrue);
+
+      await _waitForRejectedResponse(
+        tester,
+        () => _publicApiRequest('GET', '/shared-links/me?slug=${Uri.encodeQueryComponent(createSlug)}'),
+        reason: 'Expected the 056 old custom URL to stop resolving after edit',
+        acceptedStatusCodes: const {404},
+      );
+      await _waitForSuccessfulResponse(
+        tester,
+        () => _publicApiRequest(
+          'POST',
+          '/shared-links/login?${_sharedLinkLookupQuery(editedLink)}',
+          jsonBody: {'password': editedPassword},
+        ),
+      );
+
+      await pumpUntilFound(tester, find.byType(SharedLinkPage), timeout: const Duration(seconds: 30));
+      final listItem = find.byKey(ValueKey(createdLink.id));
+      await pumpUntilFound(tester, listItem, timeout: const Duration(seconds: 30));
+      await tester.fling(listItem, const Offset(-800, 0), 2000, warnIfMissed: false);
+      await pumpUntilFound(tester, find.byType(ConfirmDialog), timeout: const Duration(seconds: 30));
+      await tester.tap(find.descendant(of: find.byType(ConfirmDialog), matching: find.byType(TextButton)).last);
+      await _waitForSharedLinkDeleted(
+        tester,
+        container,
+        editedLink.id,
+        reason: 'Expected the 056 list delete action to remove the shared link',
+      );
+      sharedLinkId = null;
+      await _waitForRejectedResponse(
+        tester,
+        () => _publicApiRequest('GET', '/shared-links/me?${_sharedLinkLookupQuery(editedLink)}'),
+        reason: 'Expected the 056 deleted shared link to be inaccessible',
+        acceptedStatusCodes: const {404},
+      );
+    });
+
     if (_selectedCaseId.isNotEmpty && !_registeredSelectedCase) {
       test(_selectedCaseId, () => fail('No real stack auth test registered for $_selectedCaseId'));
     }
@@ -7953,17 +8167,70 @@ Future<void> _ensureTextVisibleInPage(WidgetTester tester, Type pageType, String
       return;
     }
 
-    var scrollable = find.descendant(of: page, matching: find.byType(Scrollable));
+    var scrollable = find.descendant(of: page, matching: find.byKey(const Key('shared-link-edit-form')));
+    if (scrollable.evaluate().isEmpty) {
+      scrollable = find.descendant(of: page, matching: find.byType(ListView));
+    }
+    if (scrollable.evaluate().isEmpty) {
+      scrollable = find.descendant(of: page, matching: find.byType(Scrollable));
+    }
     if (scrollable.evaluate().isEmpty) {
       scrollable = find.byType(Scrollable);
     }
     if (scrollable.evaluate().isNotEmpty) {
-      await tester.drag(scrollable.last, const Offset(0, -500));
+      await tester.drag(scrollable.first, const Offset(0, -500));
     }
     await _pumpFor(tester, const Duration(milliseconds: 250));
   }
 
   fail('Expected "$label" to be visible in $pageType');
+}
+
+Future<void> _ensureKeyVisibleInPage(WidgetTester tester, Type pageType, Key key, {int maxScrolls = 40}) async {
+  await pumpUntilFound(tester, find.byType(pageType), timeout: const Duration(seconds: 30));
+  final page = find.byType(pageType);
+  final target = find.descendant(of: page, matching: find.byKey(key));
+  var scrollable = find.descendant(of: page, matching: find.byType(Scrollable));
+  if (scrollable.evaluate().isNotEmpty) {
+    try {
+      await tester.scrollUntilVisible(
+        target,
+        500,
+        scrollable: scrollable.first,
+        maxScrolls: maxScrolls,
+        duration: const Duration(milliseconds: 100),
+      );
+      await _pumpFor(tester, const Duration(milliseconds: 200));
+      return;
+    } catch (_) {
+      // Fall back to explicit drags below for custom scrollable layouts.
+    }
+  }
+
+  for (var attempt = 0; attempt < maxScrolls; attempt++) {
+    if (target.evaluate().isNotEmpty) {
+      await tester.ensureVisible(target.first);
+      await _pumpFor(tester, const Duration(milliseconds: 200));
+      return;
+    }
+
+    scrollable = find.descendant(of: page, matching: find.byKey(const Key('shared-link-edit-form')));
+    if (scrollable.evaluate().isEmpty) {
+      scrollable = find.descendant(of: page, matching: find.byType(ListView));
+    }
+    if (scrollable.evaluate().isEmpty) {
+      scrollable = find.descendant(of: page, matching: find.byType(Scrollable));
+    }
+    if (scrollable.evaluate().isEmpty) {
+      scrollable = find.byType(Scrollable);
+    }
+    if (scrollable.evaluate().isNotEmpty) {
+      await tester.drag(scrollable.first, const Offset(0, -500));
+    }
+    await _pumpFor(tester, const Duration(milliseconds: 250));
+  }
+
+  fail('Expected key "$key" to be visible in $pageType');
 }
 
 Future<void> _tapTextEntryInPage(WidgetTester tester, {required Type pageType, required String label}) async {
@@ -11681,6 +11948,78 @@ Future<void> _waitForRejectedResponse(
   fail('$reason; latest status=${latest?.statusCode}; last error=$lastError');
 }
 
+Future<SharedLink> _waitForSharedLinkState(
+  WidgetTester tester,
+  ProviderContainer container,
+  bool Function(SharedLink link) matches, {
+  required String reason,
+}) async {
+  var latestCount = 0;
+  var sawAnyLink = false;
+  Object? lastError;
+  final end = DateTime.now().add(const Duration(seconds: 60));
+  while (DateTime.now().isBefore(end)) {
+    try {
+      final state = await container.read(sharedLinkServiceProvider).getAllSharedLinks();
+      if (state.hasValue) {
+        final links = state.requireValue;
+        latestCount = links.length;
+        sawAnyLink = sawAnyLink || links.isNotEmpty;
+        for (final link in links) {
+          if (matches(link)) {
+            return link;
+          }
+        }
+      } else if (state.hasError) {
+        lastError = state.error;
+      }
+    } catch (error) {
+      lastError = error;
+    }
+    await _pumpFor(tester, const Duration(milliseconds: 500));
+  }
+
+  fail('$reason; latest shared-link count=$latestCount sawAnyLink=$sawAnyLink last error=$lastError');
+}
+
+Future<void> _waitForSharedLinkDeleted(
+  WidgetTester tester,
+  ProviderContainer container,
+  String id, {
+  required String reason,
+}) async {
+  var latestCount = 0;
+  Object? lastError;
+  final end = DateTime.now().add(const Duration(seconds: 60));
+  while (DateTime.now().isBefore(end)) {
+    try {
+      final state = await container.read(sharedLinkServiceProvider).getAllSharedLinks();
+      if (state.hasValue) {
+        final links = state.requireValue;
+        latestCount = links.length;
+        if (!links.any((link) => link.id == id)) {
+          return;
+        }
+      } else if (state.hasError) {
+        lastError = state.error;
+      }
+    } catch (error) {
+      lastError = error;
+    }
+    await _pumpFor(tester, const Duration(milliseconds: 500));
+  }
+
+  fail('$reason; latest shared-link count=$latestCount last error=$lastError');
+}
+
+String _sharedLinkLookupQuery(SharedLink link) {
+  final slug = link.slug;
+  if (slug != null && slug.isNotEmpty) {
+    return 'slug=${Uri.encodeQueryComponent(slug)}';
+  }
+  return 'key=${Uri.encodeQueryComponent(link.key)}';
+}
+
 bool _isMissingAssetError(Object error) => error is api.ApiException && (error.code == 404 || error.code == 410);
 
 Future<Object?> _captureError(Future<void> Function() action) async {
@@ -11751,6 +12090,20 @@ Future<http.Response> _authenticatedApiRequest(
     ..headers.addAll({
       ...ApiService.getRequestHeaders(),
       'Authorization': 'Bearer ${accessToken ?? Store.get(StoreKey.accessToken)}',
+      if (jsonBody != null) HttpHeaders.contentTypeHeader: 'application/json',
+    });
+  if (jsonBody != null) {
+    request.body = jsonEncode(jsonBody);
+  }
+  return http.Response.fromStream(await request.send());
+}
+
+Future<http.Response> _publicApiRequest(String method, String path, {Object? jsonBody}) async {
+  final endpoint = Store.get(StoreKey.serverEndpoint);
+  final separator = path.startsWith('/') ? '' : '/';
+  final request = http.Request(method, Uri.parse('$endpoint$separator$path'))
+    ..headers.addAll({
+      ...ApiService.getRequestHeaders(),
       if (jsonBody != null) HttpHeaders.contentTypeHeader: 'application/json',
     });
   if (jsonBody != null) {
@@ -11847,6 +12200,14 @@ Future<void> _deleteAlbumBestEffortWithToken(String albumId, String accessToken)
     await _authenticatedApiRequest('DELETE', '/albums/$albumId', accessToken: accessToken);
   } catch (_) {
     // Best-effort cleanup for a test-created album.
+  }
+}
+
+Future<void> _deleteSharedLinkBestEffortWithToken(String linkId, String accessToken) async {
+  try {
+    await _authenticatedApiRequest('DELETE', '/shared-links/$linkId', accessToken: accessToken);
+  } catch (_) {
+    // Best-effort cleanup for a test-created shared link.
   }
 }
 

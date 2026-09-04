@@ -94,6 +94,7 @@ class SharedLinkEditPage extends HookConsumerWidget {
 
     Widget buildDescriptionField() {
       return TextField(
+        key: const Key('shared-link-description-field'),
         controller: descriptionController,
         focusNode: descriptionFocusNode,
         textInputAction: TextInputAction.done,
@@ -112,6 +113,7 @@ class SharedLinkEditPage extends HookConsumerWidget {
 
     Widget buildPasswordField() {
       return TextField(
+        key: const Key('shared-link-password-field'),
         controller: passwordController,
         autofocus: false,
         decoration: InputDecoration(
@@ -127,6 +129,7 @@ class SharedLinkEditPage extends HookConsumerWidget {
 
     Widget buildSlugField() {
       return TextField(
+        key: const Key('shared-link-slug-field'),
         controller: slugController,
         focusNode: slugFocusNode,
         textInputAction: TextInputAction.done,
@@ -145,6 +148,7 @@ class SharedLinkEditPage extends HookConsumerWidget {
 
     Widget buildShowMetaButton() {
       return SwitchListTile.adaptive(
+        key: const Key('shared-link-show-metadata-switch'),
         value: showMetadata.value,
         onChanged: (value) => showMetadata.value = value,
         dense: true,
@@ -157,6 +161,7 @@ class SharedLinkEditPage extends HookConsumerWidget {
 
     Widget buildAllowDownloadButton() {
       return SwitchListTile.adaptive(
+        key: const Key('shared-link-allow-download-switch'),
         value: allowDownload.value,
         onChanged: (value) => allowDownload.value = value,
         dense: true,
@@ -169,6 +174,7 @@ class SharedLinkEditPage extends HookConsumerWidget {
 
     Widget buildAllowUploadButton() {
       return SwitchListTile.adaptive(
+        key: const Key('shared-link-allow-upload-switch'),
         value: allowUpload.value,
         onChanged: (value) => allowUpload.value = value,
         dense: true,
@@ -224,6 +230,7 @@ class SharedLinkEditPage extends HookConsumerWidget {
 
     Widget buildExpiryAfterButton() {
       return ExpansionTile(
+        key: const Key('shared-link-expiry-tile'),
         title: Text(
           context.t.expire_after,
           style: themeData.textTheme.labelLarge?.copyWith(fontWeight: FontWeight.bold),
@@ -244,6 +251,7 @@ class SharedLinkEditPage extends HookConsumerWidget {
                   children: List.generate(expiryPresets.length, (index) {
                     final preset = expiryPresets[index];
                     return ChoiceChip(
+                      key: Key('shared-link-expiry-preset-${preset.$1.inSeconds}'),
                       label: Text(preset.$2),
                       selected: selectedPresetIndex.value == index,
                       onSelected: (_) {
@@ -289,6 +297,7 @@ class SharedLinkEditPage extends HookConsumerWidget {
 
     Widget buildLinkCopyField(String link) {
       return TextFormField(
+        key: const Key('shared-link-copy-field'),
         readOnly: true,
         onTap: () => copyToClipboard(link),
         initialValue: link,
@@ -311,6 +320,7 @@ class SharedLinkEditPage extends HookConsumerWidget {
             buildLinkCopyField(newShareLink.value),
             const SizedBox(height: 20),
             ElevatedButton.icon(
+              key: const Key('shared-link-done-button'),
               onPressed: () => context.maybePop(),
               icon: const Icon(Icons.check),
               label: Text(context.t.done, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold)),
@@ -452,6 +462,7 @@ class SharedLinkEditPage extends HookConsumerWidget {
             ? Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 20),
                 child: ListView(
+                  key: const Key('shared-link-edit-form'),
                   children: [
                     const SizedBox(height: 20),
                     buildLinkTitle(),
@@ -495,6 +506,7 @@ class SharedLinkEditPage extends HookConsumerWidget {
                         children: [
                           if (existingLink != null)
                             OutlinedButton.icon(
+                              key: const Key('shared-link-delete-button'),
                               style: OutlinedButton.styleFrom(
                                 foregroundColor: themeData.colorScheme.error,
                                 side: BorderSide(color: themeData.colorScheme.error),
@@ -507,6 +519,7 @@ class SharedLinkEditPage extends HookConsumerWidget {
                               ),
                             ),
                           ElevatedButton.icon(
+                            key: const Key('shared-link-submit-button'),
                             icon: const Icon(Icons.check),
                             onPressed: existingLink != null ? handleEditLink : handleNewLink,
                             label: Text(
