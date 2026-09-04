@@ -59,6 +59,7 @@ import 'package:immich_mobile/presentation/pages/drift_favorite.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_library.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_locked_folder.page.dart';
 import 'package:immich_mobile/presentation/pages/drift_remote_album.page.dart';
+import 'package:immich_mobile/presentation/pages/drift_trash.page.dart';
 import 'package:immich_mobile/presentation/pages/edit/drift_edit.page.dart';
 import 'package:immich_mobile/presentation/pages/edit/editor.provider.dart';
 import 'package:immich_mobile/presentation/pages/search/drift_search.page.dart';
@@ -77,6 +78,7 @@ import 'package:immich_mobile/presentation/widgets/bottom_sheet/favorite_bottom_
 import 'package:immich_mobile/presentation/widgets/bottom_sheet/general_bottom_sheet.widget.dart';
 import 'package:immich_mobile/presentation/widgets/bottom_sheet/locked_folder_bottom_sheet.widget.dart';
 import 'package:immich_mobile/presentation/widgets/bottom_sheet/remote_album_bottom_sheet.widget.dart';
+import 'package:immich_mobile/presentation/widgets/bottom_sheet/trash_bottom_sheet.widget.dart';
 import 'package:immich_mobile/presentation/widgets/images/thumbnail_tile.widget.dart';
 import 'package:immich_mobile/presentation/widgets/timeline/header.widget.dart';
 import 'package:immich_mobile/presentation/widgets/timeline/timeline.widget.dart';
@@ -122,6 +124,7 @@ import 'package:immich_mobile/utils/option.dart';
 import 'package:immich_mobile/utils/semver.dart';
 import 'package:immich_mobile/widgets/asset_viewer/video_controls.dart';
 import 'package:immich_mobile/widgets/backup/drift_album_info_list_tile.dart';
+import 'package:immich_mobile/widgets/common/confirm_dialog.dart';
 import 'package:immich_mobile/widgets/common/selection_sliver_app_bar.dart';
 import 'package:immich_mobile/widgets/photo_view/photo_view.dart';
 import 'package:immich_mobile/widgets/settings/setting_list_tile.dart';
@@ -6004,6 +6007,238 @@ void main() async {
       );
     });
 
+    _realStackSessionTest('MOB-UI-049-$_caseSuffix', 'restores and empties trash with dangerous confirmations', (
+      tester,
+    ) async {
+      tester.view.devicePixelRatio = 1.0;
+      tester.view.physicalSize = const Size(430, 932);
+      addTearDown(tester.view.reset);
+
+      await _loadAuthenticatedApp(tester, overrideCancellation: true, closeDriftOnDispose: false);
+      final container = _containerOfApp(tester);
+      final drift = container.read(driftProvider);
+      final apiService = container.read(apiServiceProvider);
+      final assetsApi = apiService.assetsApi;
+      final albumsApi = apiService.albumsApi;
+      final assetService = container.read(assetServiceProvider);
+      final router = container.read(appRouterProvider);
+      final createdRemoteAssetIds = <String>[];
+      final user = Store.tryGet(StoreKey.currentUser);
+      expect(user, isNotNull);
+      String? albumId;
+
+      addTearDown(() async {
+        final id = albumId;
+        if (id != null) {
+          await _deleteAlbumBestEffort(albumsApi, id);
+        }
+        for (final assetId in createdRemoteAssetIds) {
+          await _deleteTestAssetBestEffort(assetsApi, assetId);
+        }
+      });
+
+      await container.read(syncApiRepositoryProvider).deleteSyncAck(_allReplayableSyncAckTypes);
+      await Store.delete(StoreKey.syncMigrationStatus);
+      await container.read(syncStreamRepositoryProvider).reset();
+      final baselineSyncSuccess = await container.read(syncStreamServiceProvider).sync();
+      expect(baselineSyncSuccess, isTrue);
+      if (Store.tryGet(StoreKey.currentUser) == null) {
+        await Store.put(StoreKey.currentUser, user!);
+      }
+
+      final timelineFactory = container.read(timelineFactoryProvider);
+
+      final runToken = DateTime.now().toUtc().microsecondsSinceEpoch.toString();
+      final baseCreatedAt = DateTime.utc(2026, 2, 18, 12).add(Duration(microseconds: int.parse(runToken) % 1000));
+      final partialRestoreId = await _uploadGeneratedJpegAsSecondClient(
+        'immich-e2e-trash-ui-049-partial-$runToken.jpg',
+        baseCreatedAt,
+      );
+      createdRemoteAssetIds.add(partialRestoreId);
+      final restoreAllId = await _uploadGeneratedMp4AsSecondClient(
+        'immich-e2e-trash-ui-049-video-$runToken.mp4',
+        baseCreatedAt.add(const Duration(minutes: 1)),
+      );
+      createdRemoteAssetIds.add(restoreAllId);
+      final albumRestoreId = await _uploadGeneratedJpegAsSecondClient(
+        'immich-e2e-trash-ui-049-album-$runToken.jpg',
+        baseCreatedAt.add(const Duration(minutes: 2)),
+      );
+      createdRemoteAssetIds.add(albumRestoreId);
+      final emptyCancelId = await _uploadGeneratedJpegAsSecondClient(
+        'immich-e2e-trash-ui-049-empty-cancel-$runToken.jpg',
+        baseCreatedAt.add(const Duration(minutes: 3)),
+      );
+      createdRemoteAssetIds.add(emptyCancelId);
+      final emptyConfirmId = await _uploadGeneratedJpegAsSecondClient(
+        'immich-e2e-trash-ui-049-empty-confirm-$runToken.jpg',
+        baseCreatedAt.add(const Duration(minutes: 4)),
+      );
+      createdRemoteAssetIds.add(emptyConfirmId);
+
+      final createdAlbum = await albumsApi.createAlbum(
+        api.CreateAlbumDto(
+          albumName: 'immich-e2e-trash-ui-049-$runToken',
+          assetIds: api.Optional.present([albumRestoreId]),
+        ),
+      );
+      expect(createdAlbum, isNotNull);
+      albumId = createdAlbum!.id;
+
+      final uploadSyncSuccess = await container.read(syncStreamServiceProvider).sync();
+      expect(uploadSyncSuccess, isTrue);
+      for (final assetId in createdRemoteAssetIds) {
+        await _waitForRemoteAssetState(
+          tester,
+          container,
+          assetId,
+          (asset) => asset.visibility == AssetVisibility.timeline && !asset.isTrashed,
+          reason: 'Expected 049 fixture asset $assetId to sync before trashing',
+        );
+      }
+      await _waitForRemoteAlbumAssetIds(
+        tester,
+        container,
+        albumId,
+        includes: {albumRestoreId},
+        excludes: const {},
+        reason: 'Expected 049 album-source asset membership before trash',
+      );
+
+      final trashTimeline = timelineFactory.trash(user!.id);
+      addTearDown(trashTimeline.dispose);
+
+      await assetService.trash(createdRemoteAssetIds);
+      for (final assetId in createdRemoteAssetIds) {
+        await _waitForAssetInfoState(
+          tester,
+          assetsApi,
+          assetId,
+          (asset) => asset.isTrashed,
+          reason: 'Expected 049 fixture asset $assetId to be in server trash',
+        );
+        await _waitForRemoteAssetState(
+          tester,
+          container,
+          assetId,
+          (asset) => asset.isTrashed,
+          reason: 'Expected 049 fixture asset $assetId to be in local trash',
+        );
+      }
+
+      unawaited(router.push(const DriftTrashRoute()));
+      await pumpUntilFound(tester, find.byType(DriftTrashPage), timeout: const Duration(seconds: 30));
+      final trashContainer = ProviderScope.containerOf(tester.element(find.byType(Timeline).last), listen: false);
+      await _expectTimelineAssetSet(
+        tester,
+        trashTimeline,
+        includes: createdRemoteAssetIds.toSet(),
+        excludes: const {},
+        reason: 'Trash page should show all 049 prepared assets',
+      );
+
+      await _selectTimelineAssetsById(tester, trashContainer, [partialRestoreId, restoreAllId]);
+      expect(_bottomSheetIcon(TrashBottomBar, Icons.history_rounded), findsOneWidget);
+      await _tapBottomSheetAction(tester, TrashBottomBar, Icons.history_rounded);
+      await _waitForMultiSelectCount(tester, trashContainer, 0, timeout: const Duration(seconds: 30));
+      await _expectTimelineAssetSet(
+        tester,
+        trashTimeline,
+        includes: {albumRestoreId, emptyCancelId, emptyConfirmId},
+        excludes: {partialRestoreId, restoreAllId},
+        reason: 'Partial restore should immediately remove only the selected 049 assets from trash',
+      );
+      for (final assetId in [partialRestoreId, restoreAllId]) {
+        await _waitForAssetInfoState(
+          tester,
+          assetsApi,
+          assetId,
+          (asset) => !asset.isTrashed,
+          reason: 'Expected partial restore asset $assetId to be active on the server',
+        );
+      }
+
+      await _tapTrashMenuAction(tester, 'restore_all');
+      await _tapConfirmDialogButton(tester, confirm: true);
+      await _expectTimelineAssetSet(
+        tester,
+        trashTimeline,
+        includes: const {},
+        excludes: {albumRestoreId, emptyCancelId, emptyConfirmId},
+        reason: 'Restore all should empty the 049 trash candidates from the trash timeline',
+      );
+      for (final assetId in [albumRestoreId, emptyCancelId, emptyConfirmId]) {
+        await _waitForAssetInfoState(
+          tester,
+          assetsApi,
+          assetId,
+          (asset) => !asset.isTrashed,
+          reason: 'Expected restore all asset $assetId to be active on the server',
+        );
+      }
+      await _waitForRemoteAlbumAssetIds(
+        tester,
+        container,
+        albumId,
+        includes: {albumRestoreId},
+        excludes: const {},
+        reason: 'Restore all should preserve the 049 album-source asset membership',
+      );
+
+      await assetService.trash([emptyCancelId, emptyConfirmId]);
+      await _expectTimelineAssetSet(
+        tester,
+        trashTimeline,
+        includes: {emptyCancelId, emptyConfirmId},
+        excludes: const {},
+        reason: 'Re-trash should expose 049 empty-trash candidates',
+      );
+
+      await _tapTrashMenuAction(tester, 'empty_trash');
+      await _tapConfirmDialogButton(tester, confirm: false);
+      await _expectTimelineAssetSet(
+        tester,
+        trashTimeline,
+        includes: {emptyCancelId, emptyConfirmId},
+        excludes: const {},
+        reason: 'Cancelling empty trash must leave 049 candidates in trash',
+      );
+      for (final assetId in [emptyCancelId, emptyConfirmId]) {
+        await _waitForAssetInfoState(
+          tester,
+          assetsApi,
+          assetId,
+          (asset) => asset.isTrashed,
+          reason: 'Cancelling empty trash must not change server trash state for $assetId',
+        );
+      }
+
+      await _tapTrashMenuAction(tester, 'empty_trash');
+      await _tapConfirmDialogButton(tester, confirm: true);
+      for (final assetId in [emptyCancelId, emptyConfirmId]) {
+        await _waitForAssetInfoUnavailable(
+          tester,
+          assetsApi,
+          assetId,
+          reason: 'Confirmed empty trash should permanently delete 049 asset $assetId',
+        );
+        await _waitForRemoteAssetDeleted(
+          tester,
+          container,
+          assetId,
+          reason: 'Confirmed empty trash should remove local 049 asset row $assetId',
+        );
+        expect(await _remoteAssetRowCountById(drift, assetId), 0);
+      }
+      await _expectTimelineAssetSet(
+        tester,
+        trashTimeline,
+        includes: const {},
+        excludes: {emptyCancelId, emptyConfirmId},
+        reason: 'Trash timeline should no longer list 049 assets after confirmed empty trash',
+      );
+    });
+
     if (_selectedCaseId.isNotEmpty && !_registeredSelectedCase) {
       test(_selectedCaseId, () => fail('No real stack auth test registered for $_selectedCaseId'));
     }
@@ -7360,6 +7595,24 @@ Future<void> _tapBottomSheetAction(WidgetTester tester, Type bottomSheetType, Ic
   await _pumpFor(tester, const Duration(milliseconds: 500));
 }
 
+Future<void> _tapTrashMenuAction(WidgetTester tester, String labelKey) async {
+  await pumpUntilFound(tester, find.byType(DriftTrashPage), timeout: const Duration(seconds: 30));
+  final menuButton = find.descendant(of: find.byType(DriftTrashPage), matching: find.byIcon(Icons.more_vert_rounded));
+  await tester.tap(menuButton.last);
+  await _pumpFor(tester, const Duration(milliseconds: 300));
+  await tester.tap(find.text(labelKey.tr()).last);
+  await _pumpFor(tester, const Duration(milliseconds: 300));
+}
+
+Future<void> _tapConfirmDialogButton(WidgetTester tester, {required bool confirm}) async {
+  await pumpUntilFound(tester, find.byType(ConfirmDialog), timeout: const Duration(seconds: 30));
+  final label = confirm ? 'backup_controller_page_background_battery_info_ok'.tr() : 'cancel'.tr();
+  final button = find.descendant(of: find.byType(ConfirmDialog), matching: find.text(label));
+  expect(button, findsWidgets, reason: 'Expected confirmation dialog button "$label"');
+  await tester.tap(button.last);
+  await _pumpFor(tester, const Duration(milliseconds: 500));
+}
+
 const _sharePlusChannel = MethodChannel('dev.fluttercommunity.plus/share');
 const _legacyUrlLauncherChannel = MethodChannel('plugins.flutter.io/url_launcher');
 
@@ -8390,6 +8643,63 @@ Future<String> _uploadGeneratedJpegAsSecondClient(
   }
   return assetId;
 }
+
+Future<String> _uploadGeneratedMp4AsSecondClient(String fileName, DateTime createdAt) async {
+  final bytes = <int>[...base64Decode(_tinyMp4FixtureBase64), ..._mp4FreeBoxBytes(fileName)];
+  final request = http.MultipartRequest('POST', Uri.parse('${Store.get(StoreKey.serverEndpoint)}/assets'))
+    ..headers.addAll({
+      ...ApiService.getRequestHeaders(),
+      'Authorization': 'Bearer ${Store.get(StoreKey.accessToken)}',
+      'x-immich-checksum': base64Encode(md5.convert(bytes).bytes),
+    })
+    ..fields.addAll({
+      'fileCreatedAt': createdAt.toIso8601String(),
+      'fileModifiedAt': createdAt.toIso8601String(),
+      'filename': fileName,
+      'isFavorite': 'false',
+    })
+    ..files.add(http.MultipartFile.fromBytes('assetData', bytes, filename: fileName));
+
+  final response = await http.Response.fromStream(await request.send());
+  expect(response.statusCode, inInclusiveRange(200, 299), reason: response.body);
+  final payload = jsonDecode(response.body) as Map<String, dynamic>;
+  expect(payload['status'], 'created', reason: response.body);
+  return payload['id'] as String;
+}
+
+const _tinyMp4FixtureBase64 =
+    ''
+    'AAAAIGZ0eXBpc29tAAACAGlzb21pc28yYXZjMW1wNDEAAARlbW9vdgAAAGxtdmhkAAAAAAAAAAAAAAAAAAAD6AAAA+gAAQAA'
+    'AQAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
+    'AAAAAgAAA490cmFrAAAAXHRraGQAAAADAAAAAAAAAAAAAAABAAAAAAAAA+gAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAA'
+    'AAAAAAABAAAAAAAAAAAAAAAAAABAAAAAABAAAAAQAAAAAAAkZWR0cwAAABxlbHN0AAAAAAAAAAEAAAPoAAAEAAABAAAAAAMH'
+    'bWRpYQAAACBtZGhkAAAAAAAAAAAAAAAAAAAyAAAAMgBVxAAAAAAALWhkbHIAAAAAAAAAAHZpZGUAAAAAAAAAAAAAAABWaWRl'
+    'b0hhbmRsZXIAAAACsm1pbmYAAAAUdm1oZAAAAAEAAAAAAAAAAAAAACRkaW5mAAAAHGRyZWYAAAAAAAAAAQAAAAx1cmwgAAAA'
+    'AQAAAnJzdGJsAAAAvnN0c2QAAAAAAAAAAQAAAK5hdmMxAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAABAAEABIAAAASAAAAAAA'
+    'AAABFUxhdmM2Mi4yOC4xMDIgbGlieDI2NAAAAAAAAAAAAAAAGP//AAAANGF2Y0MBZAAK/+EAF2dkAAqs2V7ARAAAAwAEAAAD'
+    'AMg8SJZYAQAGaOvjyyLA/fj4AAAAABBwYXNwAAAAAQAAAAEAAAAUYnRydAAAAAAAACBoAAAAAAAAABhzdHRzAAAAAAAAAAEA'
+    'AAAZAAACAAAAABRzdHNzAAAAAAAAAAEAAAABAAAA2GN0dHMAAAAAAAAAGQAAAAEAAAQAAAAAAQAACgAAAAABAAAEAAAAAAEA'
+    'AAAAAAAAAQAAAgAAAAABAAAKAAAAAAEAAAQAAAAAAQAAAAAAAAABAAACAAAAAAEAAAoAAAAAAQAABAAAAAABAAAAAAAAAAEA'
+    'AAIAAAAAAQAACgAAAAABAAAEAAAAAAEAAAAAAAAAAQAAAgAAAAABAAAKAAAAAAEAAAQAAAAAAQAAAAAAAAABAAACAAAAAAEA'
+    'AAoAAAAAAQAABAAAAAABAAAAAAAAAAEAAAIAAAAAHHN0c2MAAAAAAAAAAQAAAAEAAAAZAAAAAQAAAHhzdHN6AAAAAAAAAAAA'
+    'AAAZAAACxQAAAAwAAAAMAAAADAAAAAwAAAASAAAADgAAAAwAAAAMAAAAEgAAAA4AAAAMAAAADAAAABIAAAAOAAAADAAAAAwA'
+    'AAASAAAADgAAAAwAAAAMAAAAEgAAAA4AAAAMAAAADAAAABRzdGNvAAAAAAAAAAEAAASVAAAAYnVkdGEAAABabWV0YQAAAAAA'
+    'AAAhaGRscgAAAAAAAAAAbWRpcmFwcGwAAAAAAAAAAAAAAAAtaWxzdAAAACWpdG9vAAAAHWRhdGEAAAABAAAAAExhdmY2Mi4x'
+    'Mi4xMDIAAAAIZnJlZQAABBVtZGF0AAACrgYF//+q3EXpvebZSLeWLNgg2SPu73gyNjQgLSBjb3JlIDE2NSByMzIyMiBiMzU2'
+    'MDVhIC0gSC4yNjQvTVBFRy00IEFWQyBjb2RlYyAtIENvcHlsZWZ0IDIwMDMtMjAyNSAtIGh0dHA6Ly93d3cudmlkZW9sYW4u'
+    'b3JnL3gyNjQuaHRtbCAtIG9wdGlvbnM6IGNhYmFjPTEgcmVmPTMgZGVibG9jaz0xOjA6MCBhbmFseXNlPTB4MzoweDExMyBt'
+    'ZT1oZXggc3VibWU9NyBwc3k9MSBwc3lfcmQ9MS4wMDowLjAwIG1peGVkX3JlZj0xIG1lX3JhbmdlPTE2IGNocm9tYV9tZT0x'
+    'IHRyZWxsaXM9MSA4eDhkY3Q9MSBjcW09MCBkZWFkem9uZT0yMSwxMSBmYXN0X3Bza2lwPTEgY2hyb21hX3FwX29mZnNldD0t'
+    'MiB0aHJlYWRzPTEgbG9va2FoZWFkX3RocmVhZHM9MSBzbGljZWRfdGhyZWFkcz0wIG5yPTAgZGVjaW1hdGU9MSBpbnRlcmxh'
+    'Y2VkPTAgYmx1cmF5X2NvbXBhdD0wIGNvbnN0cmFpbmVkX2ludHJhPTAgYmZyYW1lcz0zIGJfcHlyYW1pZD0yIGJfYWRhcHQ9'
+    'MSBiX2JpYXM9MCBkaXJlY3Q9MSB3ZWlnaHRiPTEgb3Blbl9nb3A9MCB3ZWlnaHRwPTIga2V5aW50PTI1MCBrZXlpbnRfbWlu'
+    'PTI1IHNjZW5lY3V0PTQwIGludHJhX3JlZnJlc2g9MCByY19sb29rYWhlYWQ9NDAgcmM9Y3JmIG1idHJlZT0xIGNyZj0yMy4w'
+    'IHFjb21wPTAuNjAgcXBtaW49MCBxcG1heD02OSBxcHN0ZXA9NCBpcF9yYXRpbz0xLjQwIGFxPTE6MS4wMACAAAAAD2WIhAA7'
+    '//73Tr8Cm1TCYQAAAAhBmiRsQ7/+4AAAAAhBnkJ4hf/BgQAAAAgBnmF0Qr/EgAAAAAgBnmNqQr/EgQAAAA5BmmhJqEFomUwI'
+    'd//+4QAAAApBnoZFESwv/8GBAAAACAGepXRCv8SBAAAACAGep2pCv8SAAAAADkGarEmoQWyZTAh3//7gAAAACkGeykUVLC//'
+    'wYEAAAAIAZ7pdEK/xIAAAAAIAZ7rakK/xIAAAAAOQZrwSahBbJlMCG///uEAAAAKQZ8ORRUsL//BgQAAAAgBny10Qr/EgQAA'
+    'AAgBny9qQr/EgAAAAA5BmzRJqEFsmUwIZ//+4AAAAApBn1JFFSwv/8GBAAAACAGfcXRCv8SAAAAACAGfc2pCv8SAAAAADkGb'
+    'eEmoQWyZTAhX//7BAAAACkGflkUVLC//wYAAAAAIAZ+1dEK/xIEAAAAIAZ+3akK/xIE=';
 
 Future<String> _uploadGeneratedPngAsSecondClient(
   String fileName,
