@@ -118,6 +118,35 @@ void main() {
     expect(service.markUploaded(LocalAssetStub.image1.id, 'remote-id'), isFalse);
   });
 
+  test('loadAssets returns a short page when bucket counts are stale', () async {
+    final bucketController = StreamController<List<Bucket>>.broadcast(sync: true);
+    var assets = [LocalAssetStub.image1];
+    final assetLoads = [Completer<void>(), Completer<void>()];
+    var assetLoadCount = 0;
+    final service = TimelineService((
+      assetSource: (offset, count) async {
+        if (assetLoadCount < assetLoads.length) {
+          assetLoads[assetLoadCount].complete();
+        }
+        assetLoadCount++;
+        return assets.skip(offset).take(count).toList(growable: false);
+      },
+      bucketSource: () => bucketController.stream,
+      origin: TimelineOrigin.remoteAlbum,
+    ));
+    addTearDown(bucketController.close);
+    addTearDown(service.dispose);
+
+    bucketController.add(const [Bucket(assetCount: 1)]);
+    await assetLoads.first.future;
+
+    assets = const [];
+    bucketController.add(const [Bucket(assetCount: 1)]);
+    await assetLoads.last.future;
+
+    await expectLater(service.loadAssets(0, 1), completion(isEmpty));
+  });
+
   test('dispose prevents an in-flight bucket refresh from repopulating the timeline', () async {
     final bucketController = StreamController<List<Bucket>>.broadcast(sync: true);
     final assetLoadStarted = Completer<void>();

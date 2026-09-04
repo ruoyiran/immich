@@ -111,6 +111,7 @@ class _RemoteAlbumPageState extends ConsumerState<RemoteAlbumPage> {
       context: context,
       builder: (BuildContext context) {
         return AlertDialog(
+          key: const Key('remote-album-delete-dialog'),
           title: Text('delete_album'.t(context: context)),
           content: Column(
             mainAxisSize: MainAxisSize.min,
@@ -122,10 +123,12 @@ class _RemoteAlbumPageState extends ConsumerState<RemoteAlbumPage> {
           ),
           actions: [
             TextButton(
+              key: const Key('remote-album-delete-cancel-button'),
               onPressed: () => Navigator.of(context).pop(false),
               child: Text('cancel'.t(context: context)),
             ),
             TextButton(
+              key: const Key('remote-album-delete-confirm-button'),
               onPressed: () => Navigator.of(context).pop(true),
               style: TextButton.styleFrom(foregroundColor: Theme.of(context).colorScheme.error),
               child: Text('delete_album'.t(context: context)),
@@ -299,6 +302,7 @@ class _EditAlbumDialogState extends ConsumerState<_EditAlbumDialog> {
   @override
   Widget build(BuildContext context) {
     return Dialog(
+      key: const Key('remote-album-edit-dialog'),
       insetPadding: const EdgeInsets.all(24),
       shape: const RoundedRectangleBorder(borderRadius: BorderRadius.all(Radius.circular(16))),
       child: SingleChildScrollView(
@@ -327,6 +331,7 @@ class _EditAlbumDialogState extends ConsumerState<_EditAlbumDialog> {
                 ),
                 const SizedBox(height: 4),
                 TextFormField(
+                  key: const Key('remote-album-title-field'),
                   controller: titleController,
                   maxLines: 1,
                   textCapitalization: TextCapitalization.sentences,
@@ -352,6 +357,7 @@ class _EditAlbumDialogState extends ConsumerState<_EditAlbumDialog> {
                 ),
                 const SizedBox(height: 4),
                 TextFormField(
+                  key: const Key('remote-album-description-field'),
                   controller: descriptionController,
                   maxLines: 4,
                   textCapitalization: TextCapitalization.sentences,
@@ -368,11 +374,13 @@ class _EditAlbumDialogState extends ConsumerState<_EditAlbumDialog> {
                   mainAxisAlignment: MainAxisAlignment.end,
                   children: [
                     TextButton(
+                      key: const Key('remote-album-edit-cancel-button'),
                       onPressed: () => Navigator.of(context).pop(null),
                       child: Text('cancel'.t(context: context)),
                     ),
                     const SizedBox(width: 12),
                     FilledButton(
+                      key: const Key('remote-album-edit-save-button'),
                       onPressed: _handleSave,
                       child: Text('save'.t(context: context)),
                     ),

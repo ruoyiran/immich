@@ -37,6 +37,7 @@ class DriftRemoteAlbumOption extends StatelessWidget {
     if (onEditAlbum != null) {
       menuChildren.add(
         BaseActionButton(
+          key: const Key('remote-album-edit-action'),
           label: 'edit_album'.t(context: context),
           iconData: Icons.edit,
           onPressed: onEditAlbum,
@@ -48,6 +49,7 @@ class DriftRemoteAlbumOption extends StatelessWidget {
     if (onAddPhotos != null) {
       menuChildren.add(
         BaseActionButton(
+          key: const Key('remote-album-add-photos-action'),
           label: 'add_photos'.t(context: context),
           iconData: Icons.add_a_photo,
           onPressed: onAddPhotos,
@@ -59,6 +61,7 @@ class DriftRemoteAlbumOption extends StatelessWidget {
     if (onAddUsers != null) {
       menuChildren.add(
         BaseActionButton(
+          key: const Key('remote-album-add-users-action'),
           label: 'album_viewer_page_share_add_users'.t(context: context),
           iconData: Icons.group_add,
           onPressed: onAddUsers,
@@ -70,6 +73,7 @@ class DriftRemoteAlbumOption extends StatelessWidget {
     if (onLeaveAlbum != null) {
       menuChildren.add(
         BaseActionButton(
+          key: const Key('remote-album-leave-action'),
           label: 'leave_album'.t(context: context),
           iconData: Icons.person_remove_rounded,
           onPressed: onLeaveAlbum,
@@ -81,6 +85,7 @@ class DriftRemoteAlbumOption extends StatelessWidget {
     if (onToggleAlbumOrder != null) {
       menuChildren.add(
         BaseActionButton(
+          key: const Key('remote-album-change-order-action'),
           label: 'change_display_order'.t(context: context),
           iconData: Icons.swap_vert_rounded,
           onPressed: onToggleAlbumOrder,
@@ -92,6 +97,7 @@ class DriftRemoteAlbumOption extends StatelessWidget {
     if (onCreateSharedLink != null) {
       menuChildren.add(
         BaseActionButton(
+          key: const Key('remote-album-create-shared-link-action'),
           label: 'create_shared_link'.t(context: context),
           iconData: Icons.link,
           onPressed: onCreateSharedLink,
@@ -103,6 +109,7 @@ class DriftRemoteAlbumOption extends StatelessWidget {
     if (onShowOptions != null) {
       menuChildren.add(
         BaseActionButton(
+          key: const Key('remote-album-options-action'),
           label: 'options'.t(context: context),
           iconData: Icons.settings,
           onPressed: onShowOptions,
@@ -115,6 +122,7 @@ class DriftRemoteAlbumOption extends StatelessWidget {
       menuChildren.add(const Divider(height: 1));
       menuChildren.add(
         BaseActionButton(
+          key: const Key('remote-album-delete-action'),
           label: 'delete_album'.t(context: context),
           iconData: Icons.delete,
           iconColor: context.isDarkTheme ? Colors.red[400] : Colors.red[800],
@@ -147,6 +155,7 @@ class DriftRemoteAlbumOption extends StatelessWidget {
       ],
       builder: (context, controller, child) {
         return IconButton(
+          key: const Key('remote-album-menu-button'),
           icon: Icon(Icons.more_vert_rounded, color: iconColor ?? Colors.white, shadows: iconShadows),
           onPressed: () => controller.isOpen ? controller.close() : controller.open(),
         );
