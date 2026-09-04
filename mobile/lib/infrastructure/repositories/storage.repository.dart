@@ -244,7 +244,15 @@ class StorageRepository {
       final motionOutput = await motion.open(mode: FileMode.writeOnly);
       try {
         await input.setPosition(0);
-        await _copyOpenedRange(input, stillOutput, ranges.stillLength);
+        if (sourceIsJpeg) {
+          await _copyJpegStillWithoutMotionPhotoXmp(
+            input,
+            stillOutput,
+            ranges.stillLength,
+          );
+        } else {
+          await _copyOpenedRange(input, stillOutput, ranges.stillLength);
+        }
         await input.setPosition(ranges.motionOffset);
         await _copyOpenedRange(input, motionOutput, ranges.motionLength);
         await stillOutput.flush();
@@ -271,7 +279,23 @@ class StorageRepository {
     }
   }
 
-  Future<void> _copyOpenedRange(RandomAccessFile input, RandomAccessFile output, int length) async {
+  Future<void> _copyJpegStillWithoutMotionPhotoXmp(
+    RandomAccessFile input,
+    RandomAccessFile output,
+    int length,
+  ) async {
+    final bytes = await input.read(length);
+    if (bytes.length != length) {
+      throw const FormatException('Motion Photo JPEG still range ended early');
+    }
+    await output.writeFrom(_stripJpegMotionPhotoXmp(Uint8List.fromList(bytes)));
+  }
+
+  Future<void> _copyOpenedRange(
+    RandomAccessFile input,
+    RandomAccessFile output,
+    int length,
+  ) async {
     var remaining = length;
     while (remaining > 0) {
       final chunk = await input.read(min(1024 * 1024, remaining));
@@ -371,4 +395,64 @@ class StorageRepository {
       log.warning("Error deleting temporary directory", error, stackTrace);
     }
   }
+}
+
+Uint8List _stripJpegMotionPhotoXmp(Uint8List bytes) {
+  if (bytes.length < 4 || bytes[0] != 0xff || bytes[1] != 0xd8) {
+    return bytes;
+  }
+
+  final stripped = BytesBuilder(copy: false)..add(bytes.sublist(0, 2));
+  var offset = 2;
+  while (offset < bytes.length) {
+    final markerStart = offset;
+    if (bytes[offset] != 0xff) {
+      stripped.add(bytes.sublist(offset));
+      break;
+    }
+    while (offset < bytes.length && bytes[offset] == 0xff) {
+      offset++;
+    }
+    if (offset >= bytes.length) {
+      stripped.add(bytes.sublist(markerStart));
+      break;
+    }
+
+    final marker = bytes[offset++];
+    final markerEnd = offset;
+    if (marker == 0xda || marker == 0xd9) {
+      stripped.add(bytes.sublist(markerStart));
+      break;
+    }
+    if (marker == 0x01 || (marker >= 0xd0 && marker <= 0xd7)) {
+      stripped.add(bytes.sublist(markerStart, markerEnd));
+      continue;
+    }
+    if (offset + 2 > bytes.length) {
+      stripped.add(bytes.sublist(markerStart));
+      break;
+    }
+
+    final segmentLength = ByteData.sublistView(
+      bytes,
+      offset,
+      offset + 2,
+    ).getUint16(0);
+    final segmentEnd = offset + segmentLength;
+    if (segmentLength < 2 || segmentEnd > bytes.length) {
+      stripped.add(bytes.sublist(markerStart));
+      break;
+    }
+
+    final payload = bytes.sublist(offset + 2, segmentEnd);
+    final isMotionPhotoXmp =
+        marker == 0xe1 &&
+        latin1.decode(payload, allowInvalid: true).contains('MotionPhoto');
+    if (!isMotionPhotoXmp) {
+      stripped.add(bytes.sublist(markerStart, segmentEnd));
+    }
+    offset = segmentEnd;
+  }
+
+  return stripped.toBytes();
 }

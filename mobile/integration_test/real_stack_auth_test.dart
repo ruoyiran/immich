@@ -268,6 +268,9 @@ const _motionPhotoAssetName = String.fromEnvironment(
   'IMMICH_E2E_MOTION_PHOTO_ASSET_NAME',
   defaultValue: 'immich-e2e-motion-014.heic',
 );
+const _media068AndroidMotionHeicBase64 = String.fromEnvironment(
+  'IMMICH_E2E_MEDIA_068_ANDROID_MOTION_HEIC_BASE64',
+);
 const _metadataExifAssetName = String.fromEnvironment(
   'IMMICH_E2E_METADATA_EXIF_ASSET_NAME',
   defaultValue: 'immich-e2e-metadata-015-exif.jpg',
@@ -13440,6 +13443,325 @@ void main() async {
       },
     );
 
+    _realStackSessionTest(
+      'MOB-MEDIA-068-$_caseSuffix',
+      'uploads a Live Photo/Motion Photo pair and keeps it linked',
+      (tester) async {
+        tester.view.devicePixelRatio = 1.0;
+        tester.view.physicalSize = const Size(430, 932);
+        addTearDown(tester.view.reset);
+
+        await _loadAuthenticatedApp(
+          tester,
+          overrideCancellation: true,
+          closeDriftOnDispose: false,
+          resetSyncAcksBeforeStart: true,
+        );
+        final container = _containerOfApp(tester);
+        final apiService = container.read(apiServiceProvider);
+        final assetsApi = apiService.assetsApi;
+        final searchApi = apiService.searchApi;
+        final createdRemoteAssetIds = <String>{};
+        final createdLocalAssetIds = <String>{};
+
+        addTearDown(() async {
+          for (final assetId in createdRemoteAssetIds) {
+            await _deleteTestAssetBestEffort(assetsApi, assetId);
+          }
+          unawaited(_deleteLocalTestAssetsBestEffort(createdLocalAssetIds));
+        });
+
+        await _resetAndSyncRemoteState(tester, container);
+
+        final runToken = DateTime.now().toUtc().microsecondsSinceEpoch.toString();
+        final useAndroidMotionHeicFixture =
+            Platform.isAndroid && _media068AndroidMotionHeicBase64.isNotEmpty;
+        final localName = useAndroidMotionHeicFixture
+            ? 'immich-e2e-media-068-live-$runToken.heic'
+            : 'immich-e2e-media-068-live-$runToken.jpg';
+        final motionName = localName.replaceFirst(RegExp(r'\.[^.]+$'), '.mp4');
+        final imageBytes = useAndroidMotionHeicFixture
+            ? base64Decode(_media068AndroidMotionHeicBase64)
+            : _generatedJpegBytes(runToken.hashCode);
+        final motionBytes = useAndroidMotionHeicFixture
+            ? const <int>[]
+            : _generatedMp4Bytes(
+                'MOB-MEDIA-068-$_caseSuffix-$runToken',
+              );
+        if (!useAndroidMotionHeicFixture) {
+          expect(
+            await _serverAssetIdsByOriginalFilename(
+              searchApi,
+              localName,
+              type: api.AssetTypeEnum.IMAGE,
+            ),
+            isEmpty,
+            reason: 'The 068 Live Photo filename must be unique before upload',
+          );
+        }
+
+        final createdLocal = await _saveLocalTestLivePhoto(
+          container,
+          createdLocalAssetIds,
+          title: localName,
+          relativePath: Platform.isAndroid ? 'Pictures/ImmichE2E068' : null,
+          imageBytes: imageBytes,
+          videoBytes: motionBytes,
+          androidImageBytesAreMotionPhoto: useAndroidMotionHeicFixture,
+        );
+        expect(createdLocal.id, isNotEmpty);
+
+        await container.read(backgroundSyncProvider).syncLocal(full: true);
+        final localAsset = await _waitForLocalAssetByNameState(
+          container,
+          localName,
+          tester,
+          (asset) => asset.isImage && asset.isMotionPhoto,
+          reason:
+              'Expected the 068 local gallery fixture to sync as a Live Photo/Motion Photo',
+        );
+        expect(localAsset.isLocalOnly, isTrue);
+
+        final liveFiles = await StorageRepository().getLivePhotoFilesForAsset(
+          localAsset,
+        );
+        expect(liveFiles, isNotNull);
+        expect(liveFiles!.still.existsSync(), isTrue);
+        expect(liveFiles.motion.existsSync(), isTrue);
+        final stillBytes = await liveFiles.still.readAsBytes();
+        final extractedMotionBytes = await liveFiles.motion.readAsBytes();
+        expect(stillBytes, isNotEmpty);
+        expect(extractedMotionBytes, isNotEmpty);
+        final stillMd5 = base64Encode(md5.convert(stillBytes).bytes);
+        final motionMd5 = base64Encode(md5.convert(extractedMotionBytes).bytes);
+
+        final progressById = <String, List<double>>{};
+        String? remoteAssetId;
+        String? uploadError;
+        await container.read(foregroundUploadServiceProvider).uploadSingleAsset(
+          localAsset,
+          Completer<void>(),
+          callbacks: UploadCallbacks(
+            onProgress: (id, fileName, bytes, totalBytes) {
+              final progress = totalBytes > 0 ? bytes / totalBytes : 0.0;
+              final progressKey = '$id:$fileName';
+              final assetProgress = progressById.putIfAbsent(
+                progressKey,
+                () => [],
+              );
+              expect(progress, inInclusiveRange(0.0, 1.0));
+              if (assetProgress.isNotEmpty) {
+                expect(progress, greaterThanOrEqualTo(assetProgress.last));
+              }
+              assetProgress.add(progress);
+            },
+            onSuccess: (_, remoteId) => remoteAssetId = remoteId,
+            onError: (_, errorMessage) => uploadError = errorMessage,
+          ),
+        );
+
+        expect(uploadError, isNull);
+        expect(remoteAssetId, isNotNull);
+        final progressNames = progressById.keys
+            .where((key) => key.startsWith('${localAsset.id}:'))
+            .map((key) => key.substring(localAsset.id.length + 1))
+            .toSet();
+        expect(progressNames, hasLength(useAndroidMotionHeicFixture ? 1 : 2));
+        if (useAndroidMotionHeicFixture) {
+          expect(progressNames.single.toLowerCase(), endsWith('.heic'));
+        } else {
+          expect(progressNames, containsAll([motionName, localName]));
+          expect(
+            progressNames.any(
+              (name) => name.toLowerCase().endsWith('.mp4') || name.toLowerCase().endsWith('.mov'),
+            ),
+            isTrue,
+          );
+          expect(
+            progressNames.any(
+              (name) =>
+                  name.toLowerCase().endsWith('.jpg') ||
+                  name.toLowerCase().endsWith('.jpeg') ||
+                  name.toLowerCase().endsWith('.heic') ||
+                  name.toLowerCase().endsWith('.heif'),
+            ),
+            isTrue,
+          );
+        }
+        createdRemoteAssetIds.add(remoteAssetId!);
+
+        if (!useAndroidMotionHeicFixture) {
+          final serverIds = await _waitForServerAssetIdsByOriginalFilename(
+            tester,
+            searchApi,
+            localName,
+            (ids) => ids.contains(remoteAssetId),
+            type: api.AssetTypeEnum.IMAGE,
+            reason:
+                'Expected the 068 uploaded Live Photo still to be indexed by filename',
+          );
+          expect(serverIds, hasLength(1));
+        }
+
+        final info = await _waitForAssetInfoState(
+          tester,
+          assetsApi,
+          remoteAssetId!,
+          (asset) =>
+              asset.type == api.AssetTypeEnum.IMAGE &&
+              (useAndroidMotionHeicFixture
+                  ? asset.originalFileName.toLowerCase().endsWith('.heic')
+                  : asset.originalFileName == localName) &&
+              asset.livePhotoVideoId.orElse(null) != null &&
+              asset.width != null &&
+              asset.height != null,
+          reason:
+              'Expected the 068 uploaded still to expose a linked motion video',
+        );
+        if (useAndroidMotionHeicFixture) {
+          expect(info.checksum, isNotEmpty);
+        } else {
+          expect(info.checksum, stillMd5);
+        }
+        final livePhotoVideoId = info.livePhotoVideoId.orElse(null);
+        expect(livePhotoVideoId, isNotNull);
+        expect(livePhotoVideoId, isNot(remoteAssetId));
+        createdRemoteAssetIds.add(livePhotoVideoId!);
+
+        final motionInfo = await _waitForAssetInfoState(
+          tester,
+          assetsApi,
+          livePhotoVideoId,
+          (asset) => asset.type == api.AssetTypeEnum.VIDEO,
+          reason:
+              'Expected the 068 motion component to upload as a playable video asset',
+        );
+        expect(motionInfo.id, livePhotoVideoId);
+        if (useAndroidMotionHeicFixture) {
+          expect(motionInfo.originalFileName, isNotEmpty);
+        } else {
+          expect(
+            motionInfo.originalFileName,
+            anyOf(localName, motionName),
+          );
+        }
+
+        final originalStill = await _waitForSuccessfulResponse(
+          tester,
+          () => container
+              .read(assetApiRepositoryProvider)
+              .downloadAsset(remoteAssetId!, edited: false),
+          timeout: const Duration(minutes: 3),
+        );
+        if (useAndroidMotionHeicFixture) {
+          expect(originalStill.bodyBytes, isNotEmpty);
+        } else {
+          expect(
+            base64Encode(md5.convert(originalStill.bodyBytes).bytes),
+            stillMd5,
+          );
+        }
+
+        if (Platform.isAndroid && info.originalFileName.toLowerCase().endsWith('.heic')) {
+          final motionOriginal = await _waitForSuccessfulResponse(
+            tester,
+            () => http.get(
+              Uri.parse(
+                '${Store.get(StoreKey.serverEndpoint)}/assets/$remoteAssetId/original',
+              ),
+              headers: {
+                ...ApiService.getRequestHeaders(),
+                'Authorization': 'Bearer ${Store.get(StoreKey.accessToken)}',
+                DownloadRepository.livePhotoFormatHeader:
+                    DownloadRepository.androidMotionHeicFormat,
+              },
+            ),
+            timeout: const Duration(minutes: 3),
+          );
+          _expectAndroidMotionHeic(motionOriginal.bodyBytes);
+        }
+
+        final motionPlayback = await _waitForSuccessfulResponse(
+          tester,
+          () => assetsApi.playAssetVideoWithHttpInfo(livePhotoVideoId),
+          acceptedStatusCodes: const {200, 206},
+          timeout: const Duration(minutes: 3),
+        );
+        expect(motionPlayback.bodyBytes, isNotEmpty);
+
+        await _resetAndSyncRemoteState(tester, container);
+        final syncedStill = await _waitForRemoteAssetState(
+          tester,
+          container,
+          remoteAssetId!,
+          (asset) =>
+              asset.isImage &&
+              asset.isMotionPhoto &&
+              (useAndroidMotionHeicFixture || asset.hasLocal) &&
+              asset.hasRemote &&
+              (useAndroidMotionHeicFixture || asset.checksum == stillMd5) &&
+              asset.livePhotoVideoId == livePhotoVideoId,
+          reason:
+              'Expected the 068 still to sync back as one merged Live Photo asset',
+        );
+        await _waitForRemoteAssetState(
+          tester,
+          container,
+          livePhotoVideoId,
+          (asset) => asset.isVideo && asset.visibility == AssetVisibility.hidden,
+          reason:
+              'Expected the 068 hidden motion video to sync locally as hidden',
+        );
+
+        final timeline = container.read(timelineFactoryProvider).main([
+          syncedStill.ownerId,
+        ]);
+        addTearDown(timeline.dispose);
+        final timelineAssets = await _expectTimelineAssetSet(
+          tester,
+          timeline,
+          includes: {remoteAssetId!},
+          excludes: {livePhotoVideoId},
+          reason:
+              'Expected the 068 timeline to show only the Live Photo still asset',
+        );
+        final timelineMatches = timelineAssets
+            .where(
+              (asset) =>
+                  _timelineAssetId(asset) == remoteAssetId ||
+                  asset.refersToSameAsset(syncedStill),
+            )
+            .toList();
+        expect(timelineMatches, hasLength(1));
+        expect(timelineMatches.single.isMotionPhoto, isTrue);
+
+        await _openTimelineAsset(tester, syncedStill);
+        await pumpUntilFound(
+          tester,
+          find.byType(AssetViewer),
+          timeout: const Duration(seconds: 60),
+        );
+        expect(
+          container.read(assetViewerProvider).currentAsset?.remoteId,
+          remoteAssetId,
+        );
+        expect(tester.takeException(), isNull);
+
+        final duplicateRemoteId = await _uploadSingleAssetToServer(
+          container,
+          localAsset,
+        );
+        expect(duplicateRemoteId, remoteAssetId);
+
+        debugPrint(
+          'MOB-MEDIA-068-$_caseSuffix uploaded live photo '
+          'stillRemoteId=$remoteAssetId motionRemoteId=$livePhotoVideoId '
+          'sourceFilename=$localName stillMd5=$stillMd5 motionMd5=$motionMd5 '
+          'stillSize=${stillBytes.length} motionSize=${extractedMotionBytes.length}',
+        );
+      },
+    );
+
     if (_selectedCaseId.isNotEmpty && !_registeredSelectedCase) {
       test(
         _selectedCaseId,
@@ -15203,6 +15525,96 @@ Future<AssetEntity> _saveLocalTestVideo(
       file.deleteSync();
     }
   }
+}
+
+Future<AssetEntity> _saveLocalTestLivePhoto(
+  ProviderContainer container,
+  Set<String> createdLocalAssetIds, {
+  required String title,
+  required String? relativePath,
+  required List<int> imageBytes,
+  required List<int> videoBytes,
+  bool androidImageBytesAreMotionPhoto = false,
+}) async {
+  final directory = await getTemporaryDirectory();
+  final image = File('${directory.path}/$title');
+  final video = File(
+    '${directory.path}/${title.replaceFirst(RegExp(r'\.[^.]+$'), '.mp4')}',
+  );
+  final savedImageBytes = Platform.isAndroid
+      ? androidImageBytesAreMotionPhoto
+            ? imageBytes
+            : _generatedAndroidMotionPhotoBytes(imageBytes, videoBytes)
+      : imageBytes;
+  await image.writeAsBytes(savedImageBytes, flush: true);
+  if (!Platform.isAndroid) {
+    await video.writeAsBytes(videoBytes, flush: true);
+  }
+  try {
+    final fileMediaRepository = container.read(fileMediaRepositoryProvider);
+    final created = Platform.isAndroid
+        ? await fileMediaRepository.saveImageWithFile(
+            image.path,
+            title: title,
+            relativePath: relativePath,
+          )
+        : await fileMediaRepository.saveLivePhoto(
+            image: image,
+            video: video,
+            title: title,
+          );
+    expect(
+      created,
+      isNotNull,
+      reason:
+          'Expected PhotoManager to save local Live Photo/Motion Photo fixture $title',
+    );
+    createdLocalAssetIds.add(created!.id);
+    return created;
+  } finally {
+    if (image.existsSync()) {
+      image.deleteSync();
+    }
+    if (video.existsSync()) {
+      video.deleteSync();
+    }
+  }
+}
+
+List<int> _generatedAndroidMotionPhotoBytes(
+  List<int> stillBytes,
+  List<int> motionBytes,
+) {
+  if (stillBytes.length < 4 || stillBytes[0] != 0xff || stillBytes[1] != 0xd8) {
+    throw const FormatException('Motion Photo fixture still must be a JPEG');
+  }
+  final xmp = '''
+<x:xmpmeta xmlns:x="adobe:ns:meta/">
+<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+<rdf:Description xmlns:GCamera="http://ns.google.com/photos/1.0/camera/" xmlns:Container="http://ns.google.com/photos/1.0/container/" xmlns:Item="http://ns.google.com/photos/1.0/container/item/" GCamera:MotionPhoto="1" GCamera:MotionPhotoVersion="1" GCamera:MotionPhotoPresentationTimestampUs="0" GCamera:MicroVideoOffset="${motionBytes.length}">
+<Container:Directory>
+<Container:Item Item:Semantic="Primary" Item:Mime="image/jpeg" Item:Length="0" Item:Padding="0"/>
+<Container:Item Item:Semantic="MotionPhoto" Item:Mime="video/mp4" Item:Length="${motionBytes.length}" Item:Padding="0"/>
+</Container:Directory>
+</rdf:Description>
+</rdf:RDF>
+</x:xmpmeta>
+''';
+  final xmpBytes = utf8.encode('http://ns.adobe.com/xap/1.0/\x00$xmp');
+  final segmentLength = xmpBytes.length + 2;
+  if (segmentLength > 0xffff) {
+    throw const FormatException('Motion Photo XMP segment is too large');
+  }
+  return [
+    ...stillBytes.take(2),
+    0xff,
+    0xe1,
+    segmentLength >> 8,
+    segmentLength & 0xff,
+    ...xmpBytes,
+    ...stillBytes.skip(2),
+    ...motionBytes,
+  ];
 }
 
 Future<void> _deleteLocalTestAssetsBestEffort(Iterable<String> assetIds) async {
