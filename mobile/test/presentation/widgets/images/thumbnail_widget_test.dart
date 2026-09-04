@@ -49,7 +49,7 @@ void main() {
         home: SizedBox.square(
           dimension: 32,
           child: Thumbnail(
-            imageProvider: RemoteImageProvider(url: 'https://example.test/thumbnail', retryNotFound: true),
+            imageProvider: RemoteImageProvider(url: 'https://example.test/thumbnail', retryTransientErrors: true),
           ),
         ),
       ),
@@ -66,6 +66,45 @@ void main() {
 
     expect(requests, 2);
   });
+
+  for (final status in [500, 503]) {
+    testWidgets('retries HTTP $status for a remote thumbnail', (tester) async {
+      var requests = 0;
+
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockDecodedMessageHandler(cancelChannel, (
+        _,
+      ) async {
+        return <Object?>[null];
+      });
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockDecodedMessageHandler(requestChannel, (
+        _,
+      ) async {
+        requests++;
+        if (requests == 1) {
+          return <Object?>['IOException', 'HTTP $status: temporary failure', null];
+        }
+        return <Object?>[null];
+      });
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: SizedBox.square(
+            dimension: 32,
+            child: Thumbnail(
+              imageProvider: RemoteImageProvider(url: 'https://example.test/temporary', retryTransientErrors: true),
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+      expect(requests, 1);
+
+      await tester.pump(const Duration(milliseconds: 500));
+      await tester.pump();
+
+      expect(requests, 2);
+    });
+  }
 
   testWidgets('keeps retrying transient thumbnails across delayed server processing', (tester) async {
     var requests = 0;
@@ -90,7 +129,10 @@ void main() {
         home: SizedBox.square(
           dimension: 32,
           child: Thumbnail(
-            imageProvider: RemoteImageProvider(url: 'https://example.test/thumbnail-delayed', retryNotFound: true),
+            imageProvider: RemoteImageProvider(
+              url: 'https://example.test/thumbnail-delayed',
+              retryTransientErrors: true,
+            ),
           ),
         ),
       ),

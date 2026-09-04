@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:immich_mobile/extensions/build_context_extensions.dart';
 import 'package:immich_mobile/presentation/widgets/images/remote_image_provider.dart';
-import 'package:immich_mobile/utils/image_url_builder.dart';
 
 class AssetMarkerIcon extends StatelessWidget {
   const AssetMarkerIcon({required this.id, required this.thumbhash, super.key});
@@ -11,7 +10,6 @@ class AssetMarkerIcon extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final imageUrl = getThumbnailUrlForRemoteId(id);
     return LayoutBuilder(
       builder: (context, constraints) {
         final pinHeight = constraints.maxHeight * 0.14;
@@ -42,7 +40,7 @@ class AssetMarkerIcon extends StatelessWidget {
                   backgroundColor: context.colorScheme.onSurface,
                   child: CircleAvatar(
                     radius: constraints.maxHeight * 0.37,
-                    backgroundImage: RemoteImageProvider(url: imageUrl),
+                    backgroundImage: RemoteImageProvider.thumbnail(assetId: id, thumbhash: thumbhash),
                   ),
                 ),
               ),

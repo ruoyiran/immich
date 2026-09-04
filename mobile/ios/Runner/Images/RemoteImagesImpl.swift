@@ -60,6 +60,13 @@ class RemoteImageApiImpl: NSObject, RemoteImageApi {
       return request.completion(.failure(error))
     }
 
+    if let error = remoteImageHTTPError(from: response) {
+      registry.remove(requestId: request.id)
+      return request.completion(
+        .failure(PigeonError(code: error.code, message: error.message, details: nil))
+      )
+    }
+
     guard let data = data else {
       registry.remove(requestId: request.id)
       return request.completion(.failure(PigeonError(code: "", message: "No data received", details: nil)))

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:ffi';
 import 'dart:io';
 import 'dart:ui' as ui;
@@ -6,6 +7,7 @@ import 'package:ffi/ffi.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:immich_mobile/infrastructure/loaders/image_request.dart';
+import 'package:immich_mobile/infrastructure/loaders/remote_image_request_scheduler.dart';
 import 'package:immich_mobile/platform/remote_image_api.g.dart';
 import 'package:immich_mobile/presentation/widgets/images/remote_image_provider.dart';
 
@@ -14,6 +16,10 @@ void main() {
 
   const channel = BasicMessageChannel<Object?>(
     'dev.flutter.pigeon.immich_mobile.RemoteImageApi.requestImage',
+    RemoteImageApi.pigeonChannelCodec,
+  );
+  const cancelChannel = BasicMessageChannel<Object?>(
+    'dev.flutter.pigeon.immich_mobile.RemoteImageApi.cancelRequest',
     RemoteImageApi.pigeonChannelCodec,
   );
   late List<Object?> args;
@@ -25,10 +31,16 @@ void main() {
       args = message! as List<Object?>;
       return <Object?>[null];
     });
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockDecodedMessageHandler(cancelChannel, (
+      _,
+    ) async {
+      return <Object?>[null];
+    });
   });
 
   tearDown(() {
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockDecodedMessageHandler(channel, null);
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockDecodedMessageHandler(cancelChannel, null);
   });
 
   Future<ui.Image> loadEncoded(String path, ui.Size decodeSize) async {
@@ -117,8 +129,38 @@ void main() {
 
   test('uses the retry setting in the provider cache key', () {
     final plain = RemoteImageProvider(url: 'https://example.test/thumbnail');
-    final retrying = RemoteImageProvider(url: 'https://example.test/thumbnail', retryNotFound: true);
+    final retrying = RemoteImageProvider(url: 'https://example.test/thumbnail', retryTransientErrors: true);
 
     expect(plain, isNot(retrying));
+  });
+
+  test('limits active remote thumbnail requests to eight', () async {
+    final responses = <Completer<Object?>>[];
+    var requests = 0;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockDecodedMessageHandler(channel, (_) {
+      requests++;
+      final response = Completer<Object?>();
+      responses.add(response);
+      return response.future;
+    });
+
+    final futures = List.generate(9, (index) {
+      return RemoteImageRequest(
+        uri: 'https://example.test/thumbnail/$index',
+        queuePriority: RemoteImageRequestPriority.visible,
+      ).load((_, {getTargetSize}) => throw UnimplementedError());
+    });
+    await pumpEventQueue();
+
+    expect(requests, 8);
+
+    responses.first.complete(<Object?>[null]);
+    await pumpEventQueue();
+    expect(requests, 9);
+
+    for (final response in responses.skip(1)) {
+      response.complete(<Object?>[null]);
+    }
+    await Future.wait(futures);
   });
 }

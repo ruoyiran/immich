@@ -9,7 +9,10 @@ let package = Package(
     .target(
       name: "PMLiveWriterCore",
       path: "Runner/Sync",
-      exclude: ["Messages.g.swift", "MessagesImpl.swift", "PHAssetExtensions.swift", "PHAssetResourceExtensions.swift"],
+      exclude: [
+        "Messages.g.swift", "MessagesImpl.swift", "PHAssetExtensions.swift",
+        "PHAssetResourceExtensions.swift",
+      ],
       sources: ["PMLiveWriter.swift", "AppleLivePhotoWriter.swift"]
     ),
     .testTarget(
@@ -17,6 +20,21 @@ let package = Package(
       dependencies: ["PMLiveWriterCore"],
       path: "PMLiveWriterTests",
       resources: [.copy("Fixtures")]
+    ),
+    .target(
+      name: "RemoteImageHTTPStatusCore",
+      path: "Runner/Images",
+      exclude: [
+        "ImageProcessing.swift", "ImageRequest.swift", "LocalImages.g.swift",
+        "LocalImagesImpl.swift",
+        "RemoteImages.g.swift", "RemoteImagesImpl.swift", "Thumbhash.swift",
+      ],
+      sources: ["RemoteImageHTTPStatus.swift"]
+    ),
+    .testTarget(
+      name: "RemoteImageHTTPStatusCoreTests",
+      dependencies: ["RemoteImageHTTPStatusCore"],
+      path: "RemoteImageTests"
     ),
   ]
 )

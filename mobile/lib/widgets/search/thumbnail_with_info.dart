@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:immich_mobile/extensions/build_context_extensions.dart';
-import 'package:immich_mobile/presentation/widgets/images/remote_image_provider.dart';
 import 'package:immich_mobile/presentation/widgets/images/thumbnail.widget.dart';
 import 'package:immich_mobile/widgets/search/thumbnail_with_info_container.dart';
 
@@ -8,14 +7,14 @@ class ThumbnailWithInfo extends StatelessWidget {
   const ThumbnailWithInfo({
     super.key,
     required this.textInfo,
-    this.imageUrl,
+    this.imageProvider,
     this.noImageIcon,
     this.borderRadius = 10,
     this.onTap,
   });
 
   final String textInfo;
-  final String? imageUrl;
+  final ImageProvider? imageProvider;
   final VoidCallback? onTap;
   final IconData? noImageIcon;
   final double borderRadius;
@@ -27,10 +26,10 @@ class ThumbnailWithInfo extends StatelessWidget {
       onTap: onTap,
       borderRadius: borderRadius,
       label: textInfo,
-      child: imageUrl != null
+      child: imageProvider != null
           ? ClipRRect(
               borderRadius: BorderRadius.circular(borderRadius),
-              child: Thumbnail(imageProvider: RemoteImageProvider(url: imageUrl!)),
+              child: Thumbnail(imageProvider: imageProvider),
             )
           : Center(child: Icon(noImageIcon ?? Icons.not_listed_location, color: textAndIconColor)),
     );
