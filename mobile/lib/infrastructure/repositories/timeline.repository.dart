@@ -320,12 +320,23 @@ class DriftTimelineRepository extends DriftDatabaseRepository {
     origin: TimelineOrigin.favorite,
   );
 
-  TimelineQuery trash(String userId, GroupAssetsBy groupBy) => _remoteQueryBuilder(
-    filter: (row) => row.deletedAt.isNotNull() & row.ownerId.equals(userId),
-    groupBy: groupBy,
-    origin: TimelineOrigin.trash,
-    joinLocal: true,
-  );
+  TimelineQuery trash(String userId, GroupAssetsBy groupBy) {
+    final trashedLiveMotionIds = _db.remoteAssetEntity.selectOnly()
+      ..addColumns([_db.remoteAssetEntity.livePhotoVideoId])
+      ..where(
+        _db.remoteAssetEntity.deletedAt.isNotNull() &
+            _db.remoteAssetEntity.ownerId.equals(userId) &
+            _db.remoteAssetEntity.livePhotoVideoId.isNotNull(),
+      );
+
+    return _remoteQueryBuilder(
+      filter: (row) =>
+          row.deletedAt.isNotNull() & row.ownerId.equals(userId) & row.id.isNotInQuery(trashedLiveMotionIds),
+      groupBy: groupBy,
+      origin: TimelineOrigin.trash,
+      joinLocal: true,
+    );
+  }
 
   TimelineQuery archived(String userId, GroupAssetsBy groupBy) => _remoteQueryBuilder(
     filter: (row) =>

@@ -15586,6 +15586,317 @@ void main() async {
       },
     );
 
+    _realStackSessionTest(
+      'MOB-MEDIA-074-$_caseSuffix',
+      'moves a Live Photo to trash as one linked asset',
+      (tester) async {
+        await _loadAuthenticatedApp(
+          tester,
+          overrideCancellation: true,
+          closeDriftOnDispose: false,
+          resetSyncAcksBeforeStart: true,
+        );
+        final container = _containerOfApp(tester);
+        final drift = container.read(driftProvider);
+        final apiService = container.read(apiServiceProvider);
+        final assetsApi = apiService.assetsApi;
+        final searchApi = apiService.searchApi;
+        final assetService = container.read(assetServiceProvider);
+        final createdRemoteAssetIds = <String>{};
+        final createdLocalAssetIds = <String>{};
+
+        addTearDown(() async {
+          for (final assetId in createdRemoteAssetIds) {
+            await _deleteTestAssetBestEffort(assetsApi, assetId);
+          }
+          unawaited(_deleteLocalTestAssetsBestEffort(createdLocalAssetIds));
+        });
+
+        await _resetAndSyncRemoteState(tester, container);
+
+        final runToken = DateTime.now()
+            .toUtc()
+            .microsecondsSinceEpoch
+            .toString();
+        final liveName = 'immich-e2e-trash-074-live-$runToken.jpg';
+        final motionName = liveName.replaceFirst(RegExp(r'\.[^.]+$'), '.mp4');
+        final liveStillBytes = _generatedJpegBytes(runToken.hashCode + 74);
+        final liveMotionBytes = _generatedMp4Bytes(
+          'MOB-MEDIA-074-$_caseSuffix-live-$runToken',
+        );
+        expect(
+          await _serverAssetIdsByOriginalFilename(searchApi, liveName),
+          isEmpty,
+          reason: 'The 074 Live Photo filename must be unique before upload',
+        );
+
+        final createdLocal = await _saveLocalTestLivePhoto(
+          container,
+          createdLocalAssetIds,
+          title: liveName,
+          relativePath: Platform.isAndroid ? 'Pictures/ImmichE2E074' : null,
+          imageBytes: liveStillBytes,
+          videoBytes: liveMotionBytes,
+        );
+        expect(createdLocal.id, isNotEmpty);
+
+        await container.read(backgroundSyncProvider).syncLocal(full: true);
+        final localLive = await _waitForLocalAssetByNameState(
+          container,
+          liveName,
+          tester,
+          (asset) => asset.isImage && asset.isMotionPhoto,
+          reason: 'Expected 074 gallery fixture to sync as a Live Photo',
+        );
+        expect(localLive.isLocalOnly, isTrue);
+
+        final liveFiles = await StorageRepository().getLivePhotoFilesForAsset(
+          localLive,
+        );
+        expect(liveFiles, isNotNull);
+        expect(liveFiles!.still.existsSync(), isTrue);
+        expect(liveFiles.motion.existsSync(), isTrue);
+        final stillBytes = await liveFiles.still.readAsBytes();
+        final motionBytes = await liveFiles.motion.readAsBytes();
+        final localStillMd5 = base64Encode(md5.convert(stillBytes).bytes);
+        final localMotionMd5 = base64Encode(md5.convert(motionBytes).bytes);
+        expect(stillBytes, isNotEmpty);
+        expect(motionBytes, isNotEmpty);
+
+        final progressByName = <String, List<double>>{};
+        String? remoteStillId;
+        String? uploadError;
+        await container
+            .read(foregroundUploadServiceProvider)
+            .uploadSingleAsset(
+              localLive,
+              Completer<void>(),
+              callbacks: UploadCallbacks(
+                onProgress: (_, fileName, bytes, totalBytes) {
+                  final progress = totalBytes > 0 ? bytes / totalBytes : 0.0;
+                  final assetProgress = progressByName.putIfAbsent(
+                    fileName,
+                    () => [],
+                  );
+                  expect(progress, inInclusiveRange(0.0, 1.0));
+                  if (assetProgress.isNotEmpty) {
+                    expect(progress, greaterThanOrEqualTo(assetProgress.last));
+                  }
+                  assetProgress.add(progress);
+                },
+                onSuccess: (_, remoteId) => remoteStillId = remoteId,
+                onError: (_, errorMessage) => uploadError = errorMessage,
+              ),
+            );
+
+        expect(uploadError, isNull);
+        expect(remoteStillId, isNotNull);
+        expect(progressByName.keys, containsAll([liveName, motionName]));
+        final liveId = remoteStillId!;
+        createdRemoteAssetIds.add(liveId);
+
+        final serverIds = await _waitForServerAssetIdsByOriginalFilename(
+          tester,
+          searchApi,
+          liveName,
+          (ids) => ids.length == 1 && ids.contains(liveId),
+          reason: 'Expected 074 Live Photo still to be discoverable before trash',
+        );
+        expect(serverIds, hasLength(1));
+
+        final beforeInfo = await _waitForAssetInfoState(
+          tester,
+          assetsApi,
+          liveId,
+          (asset) =>
+              asset.type == api.AssetTypeEnum.IMAGE &&
+              asset.originalFileName == liveName &&
+              !asset.isTrashed &&
+              asset.livePhotoVideoId.orElse(null) != null &&
+              asset.width != null &&
+              asset.height != null,
+          reason: 'Expected 074 server Live Photo still before trash',
+        );
+        final motionId = beforeInfo.livePhotoVideoId.orElse(null);
+        expect(motionId, isNotNull);
+        expect(motionId, isNot(liveId));
+        createdRemoteAssetIds.add(motionId!);
+
+        final beforeMotionInfo = await _waitForAssetInfoState(
+          tester,
+          assetsApi,
+          motionId,
+          (asset) => asset.type == api.AssetTypeEnum.VIDEO && !asset.isTrashed,
+          reason: 'Expected 074 linked motion video before trash',
+        );
+        expect(
+          beforeMotionInfo.originalFileName,
+          anyOf(liveName, motionName),
+          reason:
+              'Server-backed Live Photo motion assets may expose the still original name',
+        );
+
+        final originalStill = await _waitForSuccessfulResponse(
+          tester,
+          () => container
+              .read(assetApiRepositoryProvider)
+              .downloadAsset(liveId, edited: false),
+          timeout: const Duration(minutes: 3),
+        );
+        final stillServerMd5 = base64Encode(
+          md5.convert(originalStill.bodyBytes).bytes,
+        );
+        expect(stillServerMd5, beforeInfo.checksum);
+        expect(stillServerMd5, localStillMd5);
+
+        final motionPlayback = await _waitForSuccessfulResponse(
+          tester,
+          () => assetsApi.playAssetVideoWithHttpInfo(motionId),
+          acceptedStatusCodes: const {200, 206},
+          timeout: const Duration(minutes: 3),
+        );
+        final motionServerMd5 = base64Encode(
+          md5.convert(motionPlayback.bodyBytes).bytes,
+        );
+        expect(motionServerMd5, localMotionMd5);
+
+        await _resetAndSyncRemoteState(tester, container);
+        final syncedLive = await _waitForRemoteAssetState(
+          tester,
+          container,
+          liveId,
+          (asset) =>
+              asset.isImage &&
+              asset.isMotionPhoto &&
+              asset.hasLocal &&
+              asset.hasRemote &&
+              !asset.isTrashed &&
+              asset.checksum == stillServerMd5 &&
+              asset.livePhotoVideoId == motionId,
+          reason: 'Expected 074 Live Photo to sync before trash',
+        );
+        await _waitForRemoteAssetState(
+          tester,
+          container,
+          motionId,
+          (asset) =>
+              asset.isVideo &&
+              asset.visibility == AssetVisibility.hidden &&
+              !asset.isTrashed,
+          reason: 'Expected 074 motion video to sync as hidden before trash',
+        );
+        expect(await _remoteAssetRowCountById(drift, liveId), 1);
+        expect(await _remoteAssetRowCountById(drift, motionId), 1);
+
+        final timelineFactory = container.read(timelineFactoryProvider);
+        final mainTimeline = timelineFactory.main([syncedLive.ownerId]);
+        final trashTimeline = timelineFactory.trash(syncedLive.ownerId);
+        addTearDown(mainTimeline.dispose);
+        addTearDown(trashTimeline.dispose);
+
+        await _expectTimelineAssetSet(
+          tester,
+          mainTimeline,
+          includes: {liveId},
+          excludes: {motionId},
+          reason: 'Expected 074 active Live Photo still in main timeline',
+        );
+        await _expectTimelineAssetSet(
+          tester,
+          trashTimeline,
+          includes: const {},
+          excludes: {liveId, motionId},
+          reason: 'Expected 074 active Live Photo to be absent from trash',
+        );
+
+        await assetService.trash([liveId]);
+        final trashedInfo = await _waitForAssetInfoState(
+          tester,
+          assetsApi,
+          liveId,
+          (asset) =>
+              asset.type == api.AssetTypeEnum.IMAGE &&
+              asset.isTrashed &&
+              asset.originalPath == beforeInfo.originalPath &&
+              asset.checksum == stillServerMd5 &&
+              asset.livePhotoVideoId.orElse(null) == motionId,
+          reason:
+              'Expected 074 Live Photo still to be trashed without file mutation',
+        );
+        expect(trashedInfo.originalFileName, beforeInfo.originalFileName);
+        await _waitForAssetInfoState(
+          tester,
+          assetsApi,
+          motionId,
+          (asset) => asset.type == api.AssetTypeEnum.VIDEO && asset.isTrashed,
+          reason: 'Expected 074 linked motion video to be trashed atomically',
+        );
+
+        await _resetAndSyncRemoteState(tester, container);
+        final trashedLocalLive = await _waitForRemoteAssetState(
+          tester,
+          container,
+          liveId,
+          (asset) =>
+              asset.hasRemote &&
+              asset.isImage &&
+              asset.isMotionPhoto &&
+              asset.isTrashed &&
+              asset.checksum == stillServerMd5 &&
+              asset.livePhotoVideoId == motionId,
+          reason: 'Expected 074 trash action to mark the Live Photo as trashed',
+        );
+        expect(trashedLocalLive.ownerId, syncedLive.ownerId);
+        await _waitForRemoteAssetState(
+          tester,
+          container,
+          motionId,
+          (asset) => asset.isVideo && asset.isTrashed,
+          reason: 'Expected 074 trash action to mark motion video as trashed',
+        );
+        expect(await _remoteAssetRowCountById(drift, liveId), 1);
+        expect(await _remoteAssetRowCountById(drift, motionId), 1);
+
+        await _expectTimelineAssetSet(
+          tester,
+          mainTimeline,
+          includes: const {},
+          excludes: {liveId, motionId},
+          reason: 'Expected 074 trashed Live Photo to leave main timeline',
+        );
+        await _expectTimelineAssetSet(
+          tester,
+          trashTimeline,
+          includes: {liveId},
+          excludes: {motionId},
+          reason: 'Expected 074 trash to show one Live Photo asset',
+        );
+        await _waitForServerAssetIdsByOriginalFilename(
+          tester,
+          searchApi,
+          liveName,
+          (ids) => !ids.contains(liveId),
+          reason: 'Expected 074 active search to filter trashed Live Photo',
+        );
+
+        const markerCaseId = 'MOB-MEDIA-074-$_caseSuffix';
+        debugPrint(
+          '$markerCaseId:TRASHED ${jsonEncode({
+            'assetId': liveId,
+            'motionAssetId': motionId,
+            'fileName': liveName,
+            'motionName': motionName,
+            'stillChecksum': stillServerMd5,
+            'motionChecksum': motionServerMd5,
+            'stillBytes': originalStill.bodyBytes.length,
+            'motionBytes': motionPlayback.bodyBytes.length,
+          })}',
+        );
+        await _pumpFor(tester, const Duration(seconds: 12));
+        expect(tester.takeException(), isNull);
+      },
+    );
+
     if (_selectedCaseId.isNotEmpty && !_registeredSelectedCase) {
       test(
         _selectedCaseId,

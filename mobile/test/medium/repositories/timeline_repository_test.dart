@@ -122,6 +122,31 @@ void main() {
       expect(remote.isMotionPhoto, isTrue);
       expect(remote.localId, local.id);
     });
+
+    test('trash timeline shows the still asset without duplicating the hidden motion asset', () async {
+      final user = await ctx.newUser();
+      final deletedAt = DateTime.now().toUtc();
+      final motion = await ctx.newRemoteAsset(
+        ownerId: user.id,
+        deletedAt: deletedAt,
+        type: .video,
+        visibility: .hidden,
+      );
+      final still = await ctx.newRemoteAsset(
+        ownerId: user.id,
+        deletedAt: deletedAt,
+        livePhotoVideoId: motion.id,
+      );
+
+      final query = sut.trash(user.id, .day);
+
+      final buckets = await query.bucketSource().first;
+      expect(buckets.fold<int>(0, (total, bucket) => total + bucket.assetCount), 1);
+
+      final assets = await query.assetSource(0, 10);
+      expect(assets, hasLength(1));
+      expect((assets.single as RemoteAsset).id, still.id);
+    });
   });
 
   group('localAlbum assets', () {
