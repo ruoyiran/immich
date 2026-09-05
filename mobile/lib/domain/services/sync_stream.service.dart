@@ -20,6 +20,9 @@ enum SyncMigrationTask {
   v20260128_ResetAssetV1, // Asset v2.5.0 has width and height information that were edited assets.
   v20260597_ResetAssetV1AssetV2, // Assets didn't include the uploadedAt column.
   v20260701_ResetAlbumsV1, // Album user migration dropped the owner. Sync fresh albums from the server to re-populate them.
+  v20260905_ResetPeopleFacesAndMetadata, // Refresh repaired face memberships, person covers, and search preferences.
+  v20260905_ResetPeopleFacesAfterPaginationFix, // Re-fetch rows skipped when server paging happened before validity filters.
+  v20260905_EnableOnThisDayMemories, // Refresh preferences after the compatibility server enables memories.
 }
 
 class SyncStreamService {
@@ -90,6 +93,39 @@ class SyncStreamService {
   }
 
   Future<void> _runPreSyncTasks(List<String> migrations, SemVer semVer) async {
+    if (!migrations.contains(SyncMigrationTask.v20260905_ResetPeopleFacesAndMetadata.name)) {
+      _logger.info("Running pre-sync task: v20260905_ResetPeopleFacesAndMetadata");
+      await _syncApiRepository.deleteSyncAck([
+        SyncEntityType.personV1,
+        SyncEntityType.personDeleteV1,
+        SyncEntityType.assetFaceV1,
+        SyncEntityType.assetFaceV2,
+        SyncEntityType.assetFaceDeleteV1,
+        SyncEntityType.assetExifV1,
+        SyncEntityType.userMetadataV1,
+        SyncEntityType.userMetadataDeleteV1,
+      ]);
+      migrations.add(SyncMigrationTask.v20260905_ResetPeopleFacesAndMetadata.name);
+    }
+
+    if (!migrations.contains(SyncMigrationTask.v20260905_ResetPeopleFacesAfterPaginationFix.name)) {
+      _logger.info("Running pre-sync task: v20260905_ResetPeopleFacesAfterPaginationFix");
+      await _syncApiRepository.deleteSyncAck([
+        SyncEntityType.personV1,
+        SyncEntityType.personDeleteV1,
+        SyncEntityType.assetFaceV1,
+        SyncEntityType.assetFaceV2,
+        SyncEntityType.assetFaceDeleteV1,
+      ]);
+      migrations.add(SyncMigrationTask.v20260905_ResetPeopleFacesAfterPaginationFix.name);
+    }
+
+    if (!migrations.contains(SyncMigrationTask.v20260905_EnableOnThisDayMemories.name)) {
+      _logger.info("Running pre-sync task: v20260905_EnableOnThisDayMemories");
+      await _syncApiRepository.deleteSyncAck([SyncEntityType.userMetadataV1, SyncEntityType.userMetadataDeleteV1]);
+      migrations.add(SyncMigrationTask.v20260905_EnableOnThisDayMemories.name);
+    }
+
     if (!migrations.contains(SyncMigrationTask.v20260701_ResetAlbumsV1.name)) {
       _logger.info("Running pre-sync task: v20260701_ResetAlbumsV1");
       await _syncApiRepository.deleteSyncAck([SyncEntityType.albumV1]);

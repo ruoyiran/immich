@@ -4,6 +4,7 @@ import 'package:drift/drift.dart';
 import 'package:easy_localization/easy_localization.dart';
 import 'package:immich_mobile/domain/models/album/album.model.dart';
 import 'package:immich_mobile/domain/models/asset/base_asset.model.dart';
+import 'package:immich_mobile/domain/models/place.model.dart';
 import 'package:immich_mobile/domain/models/time_range.model.dart';
 import 'package:immich_mobile/domain/models/timeline.model.dart';
 import 'package:immich_mobile/domain/services/timeline.service.dart';
@@ -363,7 +364,7 @@ class DriftTimelineRepository extends DriftDatabaseRepository {
     groupBy: groupBy,
   );
 
-  TimelineQuery place(String place, GroupAssetsBy groupBy) => (
+  TimelineQuery place(PlacePath place, GroupAssetsBy groupBy) => (
     bucketSource: () => _watchPlaceBucket(place, groupBy: groupBy),
     assetSource: (offset, count) => _getPlaceBucketAssets(place, offset: offset, count: count),
     origin: TimelineOrigin.place,
@@ -375,7 +376,24 @@ class DriftTimelineRepository extends DriftDatabaseRepository {
     origin: TimelineOrigin.person,
   );
 
-  Stream<List<Bucket>> _watchPlaceBucket(String place, {GroupAssetsBy groupBy = GroupAssetsBy.day}) {
+  Expression<bool> _placePathFilter(PlacePath place) {
+    Expression<bool> filter = const Constant(true);
+    if (place.country != null) {
+      filter &= _db.remoteExifEntity.country.equals(place.country!);
+    }
+    if (place.state != null) {
+      filter &= _db.remoteExifEntity.state.equals(place.state!);
+    }
+    if (place.city != null) {
+      filter &= _db.remoteExifEntity.city.equals(place.city!);
+    }
+    if (place.district != null) {
+      filter &= _db.remoteExifEntity.district.equals(place.district!);
+    }
+    return filter;
+  }
+
+  Stream<List<Bucket>> _watchPlaceBucket(PlacePath place, {GroupAssetsBy groupBy = GroupAssetsBy.day}) {
     if (groupBy == GroupAssetsBy.none) {
       // TODO: implement GroupAssetBy for place
       throw UnsupportedError("GroupAssetsBy.none is not supported for watchPlaceBucket");
@@ -394,7 +412,7 @@ class DriftTimelineRepository extends DriftDatabaseRepository {
         ),
       ])
       ..where(
-        _db.remoteExifEntity.city.equals(place) &
+        _placePathFilter(place) &
             _db.remoteAssetEntity.deletedAt.isNull() &
             _db.remoteAssetEntity.visibility.equalsValue(AssetVisibility.timeline),
       )
@@ -408,7 +426,7 @@ class DriftTimelineRepository extends DriftDatabaseRepository {
     }).watch();
   }
 
-  Future<List<BaseAsset>> _getPlaceBucketAssets(String place, {required int offset, required int count}) {
+  Future<List<BaseAsset>> _getPlaceBucketAssets(PlacePath place, {required int offset, required int count}) {
     final query =
         _db.remoteAssetEntity.select().join([
             innerJoin(
@@ -420,7 +438,7 @@ class DriftTimelineRepository extends DriftDatabaseRepository {
           ..where(
             _db.remoteAssetEntity.deletedAt.isNull() &
                 _db.remoteAssetEntity.visibility.equalsValue(AssetVisibility.timeline) &
-                _db.remoteExifEntity.city.equals(place),
+                _placePathFilter(place),
           )
           ..orderBy([OrderingTerm.desc(_db.remoteAssetEntity.createdAt)])
           ..limit(count, offset: offset);

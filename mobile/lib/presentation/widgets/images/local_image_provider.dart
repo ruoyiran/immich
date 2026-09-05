@@ -70,6 +70,7 @@ class LocalFullImageProvider extends CancellableImageProvider<LocalFullImageProv
   final int? width;
   final int? height;
   final String? checksum;
+  final bool forceOriginal;
 
   LocalFullImageProvider({
     required this.id,
@@ -79,6 +80,7 @@ class LocalFullImageProvider extends CancellableImageProvider<LocalFullImageProv
     this.width,
     this.height,
     this.checksum,
+    this.forceOriginal = false,
   });
 
   Size _previewTarget(double dpr, bool previewIsFinal) =>
@@ -142,7 +144,7 @@ class LocalFullImageProvider extends CancellableImageProvider<LocalFullImageProv
       return;
     }
 
-    final loadOriginal = SettingsRepository.instance.appConfig.image.loadOriginal;
+    final loadOriginal = key.forceOriginal || SettingsRepository.instance.appConfig.image.loadOriginal;
     final devicePixelRatio = PlatformDispatcher.instance.views.first.devicePixelRatio;
     var request = this.request = LocalImageRequest(
       localId: key.id,
@@ -206,11 +208,12 @@ class LocalFullImageProvider extends CancellableImageProvider<LocalFullImageProv
           isAnimated == other.isAnimated &&
           width == other.width &&
           height == other.height &&
-          checksum == other.checksum;
+          checksum == other.checksum &&
+          forceOriginal == other.forceOriginal;
     }
     return false;
   }
 
   @override
-  int get hashCode => Object.hash(id, size, isAnimated, width, height, checksum);
+  int get hashCode => Object.hash(id, size, isAnimated, width, height, checksum, forceOriginal);
 }

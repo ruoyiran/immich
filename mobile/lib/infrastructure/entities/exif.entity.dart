@@ -10,6 +10,10 @@ import 'package:immich_mobile/infrastructure/utils/exif.converter.dart';
 CREATE INDEX IF NOT EXISTS idx_remote_exif_city
 ON remote_exif_entity (city) WHERE city IS NOT NULL
 ''')
+@TableIndex.sql('''
+CREATE INDEX IF NOT EXISTS idx_remote_exif_place_path
+ON remote_exif_entity (country, state, city, district)
+''')
 class RemoteExifEntity extends Table with DriftDefaultsMixin {
   const RemoteExifEntity();
 
@@ -20,6 +24,8 @@ class RemoteExifEntity extends Table with DriftDefaultsMixin {
   TextColumn get state => text().nullable()();
 
   TextColumn get country => text().nullable()();
+
+  TextColumn get district => text().nullable()();
 
   DateTimeColumn get dateTimeOriginal => dateTime().nullable()();
 
@@ -75,6 +81,7 @@ extension RemoteExifEntityDataDomainEx on RemoteExifEntityData {
     city: city,
     state: state,
     country: country,
+    district: district,
     description: description,
     orientation: orientation,
     latitude: latitude,

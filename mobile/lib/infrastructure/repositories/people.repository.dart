@@ -62,6 +62,32 @@ class DriftPeopleRepository extends DriftDatabaseRepository {
     }).get();
   }
 
+  Stream<List<DriftPerson>> watchAllPeople({int minFaces = 3}) {
+    final people = _db.personEntity;
+    final faces = _db.assetFaceEntity;
+    final assets = _db.remoteAssetEntity;
+
+    final query =
+        _db.select(people).join([
+            innerJoin(faces, faces.personId.equalsExp(people.id)),
+            innerJoin(assets, assets.id.equalsExp(faces.assetId)),
+          ])
+          ..where(
+            people.isHidden.equals(false) &
+                assets.deletedAt.isNull() &
+                assets.visibility.equalsValue(AssetVisibility.timeline) &
+                faces.isVisible.equals(true) &
+                faces.deletedAt.isNull(),
+          )
+          ..groupBy([people.id], having: faces.id.count().isBiggerOrEqualValue(minFaces) | people.name.equals('').not())
+          ..orderBy([
+            OrderingTerm(expression: people.name.equals('').not(), mode: OrderingMode.desc),
+            OrderingTerm(expression: faces.id.count(), mode: OrderingMode.desc),
+          ]);
+
+    return query.watch().map((rows) => rows.map((row) => row.readTable(people).toDto()).toList(growable: false));
+  }
+
   Future<int> updateName(String personId, String name) {
     final query = _db.update(_db.personEntity)..where((row) => row.id.equals(personId));
 

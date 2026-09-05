@@ -166,6 +166,7 @@ class RemoteFullImageProvider extends CancellableImageProvider<RemoteFullImagePr
   final AssetType assetType;
   final bool isAnimated;
   final bool edited;
+  final bool forceOriginal;
 
   /// Physical size of the thumbnail shown before the preview.
   final Size? thumbnailSize;
@@ -177,6 +178,7 @@ class RemoteFullImageProvider extends CancellableImageProvider<RemoteFullImagePr
     required this.isAnimated,
     this.edited = true,
     this.thumbnailSize,
+    this.forceOriginal = false,
   });
 
   @override
@@ -236,7 +238,8 @@ class RemoteFullImageProvider extends CancellableImageProvider<RemoteFullImagePr
         edited: key.edited,
       ),
     );
-    final loadOriginal = assetType == AssetType.image && SettingsRepository.instance.appConfig.image.loadOriginal;
+    final loadOriginal =
+        assetType == AssetType.image && (key.forceOriginal || SettingsRepository.instance.appConfig.image.loadOriginal);
     yield* loadRequest(previewRequest, decode, isFinal: !loadOriginal);
 
     if (!loadOriginal) {
@@ -297,12 +300,13 @@ class RemoteFullImageProvider extends CancellableImageProvider<RemoteFullImagePr
       return assetId == other.assetId &&
           thumbhash == other.thumbhash &&
           isAnimated == other.isAnimated &&
-          edited == other.edited;
+          edited == other.edited &&
+          forceOriginal == other.forceOriginal;
     }
 
     return false;
   }
 
   @override
-  int get hashCode => assetId.hashCode ^ thumbhash.hashCode ^ isAnimated.hashCode ^ edited.hashCode;
+  int get hashCode => Object.hash(assetId, thumbhash, isAnimated, edited, forceOriginal);
 }

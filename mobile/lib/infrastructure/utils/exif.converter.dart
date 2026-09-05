@@ -17,6 +17,7 @@ abstract final class ExifDtoConverter {
       city: dto.city.orElse(null),
       state: dto.state.orElse(null),
       country: dto.country.orElse(null),
+      district: dto.district.orElse(null),
       make: dto.make.orElse(null),
       model: dto.model.orElse(null),
       lens: dto.lensModel.orElse(null),

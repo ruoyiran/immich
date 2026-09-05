@@ -8,6 +8,7 @@ import 'package:immich_mobile/domain/models/store.model.dart';
 import 'package:immich_mobile/entities/store.entity.dart';
 import 'package:immich_mobile/extensions/platform_extensions.dart';
 import 'package:immich_mobile/infrastructure/repositories/storage.repository.dart';
+import 'package:immich_mobile/presentation/widgets/asset_viewer/original_media_action.widget.dart';
 import 'package:immich_mobile/providers/asset_viewer/asset_viewer.provider.dart';
 import 'package:immich_mobile/providers/asset_viewer/is_motion_video_playing.provider.dart';
 import 'package:immich_mobile/providers/asset_viewer/video_player_provider.dart';
@@ -23,6 +24,7 @@ class NativeVideoViewer extends ConsumerStatefulWidget {
   final String? localFilePath;
   final bool isCurrent;
   final bool showControls;
+  final bool forceOriginal;
   final Widget image;
 
   const NativeVideoViewer({
@@ -32,6 +34,7 @@ class NativeVideoViewer extends ConsumerStatefulWidget {
     required this.image,
     this.isCurrent = false,
     this.showControls = true,
+    this.forceOriginal = false,
   });
 
   @override
@@ -164,8 +167,10 @@ class _NativeVideoViewerState extends ConsumerState<NativeVideoViewer> with Widg
         return null;
       }
 
-      final isOriginalVideo = ref.read(appConfigProvider).viewer.loadOriginalVideo;
-      final String postfixUrl = isOriginalVideo ? 'original' : 'video/playback';
+      final postfixUrl = selectRemoteVideoEndpoint(
+        loadOriginalVideo: ref.read(appConfigProvider).viewer.loadOriginalVideo,
+        forceOriginal: widget.forceOriginal,
+      );
       final String assetId = remoteAsset.livePhotoVideoId ?? remoteAsset.id;
       final String videoUrl = '$serverEndpoint/assets/$assetId/$postfixUrl';
 

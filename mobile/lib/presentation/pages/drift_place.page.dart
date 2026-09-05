@@ -2,6 +2,7 @@ import 'package:auto_route/auto_route.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:immich_mobile/domain/models/place.model.dart';
 import 'package:immich_mobile/extensions/build_context_extensions.dart';
 import 'package:immich_mobile/extensions/translate_extensions.dart';
 import 'package:immich_mobile/pages/common/large_leading_tile.dart';
@@ -14,9 +15,10 @@ import 'package:maplibre_gl/maplibre_gl.dart';
 
 @RoutePage()
 class DriftPlacePage extends StatelessWidget {
-  const DriftPlacePage({super.key, this.currentLocation});
+  const DriftPlacePage({super.key, this.currentLocation, this.path = const PlacePath()});
 
   final LatLng? currentLocation;
+  final PlacePath path;
 
   @override
   Widget build(BuildContext context) {
@@ -28,9 +30,9 @@ class DriftPlacePage extends StatelessWidget {
         builder: (context, searchValue, child) {
           return CustomScrollView(
             slivers: [
-              _PlaceSliverAppBar(search: search),
-              _Map(search: search, currentLocation: currentLocation),
-              _PlaceList(search: search),
+              _PlaceSliverAppBar(search: search, path: path),
+              if (path.nextLevel == PlaceLevel.country) _Map(search: search, currentLocation: currentLocation),
+              _PlaceList(search: search, path: path),
             ],
           );
         },
@@ -40,9 +42,10 @@ class DriftPlacePage extends StatelessWidget {
 }
 
 class _PlaceSliverAppBar extends HookWidget {
-  const _PlaceSliverAppBar({required this.search});
+  const _PlaceSliverAppBar({required this.search, required this.path});
 
   final ValueNotifier<String?> search;
+  final PlacePath path;
 
   @override
   Widget build(BuildContext context) {
@@ -65,7 +68,7 @@ class _PlaceSliverAppBar extends HookWidget {
               hintText: 'filter_places'.t(context: context),
               autofocus: true,
             )
-          : Text('places'.t(context: context)),
+          : Text(path.breadcrumb.isEmpty ? 'places'.t(context: context) : path.breadcrumb),
       actions: [
         IconButton(
           icon: Icon(search.value != null ? Icons.close : Icons.search),
@@ -108,13 +111,14 @@ class _Map extends StatelessWidget {
 }
 
 class _PlaceList extends ConsumerWidget {
-  const _PlaceList({required this.search});
+  const _PlaceList({required this.search, required this.path});
 
   final ValueNotifier<String?> search;
+  final PlacePath path;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final places = ref.watch(placesProvider);
+    final places = ref.watch(placesProvider(path));
 
     return places.when(
       loading: () => const SliverToBoxAdapter(
@@ -136,7 +140,7 @@ class _PlaceList extends ConsumerWidget {
       data: (places) {
         if (search.value != null) {
           places = places.where((place) {
-            return place.$1.toLowerCase().contains(search.value!.toLowerCase());
+            return place.name.toLowerCase().contains(search.value!.toLowerCase());
           }).toList();
         }
 
@@ -155,19 +159,22 @@ class _PlaceList extends ConsumerWidget {
 class _PlaceTile extends StatelessWidget {
   const _PlaceTile({required this.place});
 
-  final (String, String) place;
+  final PlaceNode place;
 
   @override
   Widget build(BuildContext context) {
     return LargeLeadingTile(
-      onTap: () => context.pushRoute(DriftPlaceDetailRoute(place: place.$1)),
-      title: Text(place.$1, style: context.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w500)),
+      onTap: () => context.pushRoute(
+        place.hasChildren ? DriftPlaceRoute(path: place.path) : DriftPlaceDetailRoute(place: place.path),
+      ),
+      title: Text(place.name, style: context.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w500)),
+      subtitle: Text('${place.assetCount}'),
       leading: ClipRRect(
         borderRadius: const BorderRadius.all(Radius.circular(20)),
         child: SizedBox(
           width: 80,
           height: 80,
-          child: Thumbnail.remote(remoteId: place.$2, fit: BoxFit.cover, thumbhash: ""),
+          child: Thumbnail.remote(remoteId: place.coverAssetId, fit: BoxFit.cover, thumbhash: ""),
         ),
       ),
     );
