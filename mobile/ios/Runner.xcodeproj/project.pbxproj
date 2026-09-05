@@ -38,9 +38,6 @@
 		FE5499F82F1198E2006016CB /* RemoteImagesImpl.swift in Sources */ = {isa = PBXBuildFile; fileRef = FE5499F72F1198DE006016CB /* RemoteImagesImpl.swift */; };
 		FE5FE4AE2F30FBC000A71243 /* ImageProcessing.swift in Sources */ = {isa = PBXBuildFile; fileRef = FE5FE4AD2F30FBC000A71243 /* ImageProcessing.swift */; };
 		FEAFA8732E4D42F4001E47FE /* Thumbhash.swift in Sources */ = {isa = PBXBuildFile; fileRef = FEAFA8722E4D42F4001E47FE /* Thumbhash.swift */; };
-		FEE084F82EC172460045228E /* SQLiteData in Frameworks */ = {isa = PBXBuildFile; productRef = FEE084F72EC172460045228E /* SQLiteData */; };
-		FEE084FB2EC1725A0045228E /* RawStructuredFieldValues in Frameworks */ = {isa = PBXBuildFile; productRef = FEE084FA2EC1725A0045228E /* RawStructuredFieldValues */; };
-		FEE084FD2EC1725A0045228E /* StructuredFieldValues in Frameworks */ = {isa = PBXBuildFile; productRef = FEE084FC2EC1725A0045228E /* StructuredFieldValues */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -184,13 +181,6 @@
 			path = Utility;
 			sourceTree = "<group>";
 		};
-		FEE084F22EC172080045228E /* Schemas */ = {
-			isa = PBXFileSystemSynchronizedRootGroup;
-			exceptions = (
-			);
-			path = Schemas;
-			sourceTree = "<group>";
-		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -199,9 +189,6 @@
 			buildActionMask = 2147483647;
 			files = (
 				78A318202AECB46A00862997 /* FlutterGeneratedPluginSwiftPackage in Frameworks */,
-				FEE084F82EC172460045228E /* SQLiteData in Frameworks */,
-				FEE084FB2EC1725A0045228E /* RawStructuredFieldValues in Frameworks */,
-				FEE084FD2EC1725A0045228E /* StructuredFieldValues in Frameworks */,
 				D3BED739C0BC29BB32E18EB2 /* Pods_Runner.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -290,7 +277,6 @@
 			isa = PBXGroup;
 			children = (
 				FE1BB4562F8319560087DBF9 /* Utility */,
-				FEE084F22EC172080045228E /* Schemas */,
 				B231F52D2E93A44A00BC45D1 /* Core */,
 				B25D37792E72CA15008B6CA7 /* Connectivity */,
 				B21E34A62E5AF9760031FDB9 /* Background */,
@@ -391,7 +377,6 @@
 			fileSystemSynchronizedGroups = (
 				B231F52D2E93A44A00BC45D1 /* Core */,
 				B2CF7F8C2DDE4EBB00744BF6 /* Sync */,
-				FEE084F22EC172080045228E /* Schemas */,
 			);
 			name = Runner;
 			packageProductDependencies = (
@@ -475,8 +460,6 @@
 			mainGroup = 97C146E51CF9000F007C117D;
 			packageReferences = (
 				781AD8BC2B33823900A9FFBB /* XCLocalSwiftPackageReference "FlutterGeneratedPluginSwiftPackage" */,
-				FEE084F62EC172460045228E /* XCRemoteSwiftPackageReference "sqlite-data" */,
-				FEE084F92EC1725A0045228E /* XCRemoteSwiftPackageReference "swift-http-structured-headers" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 97C146EF1CF9000F007C117D /* Products */;
@@ -1256,44 +1239,10 @@
 		};
 /* End XCLocalSwiftPackageReference section */
 
-/* Begin XCRemoteSwiftPackageReference section */
-		FEE084F62EC172460045228E /* XCRemoteSwiftPackageReference "sqlite-data" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/pointfreeco/sqlite-data";
-			requirement = {
-				kind = upToNextMajorVersion;
-				minimumVersion = 1.6.1;
-			};
-		};
-		FEE084F92EC1725A0045228E /* XCRemoteSwiftPackageReference "swift-http-structured-headers" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/apple/swift-http-structured-headers.git";
-			requirement = {
-				kind = upToNextMajorVersion;
-				minimumVersion = 1.6.0;
-			};
-		};
-/* End XCRemoteSwiftPackageReference section */
-
 /* Begin XCSwiftPackageProductDependency section */
 		78A3181F2AECB46A00862997 /* FlutterGeneratedPluginSwiftPackage */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = FlutterGeneratedPluginSwiftPackage;
-		};
-		FEE084F72EC172460045228E /* SQLiteData */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = FEE084F62EC172460045228E /* XCRemoteSwiftPackageReference "sqlite-data" */;
-			productName = SQLiteData;
-		};
-		FEE084FA2EC1725A0045228E /* RawStructuredFieldValues */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = FEE084F92EC1725A0045228E /* XCRemoteSwiftPackageReference "swift-http-structured-headers" */;
-			productName = RawStructuredFieldValues;
-		};
-		FEE084FC2EC1725A0045228E /* StructuredFieldValues */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = FEE084F92EC1725A0045228E /* XCRemoteSwiftPackageReference "swift-http-structured-headers" */;
-			productName = StructuredFieldValues;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

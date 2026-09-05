@@ -81,7 +81,11 @@ class BackgroundSyncManager {
         if (task != null) task.future,
     ];
     for (final task in tasks) {
-      task?.cancel();
+      try {
+        task?.cancel();
+      } on CanceledError {
+        // Ignore cancellation errors
+      }
     }
     try {
       await Future.wait(futures);

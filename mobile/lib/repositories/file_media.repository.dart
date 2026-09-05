@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:immich_mobile/domain/models/asset/base_asset.model.dart';
 import 'package:immich_mobile/platform/native_sync_api.g.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:photo_manager/photo_manager.dart' hide AssetType;
 
 final fileMediaRepositoryProvider = Provider((ref) => FileMediaRepository());
@@ -14,7 +15,21 @@ class FileMediaRepository {
   FileMediaRepository({NativeSyncApi? nativeSyncApi}) : _nativeSyncApi = nativeSyncApi ?? NativeSyncApi();
 
   Future<LocalAsset?> saveLocalAsset(Uint8List data, {required String title, String? relativePath}) async {
-    final entity = await PhotoManager.editor.saveImage(data, filename: title, title: title, relativePath: relativePath);
+    final AssetEntity entity;
+    if (Platform.isIOS) {
+      final directory = await getTemporaryDirectory();
+      final file = File('${directory.path}/$title');
+      await file.writeAsBytes(data, flush: true);
+      try {
+        entity = await PhotoManager.editor.saveImageWithPath(file.path, title: title);
+      } finally {
+        if (file.existsSync()) {
+          file.deleteSync();
+        }
+      }
+    } else {
+      entity = await PhotoManager.editor.saveImage(data, filename: title, title: title, relativePath: relativePath);
+    }
 
     return LocalAsset(
       id: entity.id,

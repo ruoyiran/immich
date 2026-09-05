@@ -65,50 +65,16 @@ post_install do |installer|
       # 'PERMISSION_CAMERA=1'
       #
       #  Preprocessor definitions can be found in: https://github.com/Baseflow/flutter-permission-handler/blob/master/permission_handler_apple/ios/Classes/PermissionHandlerEnums.h
-      config.build_settings['GCC_PREPROCESSOR_DEFINITIONS'] ||= [
-        '$(inherited)',
+      permission_definitions = config.build_settings['GCC_PREPROCESSOR_DEFINITIONS']
+      permission_definitions = [permission_definitions].compact if permission_definitions.is_a?(String)
+      permission_definitions ||= ['$(inherited)']
 
-        ## dart: PermissionGroup.calendar
-        # 'PERMISSION_EVENTS=1',
-
-        ## dart: PermissionGroup.reminders
-        # 'PERMISSION_REMINDERS=1',
-
-        ## dart: PermissionGroup.contacts
-        # 'PERMISSION_CONTACTS=1',
-
-        ## dart: PermissionGroup.camera
-        # 'PERMISSION_CAMERA=1',
-
-        ## dart: PermissionGroup.microphone
-        # 'PERMISSION_MICROPHONE=1',
-
-        ## dart: PermissionGroup.speech
-        # 'PERMISSION_SPEECH_RECOGNIZER=1',
-
+      [
         ## dart: PermissionGroup.photos
         'PERMISSION_PHOTOS=1',
 
-        ## dart: [PermissionGroup.location, PermissionGroup.locationAlways, PermissionGroup.locationWhenInUse]
-        # 'PERMISSION_LOCATION=1',
-
         ## dart: PermissionGroup.notification
         'PERMISSION_NOTIFICATIONS=1',
-
-        ## dart: PermissionGroup.mediaLibrary
-        # 'PERMISSION_MEDIA_LIBRARY=1',
-
-        ## dart: PermissionGroup.sensors
-        # 'PERMISSION_SENSORS=1',
-
-        ## dart: PermissionGroup.bluetooth
-        # 'PERMISSION_BLUETOOTH=1',
-
-        ## dart: PermissionGroup.appTrackingTransparency
-        # 'PERMISSION_APP_TRACKING_TRANSPARENCY=1',
-
-        ## dart: PermissionGroup.criticalAlerts
-        # 'PERMISSION_CRITICAL_ALERTS=1'
 
         ## The 'PERMISSION_LOCATION' macro enables the `locationWhenInUse` and `locationAlways` permission. If
         ## the application only requires `locationWhenInUse`, only specify the `PERMISSION_LOCATION_WHENINUSE`
@@ -116,7 +82,11 @@ post_install do |installer|
         ##
         ## dart: [PermissionGroup.location, PermissionGroup.locationAlways, PermissionGroup.locationWhenInUse]
         'PERMISSION_LOCATION=1',
-      ]
+      ].each do |definition|
+        permission_definitions << definition unless permission_definitions.include?(definition)
+      end
+
+      config.build_settings['GCC_PREPROCESSOR_DEFINITIONS'] = permission_definitions
 
     end
     # End of the permission_handler configuration
