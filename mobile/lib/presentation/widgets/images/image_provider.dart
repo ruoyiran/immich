@@ -154,6 +154,7 @@ ImageProvider getFullImageProvider(
   BaseAsset asset, {
   Size size = const Size(1080, 1920),
   bool edited = true,
+  bool forceOriginal = false,
   String? localFilePath,
   Size? remoteThumbnailSize,
 }) {
@@ -171,6 +172,7 @@ ImageProvider getFullImageProvider(
       width: asset.width,
       height: asset.height,
       checksum: asset.checksum,
+      forceOriginal: forceOriginal,
     );
   } else {
     final String assetId;
@@ -191,6 +193,7 @@ ImageProvider getFullImageProvider(
       isAnimated: asset.isAnimatedImage,
       edited: edited,
       thumbnailSize: remoteThumbnailSize,
+      forceOriginal: forceOriginal,
     );
   }
 

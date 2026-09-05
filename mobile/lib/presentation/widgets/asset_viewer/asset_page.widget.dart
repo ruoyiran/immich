@@ -15,6 +15,7 @@ import 'package:immich_mobile/presentation/widgets/asset_viewer/asset_details.wi
 import 'package:immich_mobile/presentation/widgets/asset_viewer/asset_stack.provider.dart';
 import 'package:immich_mobile/presentation/widgets/asset_viewer/asset_stack.widget.dart';
 import 'package:immich_mobile/presentation/widgets/asset_viewer/ocr_overlay.widget.dart';
+import 'package:immich_mobile/presentation/widgets/asset_viewer/original_media_action.widget.dart';
 import 'package:immich_mobile/presentation/widgets/asset_viewer/video_viewer.widget.dart';
 import 'package:immich_mobile/presentation/widgets/images/image_provider.dart';
 import 'package:immich_mobile/presentation/widgets/images/thumbnail.widget.dart';
@@ -50,6 +51,7 @@ class _AssetPageState extends ConsumerState<AssetPage> {
 
   bool _showingDetails = false;
   bool _isZoomed = false;
+  final Set<String> _originalRequestedAssetIds = {};
 
   final _scrollController = SnapScrollController();
   double _snapOffset = 0.0;
@@ -332,6 +334,7 @@ class _AssetPageState extends ConsumerState<AssetPage> {
     required PhotoViewHeroAttributes? heroAttributes,
     required bool isCurrent,
     required bool isPlayingMotionVideo,
+    required bool forceOriginal,
     required String? localFilePath,
     required Size? remoteThumbnailSize,
   }) {
@@ -339,13 +342,14 @@ class _AssetPageState extends ConsumerState<AssetPage> {
     final imageProvider = getFullImageProvider(
       asset,
       size: size,
+      forceOriginal: forceOriginal,
       localFilePath: localFilePath,
       remoteThumbnailSize: remoteThumbnailSize,
     );
 
     if (asset.isImage && !isPlayingMotionVideo) {
       return PhotoView(
-        key: Key(asset.heroTag),
+        key: Key('${asset.heroTag}:$forceOriginal'),
         index: widget.index,
         imageProvider: imageProvider,
         heroAttributes: heroAttributes,
@@ -372,7 +376,7 @@ class _AssetPageState extends ConsumerState<AssetPage> {
     }
 
     return PhotoView.customChild(
-      key: Key(asset.heroTag),
+      key: Key('${asset.heroTag}:$forceOriginal'),
       childSize: asset.width != null && asset.height != null
           ? Size(asset.width!.toDouble(), asset.height!.toDouble())
           : null,
@@ -392,10 +396,11 @@ class _AssetPageState extends ConsumerState<AssetPage> {
       onPageBuild: _onPageBuild,
       enablePanAlways: true,
       child: NativeVideoViewer(
-        key: _NativeVideoViewerKey(asset.heroTag),
+        key: _NativeVideoViewerKey('${asset.heroTag}:$forceOriginal'),
         asset: asset,
         localFilePath: localFilePath,
         isCurrent: isCurrent,
+        forceOriginal: forceOriginal,
         image: Image(image: imageProvider, fit: BoxFit.contain, alignment: Alignment.center),
       ),
     );
@@ -411,6 +416,8 @@ class _AssetPageState extends ConsumerState<AssetPage> {
     final isPlayingMotionVideo = ref.watch(isPlayingMotionVideoProvider);
     final timelineOrigin = ref.watch(timelineServiceProvider).origin;
     final showingOcr = ref.watch(assetViewerProvider.select((s) => s.showingOcr));
+    final showingControls = ref.watch(assetViewerProvider.select((s) => s.showingControls));
+    final appConfig = ref.watch(appConfigProvider);
 
     final asset = _asset;
     if (asset == null) {
@@ -441,6 +448,14 @@ class _AssetPageState extends ConsumerState<AssetPage> {
     }
 
     final viewIntentFilePath = timelineOrigin == TimelineOrigin.deepLink ? ref.watch(viewIntentFilePathProvider) : null;
+    final forceOriginal = _originalRequestedAssetIds.contains(displayAsset.id);
+    final originalMediaKind = originalMediaActionFor(
+      asset: displayAsset,
+      config: appConfig,
+      isPlayingMotionVideo: isPlayingMotionVideo,
+      originalRequested: forceOriginal,
+      hasDirectFile: viewIntentFilePath != null,
+    );
 
     return Stack(
       children: [
@@ -461,6 +476,7 @@ class _AssetPageState extends ConsumerState<AssetPage> {
                         : null,
                     isCurrent: isCurrent,
                     isPlayingMotionVideo: isPlayingMotionVideo,
+                    forceOriginal: forceOriginal,
                     localFilePath: viewIntentFilePath,
                     remoteThumbnailSize: thumbnailSize,
                   ),
@@ -497,6 +513,25 @@ class _AssetPageState extends ConsumerState<AssetPage> {
             ),
           ),
         ),
+        if (originalMediaKind != null && !_showingDetails)
+          Positioned(
+            top: context.padding.top + 72,
+            left: 0,
+            right: 0,
+            child: IgnorePointer(
+              ignoring: !showingControls,
+              child: AnimatedOpacity(
+                opacity: showingControls ? 1 : 0,
+                duration: Durations.short2,
+                child: Center(
+                  child: OriginalMediaActionButton(
+                    kind: originalMediaKind,
+                    onPressed: () => setState(() => _originalRequestedAssetIds.add(displayAsset.id)),
+                  ),
+                ),
+              ),
+            ),
+          ),
         if (stackChildren != null && stackChildren.isNotEmpty)
           Positioned(
             left: 0,

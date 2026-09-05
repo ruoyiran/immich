@@ -2,6 +2,7 @@ import 'package:drift/drift.dart';
 import 'package:immich_mobile/domain/models/asset/base_asset.model.dart';
 import 'package:immich_mobile/domain/models/asset_edit.model.dart';
 import 'package:immich_mobile/domain/models/exif.model.dart';
+import 'package:immich_mobile/domain/models/place.model.dart';
 import 'package:immich_mobile/domain/models/stack.model.dart';
 import 'package:immich_mobile/infrastructure/entities/asset_edit.entity.dart';
 import 'package:immich_mobile/infrastructure/entities/exif.entity.dart';
@@ -57,6 +58,29 @@ class RemoteAssetRepository extends DriftDatabaseRepository {
 
   Future<RemoteAsset?> get(String id) {
     return _assetSelectable(id).getSingleOrNull();
+  }
+
+  Future<Map<String, RemoteAsset>> getByIds(Iterable<String> ids) async {
+    final uniqueIds = ids.toSet();
+    if (uniqueIds.isEmpty) {
+      return const {};
+    }
+
+    final query = _db.remoteAssetEntity.select().addColumns([_db.localAssetEntity.id]).join([
+      leftOuterJoin(
+        _db.localAssetEntity,
+        _db.remoteAssetEntity.checksum.equalsExp(_db.localAssetEntity.checksum),
+        useColumns: false,
+      ),
+    ])..where(_db.remoteAssetEntity.id.isIn(uniqueIds));
+
+    final rows = await query.get();
+    return {
+      for (final row in rows)
+        row.readTable(_db.remoteAssetEntity).id: row
+            .readTable(_db.remoteAssetEntity)
+            .toDto(localId: row.read(_db.localAssetEntity.id)),
+    };
   }
 
   Future<List<RemoteAsset>> getAllDebugForChecksum(String checksum) {
@@ -116,36 +140,127 @@ class RemoteAssetRepository extends DriftDatabaseRepository {
         .getSingleOrNull();
   }
 
-  Future<List<(String, String)>> getPlaces(String userId) {
-    final asset = Subquery(
-      _db.remoteAssetEntity.select()
-        ..where((row) => row.ownerId.equals(userId))
-        ..orderBy([(row) => OrderingTerm.desc(row.createdAt)]),
-      "asset",
+  ({String sql, List<Variable> variables, PlaceLevel level}) _placeNodesQuery(String userId, PlacePath parent) {
+    final level = parent.nextLevel;
+    if (level == null) {
+      throw ArgumentError.value(parent, 'parent', 'district is already the deepest place level');
+    }
+    final target = level.name;
+    final child = switch (level) {
+      PlaceLevel.country => 'state',
+      PlaceLevel.state => 'city',
+      PlaceLevel.city => 'district',
+      PlaceLevel.district => null,
+    };
+    final filters = <String>[
+      'asset.owner_id = ?',
+      'asset.deleted_at IS NULL',
+      'asset.visibility = ?',
+      'exif.$target IS NOT NULL',
+      "TRIM(exif.$target) <> ''",
+    ];
+    final variables = <Variable>[Variable.withString(userId), Variable.withInt(AssetVisibility.timeline.index)];
+    for (final entry in <String, String?>{
+      'country': parent.country,
+      'state': parent.state,
+      'city': parent.city,
+      'district': parent.district,
+    }.entries) {
+      if (entry.value != null) {
+        filters.add('exif.${entry.key} = ?');
+        variables.add(Variable.withString(entry.value!));
+      }
+    }
+    final childExpression = child == null
+        ? '0'
+        : "MAX(CASE WHEN exif.$child IS NOT NULL AND TRIM(exif.$child) <> '' THEN 1 ELSE 0 END) "
+              'OVER (PARTITION BY exif.$target)';
+    return (
+      sql:
+          '''
+WITH ranked AS (
+  SELECT exif.$target AS name,
+         asset.id AS cover_asset_id,
+         COUNT(*) OVER (PARTITION BY exif.$target) AS asset_count,
+         $childExpression AS has_children,
+         ROW_NUMBER() OVER (
+           PARTITION BY exif.$target
+           ORDER BY asset.created_at DESC, asset.id DESC
+         ) AS cover_rank
+  FROM remote_asset_entity asset
+  JOIN remote_exif_entity exif ON exif.asset_id = asset.id
+  WHERE ${filters.join(' AND ')}
+)
+SELECT name, cover_asset_id, asset_count, has_children
+FROM ranked
+WHERE cover_rank = 1
+ORDER BY name COLLATE NOCASE
+''',
+      variables: variables,
+      level: level,
     );
+  }
 
-    final query =
-        asset.selectOnly().join([
-            innerJoin(
-              _db.remoteExifEntity,
-              _db.remoteExifEntity.assetId.equalsExp(asset.ref(_db.remoteAssetEntity.id)),
-              useColumns: false,
-            ),
-          ])
-          ..addColumns([_db.remoteExifEntity.city, _db.remoteExifEntity.assetId])
-          ..where(
-            _db.remoteExifEntity.city.isNotNull() &
-                asset.ref(_db.remoteAssetEntity.deletedAt).isNull() &
-                asset.ref(_db.remoteAssetEntity.visibility).equals(AssetVisibility.timeline.index),
-          )
-          ..groupBy([_db.remoteExifEntity.city])
-          ..orderBy([OrderingTerm.asc(_db.remoteExifEntity.city)]);
+  List<PlaceNode> _mapPlaceNodes(List<QueryRow> rows, PlacePath parent, PlaceLevel level) => rows
+      .map(
+        (row) => PlaceNode(
+          name: row.read<String>('name'),
+          path: parent.withValue(level, row.read<String>('name')),
+          coverAssetId: row.read<String>('cover_asset_id'),
+          assetCount: row.read<int>('asset_count'),
+          hasChildren: row.read<int>('has_children') != 0,
+        ),
+      )
+      .toList(growable: false);
 
-    return query.map((row) {
-      final assetId = row.read(_db.remoteExifEntity.assetId);
-      final city = row.read(_db.remoteExifEntity.city);
-      return (city!, assetId!);
-    }).get();
+  Future<List<PlaceNode>> getPlaceNodes(String userId, PlacePath parent) async {
+    if (parent.nextLevel == null) {
+      return const [];
+    }
+    final query = _placeNodesQuery(userId, parent);
+    final rows = await _db
+        .customSelect(query.sql, variables: query.variables, readsFrom: {_db.remoteAssetEntity, _db.remoteExifEntity})
+        .get();
+    return _mapPlaceNodes(rows, parent, query.level);
+  }
+
+  Stream<List<PlaceNode>> watchPlaceNodes(String userId, PlacePath parent) {
+    if (parent.nextLevel == null) {
+      return Stream.value(const []);
+    }
+    final query = _placeNodesQuery(userId, parent);
+    return _db
+        .customSelect(query.sql, variables: query.variables, readsFrom: {_db.remoteAssetEntity, _db.remoteExifEntity})
+        .watch()
+        .map((rows) => _mapPlaceNodes(rows, parent, query.level));
+  }
+
+  Future<List<(String, String)>> getPlaces(String userId) async {
+    final rows = await _db
+        .customSelect(
+          '''
+WITH ranked AS (
+  SELECT exif.city AS city,
+         asset.id AS cover_asset_id,
+         ROW_NUMBER() OVER (
+           PARTITION BY exif.city
+           ORDER BY asset.created_at DESC, asset.id DESC
+         ) AS cover_rank
+  FROM remote_asset_entity asset
+  JOIN remote_exif_entity exif ON exif.asset_id = asset.id
+  WHERE asset.owner_id = ?
+    AND asset.deleted_at IS NULL
+    AND asset.visibility = ?
+    AND exif.city IS NOT NULL
+    AND TRIM(exif.city) <> ''
+)
+SELECT city, cover_asset_id FROM ranked WHERE cover_rank = 1 ORDER BY city COLLATE NOCASE
+''',
+          variables: [Variable.withString(userId), Variable.withInt(AssetVisibility.timeline.index)],
+          readsFrom: {_db.remoteAssetEntity, _db.remoteExifEntity},
+        )
+        .get();
+    return rows.map((row) => (row.read<String>('city'), row.read<String>('cover_asset_id'))).toList(growable: false);
   }
 
   Future<void> updateVisibility(List<String> ids, AssetVisibility visibility) {

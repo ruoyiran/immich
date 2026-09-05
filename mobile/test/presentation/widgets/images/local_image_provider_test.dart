@@ -60,13 +60,14 @@ void main() {
   });
 
   group('LocalFullImageProvider equality', () {
-    LocalFullImageProvider make({int? width, int? height}) => LocalFullImageProvider(
+    LocalFullImageProvider make({int? width, int? height, bool forceOriginal = false}) => LocalFullImageProvider(
       id: 'a',
       assetType: AssetType.image,
       size: const Size(100, 200),
       isAnimated: false,
       width: width,
       height: height,
+      forceOriginal: forceOriginal,
     );
 
     test('uses dimensions in the cache key', () {
@@ -75,6 +76,7 @@ void main() {
       expect(a, b);
       expect(a.hashCode, b.hashCode);
       expect(a == make(width: 200, height: 100), isFalse);
+      expect(a == make(width: 100, height: 200, forceOriginal: true), isFalse);
     });
   });
 
@@ -205,6 +207,17 @@ void main() {
 
       expect(provider, isA<LocalFullImageProvider>());
       expect((provider as LocalFullImageProvider).id, 'local-asset-1');
+    });
+
+    test('passes a one-time original request to the selected provider', () {
+      final localAsset = RemoteAssetFactory.create(localId: 'local-asset-1');
+      final remoteAsset = RemoteAssetFactory.create();
+
+      final localProvider = getFullImageProvider(localAsset, forceOriginal: true) as LocalFullImageProvider;
+      final remoteProvider = getFullImageProvider(remoteAsset, forceOriginal: true) as RemoteFullImageProvider;
+
+      expect(localProvider.forceOriginal, isTrue);
+      expect(remoteProvider.forceOriginal, isTrue);
     });
   });
 }

@@ -76,7 +76,7 @@ class SearchApiRepository extends ApiRepository {
         tagIds: filter.tagIds == null ? const Optional.absent() : Optional.present(filter.tagIds),
         type: type == null ? const Optional.absent() : Optional.present(type),
         page: Optional.present(page),
-        size: const Optional.present(1000),
+        size: const Optional.present(100),
       ),
     );
   }

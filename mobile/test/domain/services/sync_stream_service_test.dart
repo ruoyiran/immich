@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:drift/drift.dart' as drift;
 import 'package:drift/native.dart';
@@ -378,6 +379,96 @@ void main() {
   });
 
   group('SyncStreamService - Sync Migration', () {
+    test('refreshes people, faces, and metadata once for repaired server sync contracts', () async {
+      await Store.put(StoreKey.syncMigrationStatus, "[]");
+      when(
+        () => mockServerApi.getServerVersion(),
+      ).thenAnswer((_) async => ServerVersionResponseDto(major: 3, minor: 1, patch_: 0, prerelease: null));
+
+      await sut.sync();
+
+      verify(
+        () => mockSyncApiRepo.deleteSyncAck([
+          SyncEntityType.personV1,
+          SyncEntityType.personDeleteV1,
+          SyncEntityType.assetFaceV1,
+          SyncEntityType.assetFaceV2,
+          SyncEntityType.assetFaceDeleteV1,
+          SyncEntityType.assetExifV1,
+          SyncEntityType.userMetadataV1,
+          SyncEntityType.userMetadataDeleteV1,
+        ]),
+      ).called(1);
+      final stored = (jsonDecode(Store.get(StoreKey.syncMigrationStatus, "[]")) as List).cast<String>();
+      expect(stored, contains(SyncMigrationTask.v20260905_ResetPeopleFacesAndMetadata.name));
+
+      clearInteractions(mockSyncApiRepo);
+      when(
+        () => mockSyncApiRepo.streamChanges(
+          any(),
+          onReset: any(named: 'onReset'),
+          serverVersion: any(named: 'serverVersion'),
+          abortSignal: any(named: 'abortSignal'),
+        ),
+      ).thenAnswer((_) async {});
+      await sut.sync();
+      verifyNever(
+        () => mockSyncApiRepo.deleteSyncAck([
+          SyncEntityType.personV1,
+          SyncEntityType.personDeleteV1,
+          SyncEntityType.assetFaceV1,
+          SyncEntityType.assetFaceV2,
+          SyncEntityType.assetFaceDeleteV1,
+          SyncEntityType.assetExifV1,
+          SyncEntityType.userMetadataV1,
+          SyncEntityType.userMetadataDeleteV1,
+        ]),
+      );
+    });
+
+    test('restarts people and face backfills after filtered pagination repair', () async {
+      await Store.put(
+        StoreKey.syncMigrationStatus,
+        '["${SyncMigrationTask.v20260905_ResetPeopleFacesAndMetadata.name}"]',
+      );
+      when(
+        () => mockServerApi.getServerVersion(),
+      ).thenAnswer((_) async => ServerVersionResponseDto(major: 3, minor: 1, patch_: 0, prerelease: null));
+
+      await sut.sync();
+
+      verify(
+        () => mockSyncApiRepo.deleteSyncAck([
+          SyncEntityType.personV1,
+          SyncEntityType.personDeleteV1,
+          SyncEntityType.assetFaceV1,
+          SyncEntityType.assetFaceV2,
+          SyncEntityType.assetFaceDeleteV1,
+        ]),
+      ).called(1);
+      final stored = (jsonDecode(Store.get(StoreKey.syncMigrationStatus, "[]")) as List).cast<String>();
+      expect(stored, contains(SyncMigrationTask.v20260905_ResetPeopleFacesAfterPaginationFix.name));
+    });
+
+    test('refreshes user preferences after enabling on-this-day memories', () async {
+      await Store.put(
+        StoreKey.syncMigrationStatus,
+        '["${SyncMigrationTask.v20260905_ResetPeopleFacesAndMetadata.name}",'
+        '"${SyncMigrationTask.v20260905_ResetPeopleFacesAfterPaginationFix.name}"]',
+      );
+      when(
+        () => mockServerApi.getServerVersion(),
+      ).thenAnswer((_) async => ServerVersionResponseDto(major: 3, minor: 1, patch_: 0, prerelease: null));
+
+      await sut.sync();
+
+      verify(
+        () => mockSyncApiRepo.deleteSyncAck([SyncEntityType.userMetadataV1, SyncEntityType.userMetadataDeleteV1]),
+      ).called(1);
+      final stored = (jsonDecode(Store.get(StoreKey.syncMigrationStatus, "[]")) as List).cast<String>();
+      expect(stored, contains(SyncMigrationTask.v20260905_EnableOnThisDayMemories.name));
+    });
+
     test('ensure that <2.5.0 migrations run', () async {
       await Store.put(StoreKey.syncMigrationStatus, "[]");
       when(

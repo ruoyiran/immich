@@ -1,4 +1,5 @@
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:immich_mobile/domain/models/place.model.dart';
 import 'package:immich_mobile/domain/services/asset.service.dart';
 import 'package:immich_mobile/infrastructure/repositories/local_asset.repository.dart';
 import 'package:immich_mobile/infrastructure/repositories/remote_asset.repository.dart';
@@ -34,13 +35,13 @@ final assetServiceProvider = Provider(
   ),
 );
 
-final placesProvider = FutureProvider<List<(String, String)>>((ref) {
+final placesProvider = StreamProvider.family<List<PlaceNode>, PlacePath>((ref, parent) {
   final assetService = ref.watch(assetServiceProvider);
   final auth = ref.watch(currentUserProvider);
 
   if (auth == null) {
-    return Future.value(const []);
+    return Stream.value(const []);
   }
 
-  return assetService.getPlaces(auth.id);
+  return assetService.watchPlaceNodes(auth.id, parent);
 });

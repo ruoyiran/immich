@@ -7,20 +7,46 @@ sealed class DateFilterInputModel {
   DateTimeRange<DateTime> asDateTimeRange();
 
   String asHumanReadable(BuildContext context) {
-    // General implementation for arbitrary date and time ranges
-    // If date range is less than 24 hours, set the end date to the end of the day
     final date = asDateTimeRange();
-    if (date.end.difference(date.start).inHours < 24) {
+    final inclusiveEnd = date.end.subtract(const Duration(microseconds: 1));
+    if (date.start.year == inclusiveEnd.year &&
+        date.start.month == inclusiveEnd.month &&
+        date.start.day == inclusiveEnd.day) {
       return DateFormat.yMMMd().format(date.start.toLocal());
     } else {
       return 'search_filter_date_interval'.t(
         context: context,
         args: {
           "start": DateFormat.yMMMd().format(date.start.toLocal()),
-          "end": DateFormat.yMMMd().format(date.end.toLocal()),
+          "end": DateFormat.yMMMd().format(inclusiveEnd.toLocal()),
         },
       );
     }
+  }
+}
+
+enum CalendarPeriod { day, week, month }
+
+class CalendarPeriodDateFilter extends DateFilterInputModel {
+  final DateTime anchor;
+  final CalendarPeriod period;
+
+  CalendarPeriodDateFilter(this.anchor, this.period);
+
+  @override
+  DateTimeRange<DateTime> asDateTimeRange() {
+    final day = DateTime(anchor.year, anchor.month, anchor.day);
+    return switch (period) {
+      CalendarPeriod.day => DateTimeRange(start: day, end: day.add(const Duration(days: 1))),
+      CalendarPeriod.week => () {
+        final start = day.subtract(Duration(days: day.weekday - DateTime.monday));
+        return DateTimeRange(start: start, end: start.add(const Duration(days: 7)));
+      }(),
+      CalendarPeriod.month => DateTimeRange(
+        start: DateTime(day.year, day.month),
+        end: DateTime(day.year, day.month + 1),
+      ),
+    };
   }
 }
 
@@ -48,15 +74,8 @@ class YearFilter extends DateFilterInputModel {
 
   @override
   DateTimeRange<DateTime> asDateTimeRange() {
-    final now = DateTime.now();
     final from = DateTime(year, 1, 1);
-
-    if (now.year == year) {
-      // To not go beyond today if the user picks the current year
-      return DateTimeRange<DateTime>(start: from, end: now);
-    }
-
-    final to = DateTime(year, 12, 31, 23, 59, 59);
+    final to = DateTime(year + 1, 1, 1);
     return DateTimeRange<DateTime>(start: from, end: to);
   }
 
@@ -78,18 +97,26 @@ class CustomDateFilter extends DateFilterInputModel {
 
   @override
   DateTimeRange<DateTime> asDateTimeRange() {
-    return DateTimeRange<DateTime>(start: start, end: end);
+    final normalizedStart = DateTime(start.year, start.month, start.day);
+    final normalizedEnd = DateTime(end.year, end.month, end.day + 1);
+    return DateTimeRange<DateTime>(start: normalizedStart, end: normalizedEnd);
   }
 }
 
-enum _QuickPickerType { last1Month, last3Months, last9Months, year, custom }
+enum _QuickPickerType { day, week, month, last1Month, last3Months, last9Months, year, custom }
 
 class QuickDatePicker extends HookWidget {
-  QuickDatePicker({super.key, required this.currentInput, required this.onSelect, required this.onRequestPicker})
-    : _selection = _selectionFromModel(currentInput),
-      _initialYear = _initialYearFromModel(currentInput);
+  QuickDatePicker({
+    super.key,
+    required this.currentInput,
+    required this.onSelect,
+    required this.onRequestPicker,
+    required this.onRequestPeriodPicker,
+  }) : _selection = _selectionFromModel(currentInput),
+       _initialYear = _initialYearFromModel(currentInput);
 
   final Function() onRequestPicker;
+  final Function(CalendarPeriod period) onRequestPeriodPicker;
   final Function(DateFilterInputModel range) onSelect;
 
   final DateFilterInputModel? currentInput;
@@ -112,6 +139,12 @@ class QuickDatePicker extends HookWidget {
         3 => _QuickPickerType.last3Months,
         9 => _QuickPickerType.last9Months,
         _ => _QuickPickerType.custom,
+      };
+    } else if (model is CalendarPeriodDateFilter) {
+      return switch (model.period) {
+        CalendarPeriod.day => _QuickPickerType.day,
+        CalendarPeriod.week => _QuickPickerType.week,
+        CalendarPeriod.month => _QuickPickerType.month,
       };
     } else if (model is YearFilter) {
       return _QuickPickerType.year;
@@ -186,6 +219,9 @@ class QuickDatePicker extends HookWidget {
               }
               final _ = switch (value) {
                 _QuickPickerType.custom => onRequestPicker(),
+                _QuickPickerType.day => onRequestPeriodPicker(CalendarPeriod.day),
+                _QuickPickerType.week => onRequestPeriodPicker(CalendarPeriod.week),
+                _QuickPickerType.month => onRequestPeriodPicker(CalendarPeriod.month),
                 _QuickPickerType.last1Month => onSelect(RecentMonthRangeFilter(1)),
                 _QuickPickerType.last3Months => onSelect(RecentMonthRangeFilter(3)),
                 _QuickPickerType.last9Months => onSelect(RecentMonthRangeFilter(9)),
@@ -197,6 +233,9 @@ class QuickDatePicker extends HookWidget {
             groupValue: _selection,
             child: Column(
               children: [
+                RadioListTile(title: const Text('day').tr(), value: _QuickPickerType.day, toggleable: true),
+                RadioListTile(title: const Text('week').tr(), value: _QuickPickerType.week, toggleable: true),
+                RadioListTile(title: const Text('month').tr(), value: _QuickPickerType.month, toggleable: true),
                 RadioListTile(title: _monthLabel(context, 1), value: _QuickPickerType.last1Month, toggleable: true),
                 RadioListTile(title: _monthLabel(context, 3), value: _QuickPickerType.last3Months, toggleable: true),
                 RadioListTile(title: _monthLabel(context, 9), value: _QuickPickerType.last9Months, toggleable: true),

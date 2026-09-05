@@ -3,8 +3,11 @@ import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:immich_mobile/domain/models/album/album.model.dart';
 import 'package:immich_mobile/domain/models/album/local_album.model.dart';
+import 'package:immich_mobile/domain/models/asset/base_asset.model.dart' as domain;
 import 'package:immich_mobile/infrastructure/entities/local_album.entity.drift.dart';
 import 'package:immich_mobile/infrastructure/entities/remote_album.entity.drift.dart';
+import 'package:immich_mobile/infrastructure/entities/remote_asset.entity.drift.dart';
+import 'package:immich_mobile/infrastructure/entities/user.entity.drift.dart';
 import 'package:immich_mobile/infrastructure/repositories/db.repository.dart';
 import 'package:immich_mobile/infrastructure/repositories/sync_stream.repository.dart';
 import 'package:openapi/api.dart';
@@ -83,6 +86,7 @@ SyncAssetExifV1 _createExif({
   required int width,
   required int height,
   required String orientation,
+  String? district,
 }) {
   return SyncAssetExifV1(
     assetId: assetId,
@@ -91,6 +95,7 @@ SyncAssetExifV1 _createExif({
     orientation: orientation,
     city: null,
     country: null,
+    district: district,
     dateTimeOriginal: null,
     description: null,
     exposureTime: null,
@@ -290,5 +295,33 @@ void main() {
       expect(after.name, equals('Camera'));
       expect(after.backupSelection, equals(BackupSelection.none));
     });
+  });
+
+  test('persists district from AssetExifV1 sync', () async {
+    const assetId = 'asset-with-district';
+    await db
+        .into(db.userEntity)
+        .insert(UserEntityCompanion.insert(id: 'owner', name: 'Owner', email: 'owner@test.com'));
+    await db
+        .into(db.remoteAssetEntity)
+        .insert(
+          RemoteAssetEntityCompanion.insert(
+            id: assetId,
+            name: 'photo.jpg',
+            checksum: 'checksum',
+            type: domain.AssetType.image,
+            createdAt: drift.Value(DateTime.utc(2024)),
+            updatedAt: drift.Value(DateTime.utc(2024)),
+            ownerId: 'owner',
+            visibility: domain.AssetVisibility.timeline,
+          ),
+        );
+
+    await sut.updateAssetsExifV1([
+      _createExif(assetId: assetId, width: 100, height: 100, orientation: '1', district: 'Pudong'),
+    ]);
+
+    final exif = await (db.select(db.remoteExifEntity)..where((row) => row.assetId.equals(assetId))).getSingle();
+    expect(exif.district, 'Pudong');
   });
 }

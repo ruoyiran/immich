@@ -10,6 +10,7 @@ typedef SyncCallbackWithResult<T> = void Function(T result);
 typedef SyncErrorCallback = void Function(String error);
 
 class BackgroundSyncManager {
+  final Cancelable<bool?> Function()? remoteSyncTaskFactory;
   final SyncCallback? onRemoteSyncStart;
   final SyncCallbackWithResult<bool?>? onRemoteSyncComplete;
   final SyncErrorCallback? onRemoteSyncError;
@@ -33,6 +34,7 @@ class BackgroundSyncManager {
   Cancelable<void>? _deviceAlbumSyncTask;
 
   BackgroundSyncManager({
+    this.remoteSyncTaskFactory,
     this.onRemoteSyncStart,
     this.onRemoteSyncComplete,
     this.onRemoteSyncError,
@@ -130,18 +132,23 @@ class BackgroundSyncManager {
 
     onRemoteSyncStart?.call();
 
-    final task = _syncTask = runInIsolateGentle(
-      computation: (ref) => ref.read(syncStreamServiceProvider).sync(),
-      debugLabel: 'remote-sync',
-    );
+    final task = _syncTask =
+        remoteSyncTaskFactory?.call() ??
+        runInIsolateGentle(computation: (ref) => ref.read(syncStreamServiceProvider).sync(), debugLabel: 'remote-sync');
     return task
         .then((result) {
           final success = result ?? false;
+          if (!identical(_syncTask, task)) {
+            return success;
+          }
           onRemoteSyncComplete?.call(success);
           _syncQueued &= success;
           return success;
         })
         .catchError((error) {
+          if (!identical(_syncTask, task)) {
+            return false;
+          }
           if (error is CanceledError) {
             // A cancelled remote sync is neither success nor failure, but it
             // must still transition the status out of "syncing": the notifier

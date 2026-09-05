@@ -5,6 +5,7 @@ import 'package:immich_mobile/domain/models/asset/base_asset.model.dart';
 import 'package:immich_mobile/extensions/platform_extensions.dart';
 import 'package:immich_mobile/generated/translations.g.dart';
 import 'package:immich_mobile/presentation/actions/action.dart';
+import 'package:immich_mobile/presentation/pages/search/paginated_search.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/asset.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/store.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/toast.provider.dart';
@@ -127,6 +128,7 @@ class DeleteAction extends AssetActionBuilder {
 
     final message = context.t.trash_action_prompt(count: remoteIds.length);
     await assetService.trash(remoteIds);
+    ref.read(paginatedSearchProvider.notifier).removeRemoteIds(remoteIds.toSet());
     return message;
   }
 
@@ -149,6 +151,7 @@ class DeleteAction extends AssetActionBuilder {
     final message = context.t.delete_permanently_action_prompt(count: remoteIds.length);
     // Server first, so a failed request will not remove the local copy
     await assetService.delete(remoteIds);
+    ref.read(paginatedSearchProvider.notifier).removeRemoteIds(remoteIds.toSet());
     if (localIds.isNotEmpty && context.mounted) {
       await _cleanupLocalAssets(context, ref, localIds, requestCustomPrompt: false);
     }

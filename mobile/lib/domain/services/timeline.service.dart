@@ -5,6 +5,7 @@ import 'package:collection/collection.dart';
 import 'package:immich_mobile/constants/constants.dart';
 import 'package:immich_mobile/domain/models/asset/base_asset.model.dart';
 import 'package:immich_mobile/domain/models/events.model.dart';
+import 'package:immich_mobile/domain/models/place.model.dart';
 import 'package:immich_mobile/domain/models/timeline.model.dart';
 import 'package:immich_mobile/domain/utils/event_stream.dart';
 import 'package:immich_mobile/infrastructure/repositories/settings.repository.dart';
@@ -71,7 +72,7 @@ class TimelineFactory {
 
   TimelineService video(String userId) => TimelineService(_timelineRepository.video(userId, groupBy));
 
-  TimelineService place(String place) => TimelineService(_timelineRepository.place(place, groupBy));
+  TimelineService place(PlacePath place) => TimelineService(_timelineRepository.place(place, groupBy));
 
   TimelineService person(String userId, String personId) =>
       TimelineService(_timelineRepository.person(userId, personId, groupBy));

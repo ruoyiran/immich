@@ -2,6 +2,7 @@ import 'package:immich_mobile/domain/models/album/local_album.model.dart';
 import 'package:immich_mobile/domain/models/asset/base_asset.model.dart';
 import 'package:immich_mobile/domain/models/asset_edit.model.dart';
 import 'package:immich_mobile/domain/models/exif.model.dart';
+import 'package:immich_mobile/domain/models/place.model.dart';
 import 'package:immich_mobile/domain/models/store.model.dart';
 import 'package:immich_mobile/entities/store.entity.dart';
 import 'package:immich_mobile/extensions/platform_extensions.dart';
@@ -70,6 +71,14 @@ class AssetService {
 
     final id = asset is LocalAsset ? asset.remoteId! : (asset as RemoteAsset).id;
     return _remoteRepository.getExif(id);
+  }
+
+  Future<List<PlaceNode>> getPlaceNodes(String userId, PlacePath parent) {
+    return _remoteRepository.getPlaceNodes(userId, parent);
+  }
+
+  Stream<List<PlaceNode>> watchPlaceNodes(String userId, PlacePath parent) {
+    return _remoteRepository.watchPlaceNodes(userId, parent);
   }
 
   Future<List<(String, String)>> getPlaces(String userId) {

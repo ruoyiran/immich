@@ -74,4 +74,16 @@ void main() {
       expect(people, isEmpty);
     });
   });
+
+  test('watchAllPeople emits when face memberships arrive during first sync', () async {
+    final user = await ctx.newUser();
+    final person = await ctx.newPerson(ownerId: user.id, name: 'Alice');
+    final result = sut.watchAllPeople(minFaces: 1).firstWhere((people) => people.isNotEmpty);
+
+    final asset = await ctx.newRemoteAsset(ownerId: user.id);
+    await ctx.newFace(assetId: asset.id, personId: person.id);
+
+    final people = await result.timeout(const Duration(seconds: 2));
+    expect(people.single.id, person.id);
+  });
 }
