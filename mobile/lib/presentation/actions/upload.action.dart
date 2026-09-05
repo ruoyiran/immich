@@ -87,6 +87,7 @@ Future<void> uploadAssets(BuildContext context, WidgetRef ref, List<LocalAsset> 
   final localRepository = ref.read(localAssetRepository);
   final remoteRepository = ref.read(remoteAssetRepositoryProvider);
   final timeline = ref.read(timelineServiceProvider);
+  final persistenceTasks = <Future<void>>[];
 
   Future<void> persistUploadedAsset(String id, String remoteId) async {
     try {
@@ -121,7 +122,7 @@ Future<void> uploadAssets(BuildContext context, WidgetRef ref, List<LocalAsset> 
           if (asset != null) {
             ref.read(multiSelectProvider.notifier).deselectAsset(asset);
           }
-          unawaited(persistUploadedAsset(id, remoteId));
+          persistenceTasks.add(persistUploadedAsset(id, remoteId));
         },
         onError: (id, _) {
           failed.add(id);
@@ -136,6 +137,11 @@ Future<void> uploadAssets(BuildContext context, WidgetRef ref, List<LocalAsset> 
     } else {
       unawaited(Future.delayed(const Duration(seconds: 2), progress.clear));
     }
+  }
+
+  if (persistenceTasks.isNotEmpty) {
+    await Future.wait(persistenceTasks);
+    await timeline.reload();
   }
 
   final succeeded = uploaded.keys.toSet().difference(failed);

@@ -384,7 +384,7 @@ void main() {
       await tester.pump(const Duration(seconds: 2));
     });
 
-    testWidgets('does not wait for local persistence after the server confirms the upload', (tester) async {
+    testWidgets('waits for local persistence and reloads the timeline after upload', (tester) async {
       final asset = LocalAssetFactory.create(id: 'uploaded').copyWith(checksum: 'dXBsb2FkZWQ=');
       final persistenceStarted = Completer<void>();
       final finishPersistence = Completer<void>();
@@ -418,14 +418,18 @@ void main() {
 
       final upload = uploadAssets(tester.element(find.byType(SizedBox)), capturedRef, [asset]);
       await persistenceStarted.future.timeout(const Duration(seconds: 2));
+      var completed = false;
+      unawaited(upload.then((_) => completed = true));
       try {
-        await upload.timeout(const Duration(milliseconds: 100));
-        expect(capturedRef.read(assetUploadProgressProvider), isEmpty);
+        await tester.pump(const Duration(milliseconds: 100));
+        expect(completed, isFalse);
         verify(() => timelineService.markUploaded(asset.id, asset.id)).called(1);
       } finally {
         finishPersistence.complete();
-        await tester.pump();
+        await upload;
       }
+      expect(capturedRef.read(assetUploadProgressProvider), isEmpty);
+      verify(() => timelineService.reload()).called(1);
     });
   });
 }

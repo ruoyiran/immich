@@ -111,26 +111,25 @@ class RemoteAssetRepository extends DriftDatabaseRepository {
     required LocalAsset source,
   }) async {
     final checksum = source.checksum ?? remoteId;
+    final companion = RemoteAssetEntityCompanion(
+      ownerId: Value(ownerId),
+      checksum: Value(checksum),
+      name: Value(source.name),
+      type: Value(source.type),
+      createdAt: Value(source.createdAt),
+      updatedAt: Value(source.updatedAt),
+      localDateTime: Value(source.createdAt),
+      width: Value(source.width),
+      height: Value(source.height),
+      durationMs: Value(source.durationMs),
+      isFavorite: Value(source.isFavorite),
+      visibility: const Value(AssetVisibility.timeline),
+      deletedAt: const Value(null),
+      isEdited: Value(source.isEdited),
+    );
     await _db
         .into(_db.remoteAssetEntity)
-        .insert(
-          RemoteAssetEntityCompanion(
-            id: Value(remoteId),
-            ownerId: Value(ownerId),
-            checksum: Value(checksum),
-            name: Value(source.name),
-            type: Value(source.type),
-            createdAt: Value(source.createdAt),
-            updatedAt: Value(source.updatedAt),
-            width: Value(source.width),
-            height: Value(source.height),
-            durationMs: Value(source.durationMs),
-            isFavorite: Value(source.isFavorite),
-            visibility: const Value(AssetVisibility.timeline),
-            isEdited: Value(source.isEdited),
-          ),
-          onConflict: DoUpdate((_) => RemoteAssetEntityCompanion(checksum: Value(checksum))),
-        );
+        .insert(companion.copyWith(id: Value(remoteId)), onConflict: DoUpdate((_) => companion));
   }
 
   Future<ExifInfo?> getExif(String id) {

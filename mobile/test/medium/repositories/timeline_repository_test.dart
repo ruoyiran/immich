@@ -1,6 +1,8 @@
+import 'package:drift/drift.dart' hide isNull;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:immich_mobile/domain/models/album/local_album.model.dart';
 import 'package:immich_mobile/domain/models/asset/base_asset.model.dart';
+import 'package:immich_mobile/infrastructure/entities/remote_asset.entity.drift.dart';
 import 'package:immich_mobile/infrastructure/repositories/timeline.repository.dart';
 import 'package:intl/date_symbol_data_local.dart';
 
@@ -40,6 +42,31 @@ void main() {
       expect(assets, hasLength(1));
       expect(assets.single, isA<RemoteAsset>());
       expect((assets.single as RemoteAsset).id, remote.id);
+    });
+
+    test('orders assets by local capture time instead of mixed UTC storage', () async {
+      final user = await ctx.newUser();
+      final photo = await ctx.newRemoteAsset(
+        id: 'photo-at-2103',
+        ownerId: user.id,
+        createdAt: DateTime.utc(2026, 8, 30, 21, 3),
+      );
+      final video = await ctx.newRemoteAsset(
+        id: 'video-at-2113',
+        ownerId: user.id,
+        type: AssetType.video,
+        createdAt: DateTime.utc(2026, 8, 30, 13, 13),
+      );
+      await (ctx.db.update(ctx.db.remoteAssetEntity)..where((row) => row.id.equals(photo.id))).write(
+        RemoteAssetEntityCompanion(localDateTime: Value(DateTime(2026, 8, 30, 21, 3))),
+      );
+      await (ctx.db.update(ctx.db.remoteAssetEntity)..where((row) => row.id.equals(video.id))).write(
+        RemoteAssetEntityCompanion(localDateTime: Value(DateTime(2026, 8, 30, 21, 13))),
+      );
+
+      final assets = await sut.main([user.id], .day).assetSource(0, 10);
+
+      expect(assets.map((asset) => asset.id), [video.id, photo.id]);
     });
   });
 

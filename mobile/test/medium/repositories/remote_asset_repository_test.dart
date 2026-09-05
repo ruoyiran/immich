@@ -108,6 +108,56 @@ void main() {
     expect(remote?.checksum, localChecksum);
   });
 
+  test('upsertUploadedAsset restores a stale duplicate to the timeline', () async {
+    const checksum = 'duplicate-video-checksum';
+    const remoteId = 'duplicate-video-remote-id';
+    final capturedAt = DateTime(2026, 8, 30, 21, 13, 39);
+    final updatedAt = DateTime(2026, 9, 5, 21, 17);
+    final user = await ctx.newUser();
+    await ctx.newAuthUser(id: user.id);
+    await ctx.newRemoteAsset(
+      id: remoteId,
+      ownerId: user.id,
+      checksum: checksum,
+      deletedAt: DateTime(2026, 9, 1),
+      visibility: AssetVisibility.archive,
+      type: AssetType.image,
+      createdAt: DateTime(2025, 1, 1),
+      width: 1,
+      height: 1,
+      durationMs: 0,
+    );
+    final source = LocalAsset(
+      id: 'device-video-id',
+      name: '20260830_211305.mp4',
+      checksum: checksum,
+      type: AssetType.video,
+      createdAt: capturedAt,
+      updatedAt: updatedAt,
+      width: 3840,
+      height: 2160,
+      durationMs: 32329,
+      isFavorite: true,
+      playbackStyle: AssetPlaybackStyle.video,
+      isEdited: true,
+    );
+
+    await sut.upsertUploadedAsset(remoteId: remoteId, ownerId: user.id, source: source);
+
+    final remote = await sut.get(remoteId);
+    expect(remote?.name, source.name);
+    expect(remote?.type, source.type);
+    expect(remote?.createdAt, capturedAt);
+    expect(remote?.updatedAt, updatedAt);
+    expect(remote?.width, source.width);
+    expect(remote?.height, source.height);
+    expect(remote?.durationMs, source.durationMs);
+    expect(remote?.isFavorite, isTrue);
+    expect(remote?.isEdited, isTrue);
+    expect(remote?.visibility, AssetVisibility.timeline);
+    expect(remote?.isTrashed, isFalse);
+  });
+
   test('getByIds returns current rows with their device links and tombstone state', () async {
     final user = await ctx.newUser();
     await ctx.newAuthUser(id: user.id);
