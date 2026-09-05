@@ -40,10 +40,7 @@ WHERE
 		OR rae.id = se.primary_asset_id
 	)
 ORDER BY
-	COALESCE(
-		SUBSTR(rae.local_date_time, 1, 23),
-		STRFTIME('%Y-%m-%dT%H:%M:%f', rae.created_at, 'localtime')
-	) DESC,
+	rae.local_date_time DESC,
 	rae.id DESC
 LIMIT $limit;
 

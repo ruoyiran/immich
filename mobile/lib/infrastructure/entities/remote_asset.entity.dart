@@ -21,6 +21,10 @@ WHERE (library_id IS NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_remote_asset_owner_visibility_deleted_created
 ON remote_asset_entity (owner_id, visibility, deleted_at, created_at DESC)
 ''')
+@TableIndex.sql('''
+CREATE INDEX IF NOT EXISTS idx_remote_asset_owner_visibility_deleted_local_date_time
+ON remote_asset_entity (owner_id, visibility, deleted_at, local_date_time DESC, id DESC)
+''')
 @TableIndex.sql('CREATE INDEX IF NOT EXISTS idx_remote_asset_uploaded ON remote_asset_entity (uploaded_at)')
 class RemoteAssetEntity extends Table with DriftDefaultsMixin, AssetEntityMixin {
   const RemoteAssetEntity();

@@ -68,6 +68,32 @@ void main() {
 
       expect(assets.map((asset) => asset.id), [video.id, photo.id]);
     });
+
+    test('uses the local capture-time index for paginated timeline reads', () async {
+      final user = await ctx.newUser();
+
+      final plan = await ctx.db
+          .customSelect(
+            '''
+EXPLAIN QUERY PLAN
+SELECT rae.id
+FROM remote_asset_entity rae
+LEFT JOIN stack_entity se ON rae.stack_id = se.id
+WHERE rae.deleted_at IS NULL
+  AND rae.visibility = 0
+  AND rae.owner_id = ?
+  AND (rae.stack_id IS NULL OR rae.id = se.primary_asset_id)
+ORDER BY rae.local_date_time DESC, rae.id DESC
+LIMIT 101 OFFSET 10000
+''',
+            variables: [Variable.withString(user.id)],
+          )
+          .get();
+      final details = plan.map((row) => row.read<String>('detail')).join('\n');
+
+      expect(details, contains('idx_remote_asset_owner_visibility_deleted_local_date_time'));
+      expect(details, isNot(contains('USE TEMP B-TREE FOR ORDER BY')));
+    });
   });
 
   group('remoteAlbum assets', () {
@@ -159,11 +185,7 @@ void main() {
         type: .video,
         visibility: .hidden,
       );
-      final still = await ctx.newRemoteAsset(
-        ownerId: user.id,
-        deletedAt: deletedAt,
-        livePhotoVideoId: motion.id,
-      );
+      final still = await ctx.newRemoteAsset(ownerId: user.id, deletedAt: deletedAt, livePhotoVideoId: motion.id);
 
       final query = sut.trash(user.id, .day);
 
