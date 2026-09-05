@@ -33,6 +33,12 @@ Use this skill to execute Immich mobile test cases sourced from a Feishu Sheet. 
 - For app login, inspect local database/configuration records only as needed. Never print passwords, tokens, cookies, or secrets in chat, logs, Lark messages, commits, or screenshots.
 - Prefer creating a disposable test user when the server supports it. If using an existing user, redact credentials and restore any modified profile/data state.
 
+## iPhone Release Install Safety
+
+- Never install an iPhone release build through a path that uninstalls the existing app first. In this repo, `flutter install --release` has been observed to print `Uninstalling old version...`, so do not use it for iPhone release installs.
+- Use an upgrade/overwrite install path that preserves the app data container, such as a verified Xcode or `devicectl` app install flow for the built `.app`. If the only available path would uninstall or clear app data, stop and ask before proceeding.
+- Before and after installing a release build on a physical iPhone, preserve login state and local database files. Do not delete the app, reset app data, or clear containers unless the user explicitly requests it and a backup has been made.
+
 ## Android Media Fixtures
 
 - For Android emulator cases that read local media, push fixtures into `/sdcard/DCIM/...` or `/sdcard/Pictures/...`, trigger MediaScanner, then verify both the file path and the expected display name before running the case.
