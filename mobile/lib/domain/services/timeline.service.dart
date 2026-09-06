@@ -101,6 +101,8 @@ class TimelineService {
   List<Bucket>? _latestBuckets;
   int _bucketVersion = 0;
   StreamSubscription<List<Bucket>>? _bucketSubscription;
+  bool _bucketRefreshInProgress = false;
+  bool _bucketRefreshPending = false;
   bool _isDisposed = false;
 
   int _totalAssets = 0;
@@ -123,47 +125,70 @@ class TimelineService {
           _bucketUpdates.add(_bucketVersion);
         }
 
-        unawaited(
-          _mutex.run(() async {
-            if (_isDisposed) {
-              return;
-            }
-
-            final totalAssets = buckets.fold<int>(0, (acc, bucket) => acc + bucket.assetCount);
-
-            if (totalAssets == 0) {
-              _bufferOffset = 0;
-              _buffer = [];
-            } else {
-              final int offset;
-              final int count;
-              // When the buffer is empty or the old bufferOffset is greater than the new total assets,
-              // we need to reset the buffer and load the first batch of assets.
-              if (_bufferOffset >= totalAssets || _buffer.isEmpty) {
-                offset = 0;
-                count = kTimelineAssetLoadBatchSize;
-              } else {
-                offset = _bufferOffset;
-                count = math.min(_buffer.length, totalAssets - _bufferOffset);
-              }
-              final buffer = await _assetSource(offset, count);
-              if (_isDisposed) {
-                return;
-              }
-
-              _buffer = buffer;
-              _bufferOffset = offset;
-            }
-
-            // change the state's total assets count only after the buffer is reloaded
-            _totalAssets = totalAssets;
-            EventStream.shared.emit(const TimelineReloadEvent());
-          }),
-        );
+        _scheduleBucketRefresh();
       },
       onError: _bucketUpdates.addError,
       onDone: _bucketUpdates.close,
     );
+  }
+
+  void _scheduleBucketRefresh() {
+    if (_isDisposed) {
+      return;
+    }
+    if (_bucketRefreshInProgress) {
+      _bucketRefreshPending = true;
+      return;
+    }
+
+    _bucketRefreshInProgress = true;
+    unawaited(_refreshBuckets());
+  }
+
+  Future<void> _refreshBuckets() async {
+    try {
+      do {
+        _bucketRefreshPending = false;
+        await _mutex.run(() async {
+          final buckets = _latestBuckets;
+          if (_isDisposed || buckets == null) {
+            return;
+          }
+
+          final totalAssets = buckets.fold<int>(0, (acc, bucket) => acc + bucket.assetCount);
+
+          if (totalAssets == 0) {
+            _bufferOffset = 0;
+            _buffer = [];
+          } else {
+            final int offset;
+            final int count;
+            // When the buffer is empty or the old bufferOffset is greater than the new total assets,
+            // we need to reset the buffer and load the first batch of assets.
+            if (_bufferOffset >= totalAssets || _buffer.isEmpty) {
+              offset = 0;
+              count = kTimelineAssetLoadBatchSize;
+            } else {
+              offset = _bufferOffset;
+              count = math.min(_buffer.length, totalAssets - _bufferOffset);
+            }
+            final buffer = await _assetSource(offset, count);
+            if (_isDisposed) {
+              return;
+            }
+
+            _buffer = buffer;
+            _bufferOffset = offset;
+          }
+
+          // change the state's total assets count only after the buffer is reloaded
+          _totalAssets = totalAssets;
+          EventStream.shared.emit(const TimelineReloadEvent());
+        });
+      } while (_bucketRefreshPending && !_isDisposed);
+    } finally {
+      _bucketRefreshInProgress = false;
+    }
   }
 
   Stream<List<Bucket>> Function() get watchBuckets => _watchBuckets;
@@ -335,6 +360,7 @@ class TimelineService {
       await _bucketUpdates.close();
     }
     _latestBuckets = null;
+    _bucketRefreshPending = false;
     _buffer = [];
     _bufferOffset = 0;
     _totalAssets = 0;

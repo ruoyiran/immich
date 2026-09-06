@@ -20,6 +20,15 @@
 - 使用 Provider composition 管理依赖；不要创建隐藏的 global singleton。
 - 保持 startup、logout、foreground-resume 和 background-engine 的 lifecycle 行为。
 
+## Android/iOS 功能一致性
+
+- Mobile 功能和修复默认必须同时适用于 Android 与 iOS；平台实现可以不同，但用户可见结果必须等价。
+- 修改前检查共享 Dart、Pigeon contract、Android/iOS 原生实现、插件注册、权限、生命周期和构建配置。
+- 错误分类、取消、重试、缓存失效、持久化和前后台恢复语义必须在双端保持一致。
+- 平台能力不对等时，必须记录原因、用户可见差异、稳定降级和对应测试；不得用静默 no-op 伪装支持。
+- 平台敏感变更必须分别在 Android 与 iOS 模拟器验证；单个平台通过不能代表完成。
+- 无法测试的平台必须明确标记为未验证，不得推断其行为与已测试平台一致。
+
 ## 生成文件与联动变更
 
 - 绝不要手工编辑 `generated/openapi/` 或生成的 Dart/Swift/Kotlin 文件。

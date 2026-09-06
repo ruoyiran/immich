@@ -79,6 +79,41 @@ void main() {
     expect(receivedBuckets, [buckets]);
   });
 
+  test('coalesces bucket refreshes that arrive while an asset load is in flight', () async {
+    final bucketController = StreamController<List<Bucket>>.broadcast(sync: true);
+    final firstLoad = Completer<void>();
+    var assetLoadCount = 0;
+    final service = TimelineService((
+      assetSource: (_, __) async {
+        assetLoadCount++;
+        if (assetLoadCount == 1) {
+          await firstLoad.future;
+        }
+        return [LocalAssetStub.image1];
+      },
+      bucketSource: () => bucketController.stream,
+      origin: TimelineOrigin.main,
+    ));
+    addTearDown(bucketController.close);
+    addTearDown(service.dispose);
+
+    bucketController.add(const [Bucket(assetCount: 1)]);
+    await Future<void>.delayed(Duration.zero);
+    expect(assetLoadCount, 1);
+
+    for (var count = 2; count <= 10; count++) {
+      bucketController.add([Bucket(assetCount: count)]);
+    }
+    await Future<void>.delayed(Duration.zero);
+    expect(assetLoadCount, 1);
+
+    firstLoad.complete();
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+
+    expect(assetLoadCount, 2);
+    expect(service.totalAssets, 10);
+  });
+
   test('reload refreshes the buffered assets without a bucket change', () async {
     final bucketController = StreamController<List<Bucket>>.broadcast(sync: true);
     var currentAsset = LocalAssetStub.image1;

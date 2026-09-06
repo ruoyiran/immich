@@ -113,6 +113,7 @@ import 'package:immich_mobile/presentation/widgets/bottom_sheet/general_bottom_s
 import 'package:immich_mobile/presentation/widgets/bottom_sheet/locked_folder_bottom_sheet.widget.dart';
 import 'package:immich_mobile/presentation/widgets/bottom_sheet/remote_album_bottom_sheet.widget.dart';
 import 'package:immich_mobile/presentation/widgets/bottom_sheet/trash_bottom_sheet.widget.dart';
+import 'package:immich_mobile/presentation/widgets/images/remote_image_provider.dart';
 import 'package:immich_mobile/presentation/widgets/images/thumbnail_tile.widget.dart';
 import 'package:immich_mobile/presentation/widgets/map/map.state.dart';
 import 'package:immich_mobile/presentation/widgets/timeline/header.widget.dart';
@@ -1016,6 +1017,58 @@ void main() async {
       final firstPageAgain = await timeline.loadAssets(0, firstPageCount);
       expect(_timelineAssetIds(firstPageAgain), _timelineAssetIds(firstPage));
     });
+
+    _realStackSessionTest(
+      'MOB-REAL-079-$_caseSuffix',
+      'loads first-sync thumbnails through the native image pipeline',
+      (tester) async {
+        final (container, _) = await _loadAuthenticatedSyncContainer();
+        addTearDown(container.dispose);
+        final userId = Store.get(StoreKey.currentUser).id;
+        final assetsApi = container.read(apiServiceProvider).assetsApi;
+        final createdRemoteAssetIds = <String>[];
+        addTearDown(() async {
+          for (final assetId in createdRemoteAssetIds) {
+            await _deleteTestAssetBestEffort(assetsApi, assetId);
+          }
+        });
+
+        final seed = await _uploadTimelineSeedAssets(
+          '079',
+          imageCount: _timelineMinimumAssetCount,
+          includePreviousMonth: true,
+        );
+        createdRemoteAssetIds.addAll(seed.imageIds);
+
+        await container.read(syncApiRepositoryProvider).deleteSyncAck(_allReplayableSyncAckTypes);
+        await Store.delete(StoreKey.syncMigrationStatus);
+        await container.read(syncStreamRepositoryProvider).reset();
+        PaintingBinding.instance.imageCache
+          ..clear()
+          ..clearLiveImages();
+        await remoteImageApi.clearCache();
+
+        final stopwatch = Stopwatch()..start();
+        final syncSuccess = await container.read(syncStreamServiceProvider).sync().timeout(const Duration(minutes: 2));
+        expect(syncSuccess, isTrue);
+
+        final timeline = container.read(timelineFactoryProvider).main([userId]);
+        addTearDown(timeline.dispose);
+        await _waitForTimelineBuckets(tester, timeline, minAssets: _timelineMinimumAssetCount);
+
+        final firstPage = await timeline.loadAssets(0, _timelineMinimumAssetCount);
+        final thumbnails = firstPage
+            .whereType<RemoteAsset>()
+            .where((asset) => seed.imageIds.contains(asset.id))
+            .take(12)
+            .toList(growable: false);
+        expect(thumbnails, hasLength(12));
+
+        await Future.wait(thumbnails.map(_resolveRemoteThumbnail)).timeout(const Duration(minutes: 2));
+        stopwatch.stop();
+        debugPrint('MOB-REAL-079-$_caseSuffix first-sync-12-thumbnails-ms=${stopwatch.elapsedMilliseconds}');
+      },
+    );
 
     _realStackSessionTest('MOB-REAL-017-$_caseSuffix', 'opens remote image viewer and switches adjacent images', (
       tester,
@@ -15817,6 +15870,36 @@ Future<List<BaseAsset>> _loadAllTimelineAssets(TimelineService timeline) async {
     assets.addAll(await timeline.loadAssets(offset, count));
   }
   return assets;
+}
+
+Future<void> _resolveRemoteThumbnail(RemoteAsset asset) async {
+  final completer = Completer<void>();
+  final provider = RemoteImageProvider.thumbnail(
+    assetId: asset.id,
+    thumbhash: asset.thumbHash,
+    decodeSize: const Size.square(256),
+  );
+  final stream = provider.resolve(ImageConfiguration.empty);
+  late final ImageStreamListener listener;
+  listener = ImageStreamListener(
+    (image, _) {
+      image.dispose();
+      if (!completer.isCompleted) {
+        completer.complete();
+      }
+    },
+    onError: (Object error, StackTrace? stackTrace) {
+      if (!completer.isCompleted) {
+        completer.completeError(error, stackTrace);
+      }
+    },
+  );
+  stream.addListener(listener);
+  try {
+    await completer.future;
+  } finally {
+    stream.removeListener(listener);
+  }
 }
 
 RemoteAsset? _firstRemoteVideo(List<BaseAsset> assets) {
