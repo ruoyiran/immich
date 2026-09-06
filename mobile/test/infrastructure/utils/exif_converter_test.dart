@@ -9,5 +9,13 @@ void main() {
 
       expect(exif.rating, 5);
     });
+
+    test('maps the detailed place display name', () {
+      final exif = ExifDtoConverter.fromDto(
+        ExifResponseDto(placeDisplayName: const Optional.present('上海市浦东新区川沙新镇川沙路 100 号')),
+      );
+
+      expect(exif.placeDisplayName, '上海市浦东新区川沙新镇川沙路 100 号');
+    });
   });
 }

@@ -31,13 +31,21 @@ class _LocationDetailsState extends ConsumerState<LocationDetails> {
       return null;
     }
 
-    final cityName = exifInfo.city;
-    final stateName = exifInfo.state;
-
-    if (cityName != null && stateName != null) {
-      return "$cityName, $stateName";
+    final placeDisplayName = exifInfo.placeDisplayName?.trim();
+    if (placeDisplayName != null && placeDisplayName.isNotEmpty) {
+      return placeDisplayName;
     }
-    return null;
+
+    final parts = <String>[];
+    for (final value in [exifInfo.district, exifInfo.city, exifInfo.state, exifInfo.country]) {
+      final part = value?.trim();
+      if (part == null || part.isEmpty || parts.contains(part)) {
+        continue;
+      }
+      parts.add(part);
+    }
+
+    return parts.isEmpty ? null : parts.join(', ');
   }
 
   void _onMapCreated(MapLibreMapController controller) {

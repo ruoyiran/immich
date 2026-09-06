@@ -286,6 +286,7 @@ class SyncStreamRepository extends DriftDatabaseRepository {
             state: Value(exif.state),
             country: Value(exif.country),
             district: Value(exif.district),
+            placeDisplayName: Value(exif.placeDisplayName),
             dateTimeOriginal: Value(exif.dateTimeOriginal),
             description: Value(exif.description),
             exposureTime: Value(exif.exposureTime),

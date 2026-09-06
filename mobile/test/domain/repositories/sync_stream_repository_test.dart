@@ -87,6 +87,7 @@ SyncAssetExifV1 _createExif({
   required int height,
   required String orientation,
   String? district,
+  String? placeDisplayName,
 }) {
   return SyncAssetExifV1(
     assetId: assetId,
@@ -96,6 +97,7 @@ SyncAssetExifV1 _createExif({
     city: null,
     country: null,
     district: district,
+    placeDisplayName: placeDisplayName,
     dateTimeOriginal: null,
     description: null,
     exposureTime: null,
@@ -297,7 +299,7 @@ void main() {
     });
   });
 
-  test('persists district from AssetExifV1 sync', () async {
+  test('persists district and detailed place name from AssetExifV1 sync', () async {
     const assetId = 'asset-with-district';
     await db
         .into(db.userEntity)
@@ -318,10 +320,18 @@ void main() {
         );
 
     await sut.updateAssetsExifV1([
-      _createExif(assetId: assetId, width: 100, height: 100, orientation: '1', district: 'Pudong'),
+      _createExif(
+        assetId: assetId,
+        width: 100,
+        height: 100,
+        orientation: '1',
+        district: 'Pudong',
+        placeDisplayName: 'Shanghai Pudong Chuansha Road 100',
+      ),
     ]);
 
     final exif = await (db.select(db.remoteExifEntity)..where((row) => row.assetId.equals(assetId))).getSingle();
     expect(exif.district, 'Pudong');
+    expect(exif.placeDisplayName, 'Shanghai Pudong Chuansha Road 100');
   });
 }

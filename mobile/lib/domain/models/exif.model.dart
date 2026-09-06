@@ -26,6 +26,7 @@ abstract class ExifInfo with _$ExifInfo {
     String? state,
     String? country,
     String? district,
+    String? placeDisplayName,
 
     // Camera related
     String? make,

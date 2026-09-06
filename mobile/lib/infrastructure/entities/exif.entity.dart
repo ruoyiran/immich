@@ -27,6 +27,8 @@ class RemoteExifEntity extends Table with DriftDefaultsMixin {
 
   TextColumn get district => text().nullable()();
 
+  TextColumn get placeDisplayName => text().nullable()();
+
   DateTimeColumn get dateTimeOriginal => dateTime().nullable()();
 
   TextColumn get description => text().nullable()();
@@ -82,6 +84,7 @@ extension RemoteExifEntityDataDomainEx on RemoteExifEntityData {
     state: state,
     country: country,
     district: district,
+    placeDisplayName: placeDisplayName,
     description: description,
     orientation: orientation,
     latitude: latitude,

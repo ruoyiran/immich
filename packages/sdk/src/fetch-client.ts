@@ -789,6 +789,10 @@ export type ExifResponseDto = {
     city?: string | null;
     /** Country name */
     country?: string | null;
+    /** District or county name */
+    district?: string | null;
+    /** Detailed reverse-geocoded place display name */
+    placeDisplayName?: string | null;
     /** Original date/time */
     dateTimeOriginal?: string | null;
     /** Image description */
@@ -2953,6 +2957,10 @@ export type SyncAssetExifV1 = {
     city: string | null;
     /** Country */
     country: string | null;
+    /** District or county */
+    district: string | null;
+    /** Detailed reverse-geocoded place display name */
+    placeDisplayName: string | null;
     /** Date time original */
     dateTimeOriginal: string | null;
     /** Description */

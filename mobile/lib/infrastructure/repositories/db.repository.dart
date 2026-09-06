@@ -120,7 +120,7 @@ class Drift extends $Drift {
   }
 
   @override
-  int get schemaVersion => 34;
+  int get schemaVersion => 35;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -336,6 +336,9 @@ SET local_date_time = STRFTIME('%Y-%m-%dT%H:%M:%f', created_at, 'localtime')
 WHERE local_date_time IS NULL
 ''');
                 await m.createIndex(v34.idxRemoteAssetOwnerVisibilityDeletedLocalDateTime);
+              },
+              from34To35: (m, v35) async {
+                await m.addColumn(v35.remoteExifEntity, v35.remoteExifEntity.placeDisplayName);
               },
             ),
           ),
