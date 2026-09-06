@@ -70,6 +70,52 @@ class DuplicatesNotifier extends StateNotifier<AsyncValue<DuplicatesState>> {
     state = AsyncData(current.copyWith(trashSelections: selections));
   }
 
+  void setTrashIdsForGroup(String groupId, Set<String> trashIds) {
+    final current = state.valueOrNull;
+    if (current == null) {
+      return;
+    }
+
+    state = AsyncData(
+      current.copyWith(
+        trashSelections: {
+          ...current.trashSelections,
+          groupId: trashIds,
+        },
+      ),
+    );
+  }
+
+  Future<void> resolveGroup(String groupId) async {
+    final current = state.valueOrNull;
+    if (current == null) {
+      return;
+    }
+
+    final index = current.groups.indexWhere((group) => group.id == groupId);
+    if (index < 0) {
+      return;
+    }
+
+    state = AsyncData(current.copyWith(currentIndex: index));
+    await resolveCurrent();
+  }
+
+  Future<void> dismissGroup(String groupId) async {
+    final current = state.valueOrNull;
+    if (current == null) {
+      return;
+    }
+
+    final index = current.groups.indexWhere((group) => group.id == groupId);
+    if (index < 0) {
+      return;
+    }
+
+    state = AsyncData(current.copyWith(currentIndex: index));
+    await dismissCurrent();
+  }
+
   Future<void> resolveCurrent() async {
     final current = state.valueOrNull;
     final group = current?.currentGroup;
