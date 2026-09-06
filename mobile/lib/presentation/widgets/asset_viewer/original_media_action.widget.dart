@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:immich_mobile/domain/models/asset/base_asset.model.dart';
 import 'package:immich_mobile/domain/models/config/app_config.dart';
-import 'package:immich_mobile/extensions/translate_extensions.dart';
+import 'package:immich_mobile/generated/translations.g.dart';
 
 enum OriginalMediaKind { image, video }
 
@@ -12,12 +12,12 @@ OriginalMediaKind? originalMediaActionFor({
   bool originalRequested = false,
   bool hasDirectFile = false,
 }) {
-  if (originalRequested || hasDirectFile) {
+  if (!asset.isRemoteOnly || originalRequested || hasDirectFile) {
     return null;
   }
 
   if (asset.isVideo || isPlayingMotionVideo) {
-    if (asset.hasLocal || config.viewer.loadOriginalVideo) {
+    if (config.viewer.loadOriginalVideo) {
       return null;
     }
     return OriginalMediaKind.video;
@@ -33,6 +33,38 @@ OriginalMediaKind? originalMediaActionFor({
 String selectRemoteVideoEndpoint({required bool loadOriginalVideo, required bool forceOriginal}) =>
     loadOriginalVideo || forceOriginal ? 'original' : 'video/playback';
 
+class OriginalMediaActionOverlay extends StatelessWidget {
+  const OriginalMediaActionOverlay({
+    super.key,
+    required this.kind,
+    required this.showingControls,
+    required this.onPressed,
+  });
+
+  final OriginalMediaKind kind;
+  final bool showingControls;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return Positioned(
+      left: 0,
+      right: 0,
+      bottom: MediaQuery.paddingOf(context).bottom + 72,
+      child: IgnorePointer(
+        ignoring: !showingControls,
+        child: AnimatedOpacity(
+          opacity: showingControls ? 1 : 0,
+          duration: Durations.short2,
+          child: Center(
+            child: OriginalMediaActionButton(kind: kind, onPressed: onPressed),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class OriginalMediaActionButton extends StatelessWidget {
   const OriginalMediaActionButton({super.key, required this.kind, required this.onPressed});
 
@@ -42,8 +74,8 @@ class OriginalMediaActionButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final label = switch (kind) {
-      OriginalMediaKind.image => 'view_original_image'.t(context: context),
-      OriginalMediaKind.video => 'view_original_video'.t(context: context),
+      OriginalMediaKind.image => context.t.view_original_image,
+      OriginalMediaKind.video => context.t.view_original_video,
     };
 
     return TextButton(

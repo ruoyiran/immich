@@ -5,6 +5,7 @@ import 'package:immich_mobile/domain/models/config/image_config.dart';
 import 'package:immich_mobile/domain/models/config/viewer_config.dart';
 import 'package:immich_mobile/presentation/widgets/asset_viewer/original_media_action.widget.dart';
 
+import '../../../fixtures/asset.stub.dart';
 import '../../../unit/factories/remote_asset_factory.dart';
 
 void main() {
@@ -34,6 +35,16 @@ void main() {
 
       expect(originalMediaActionFor(asset: animated, config: const AppConfig()), isNull);
       expect(originalMediaActionFor(asset: image, config: const AppConfig(), hasDirectFile: true), isNull);
+    });
+
+    test('does not offer the original action for a local image', () {
+      expect(originalMediaActionFor(asset: LocalAssetStub.image1, config: const AppConfig()), isNull);
+    });
+
+    test('does not offer the original action for a merged image', () {
+      final merged = RemoteAssetFactory.create(localId: 'local-image');
+
+      expect(originalMediaActionFor(asset: merged, config: const AppConfig()), isNull);
     });
 
     test('offers the original video only for remote playback', () {
