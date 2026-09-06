@@ -52,6 +52,11 @@
 
 如果修改 `mobile/packages/ui`，请另外在该 package 目录中运行 `flutter test`。
 
+## 设备安装规则
+
+- 在 Android 或 iPhone 真机上安装构建产物时，只允许保留应用数据的覆盖安装；禁止先卸载应用再安装。
+- 如果签名、bundle identifier、版本降级或其他限制导致无法覆盖安装，应停止并报告原因，不得通过卸载应用绕过。
+
 ## 高风险检查
 
 - 验证现有用户的 database migration，而不仅是全新数据库。
