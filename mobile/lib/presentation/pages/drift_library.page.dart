@@ -46,6 +46,9 @@ class _ActionButtonGrid extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final isTrashEnable = ref.watch(serverInfoProvider.select((state) => state.serverFeatures.trash));
+    final isDuplicateDetectionEnabled = ref.watch(
+      serverInfoProvider.select((state) => state.serverFeatures.duplicateDetection),
+    );
 
     return SliverPadding(
       padding: const EdgeInsets.only(left: 16, top: 16, right: 16, bottom: 12),
@@ -67,6 +70,19 @@ class _ActionButtonGrid extends ConsumerWidget {
                 ),
               ],
             ),
+            if (isDuplicateDetectionEnabled) ...[
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  _ActionButton(
+                    icon: Icons.compare_outlined,
+                    onTap: () => context.pushRoute(const DriftDuplicatesRoute()),
+                    label: 'review_duplicates'.t(context: context),
+                  ),
+                  const Spacer(),
+                ],
+              ),
+            ],
             const SizedBox(height: 8),
             Row(
               children: [
