@@ -36,6 +36,7 @@ class ApiService {
   late MemoriesApi memoriesApi;
   late SessionsApi sessionsApi;
   late TagsApi tagsApi;
+  late DuplicatesApi duplicatesApi;
 
   ApiService() {
     // The below line ensures that the api clients are initialized when the service is instantiated
@@ -79,6 +80,7 @@ class ApiService {
     memoriesApi = MemoriesApi(_apiClient);
     sessionsApi = SessionsApi(_apiClient);
     tagsApi = TagsApi(_apiClient);
+    duplicatesApi = DuplicatesApi(_apiClient);
   }
 
   Future<String> resolveAndSetEndpoint(String serverUrl) async {
