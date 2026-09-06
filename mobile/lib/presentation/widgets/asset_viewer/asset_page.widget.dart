@@ -514,23 +514,10 @@ class _AssetPageState extends ConsumerState<AssetPage> {
           ),
         ),
         if (originalMediaKind != null && !_showingDetails)
-          Positioned(
-            top: context.padding.top + 72,
-            left: 0,
-            right: 0,
-            child: IgnorePointer(
-              ignoring: !showingControls,
-              child: AnimatedOpacity(
-                opacity: showingControls ? 1 : 0,
-                duration: Durations.short2,
-                child: Center(
-                  child: OriginalMediaActionButton(
-                    kind: originalMediaKind,
-                    onPressed: () => setState(() => _originalRequestedAssetIds.add(displayAsset.id)),
-                  ),
-                ),
-              ),
-            ),
+          OriginalMediaActionOverlay(
+            kind: originalMediaKind,
+            showingControls: showingControls,
+            onPressed: () => setState(() => _originalRequestedAssetIds.add(displayAsset.id)),
           ),
         if (stackChildren != null && stackChildren.isNotEmpty)
           Positioned(
