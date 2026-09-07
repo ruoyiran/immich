@@ -87,8 +87,8 @@ description = "Format Dart code"
 run = "dart format --set-exit-if-changed $(find lib -name '*.dart' -not \\( -name '*.g.dart' -o -name '*.drift.dart' -o -name '*.gr.dart' \\))"
 
 [tasks."build:android"]
-description = "Build Android release"
-run = "flutter build appbundle"
+description = "Build Android arm64 release APK"
+run = "scripts/build_android_release_apk.sh"
 
 [tasks."drift:migration"]
 alias = "migration"

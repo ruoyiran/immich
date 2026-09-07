@@ -3,10 +3,11 @@ import 'package:immich_mobile/extensions/build_context_extensions.dart';
 import 'package:immich_mobile/presentation/widgets/images/remote_image_provider.dart';
 
 class AssetMarkerIcon extends StatelessWidget {
-  const AssetMarkerIcon({required this.id, required this.thumbhash, super.key});
+  const AssetMarkerIcon({required this.id, required this.thumbhash, this.imageProvider, super.key});
 
   final String id;
-  final String thumbhash;
+  final String? thumbhash;
+  final ImageProvider<Object>? imageProvider;
 
   @override
   Widget build(BuildContext context) {
@@ -40,7 +41,7 @@ class AssetMarkerIcon extends StatelessWidget {
                   backgroundColor: context.colorScheme.onSurface,
                   child: CircleAvatar(
                     radius: constraints.maxHeight * 0.37,
-                    backgroundImage: RemoteImageProvider.thumbnail(assetId: id, thumbhash: thumbhash),
+                    backgroundImage: imageProvider ?? RemoteImageProvider.thumbnail(assetId: id, thumbhash: thumbhash),
                   ),
                 ),
               ),

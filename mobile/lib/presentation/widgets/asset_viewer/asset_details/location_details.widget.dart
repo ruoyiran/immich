@@ -11,7 +11,7 @@ import 'package:immich_mobile/extensions/translate_extensions.dart';
 import 'package:immich_mobile/presentation/actions/edit_location.action.dart';
 import 'package:immich_mobile/presentation/widgets/asset_viewer/sheet_tile.widget.dart';
 import 'package:immich_mobile/widgets/asset_viewer/detail_panel/exif_map.dart';
-import 'package:maplibre_gl/maplibre_gl.dart';
+import 'package:immich_mobile/widgets/map/map_backend.dart';
 
 class LocationDetails extends ConsumerStatefulWidget {
   final BaseAsset asset;
@@ -24,7 +24,7 @@ class LocationDetails extends ConsumerStatefulWidget {
 }
 
 class _LocationDetailsState extends ConsumerState<LocationDetails> {
-  MapLibreMapController? _mapController;
+  MapThumbnailController? _mapController;
 
   String? _getLocationName(ExifInfo? exifInfo) {
     if (exifInfo == null) {
@@ -48,7 +48,7 @@ class _LocationDetailsState extends ConsumerState<LocationDetails> {
     return parts.isEmpty ? null : parts.join(', ');
   }
 
-  void _onMapCreated(MapLibreMapController controller) {
+  void _onMapCreated(MapThumbnailController controller) {
     _mapController = controller;
   }
 
@@ -59,10 +59,7 @@ class _LocationDetailsState extends ConsumerState<LocationDetails> {
       final exif = widget.exifInfo;
       if (exif != null && exif.hasCoordinates) {
         unawaited(
-          _mapController?.moveCamera(CameraUpdate.newLatLng(LatLng(exif.latitude!, exif.longitude!))).catchError((
-            Object error,
-            StackTrace stack,
-          ) {
+          _mapController?.moveTo(exif.latitude!, exif.longitude!).catchError((Object error, StackTrace stack) {
             if (error is MissingPluginException) {
               return null;
             }

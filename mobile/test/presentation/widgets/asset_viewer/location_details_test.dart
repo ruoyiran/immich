@@ -1,9 +1,15 @@
+import 'package:drift/drift.dart';
+import 'package:drift/native.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:immich_mobile/constants/enums.dart';
 import 'package:immich_mobile/domain/models/asset/base_asset.model.dart';
 import 'package:immich_mobile/domain/models/exif.model.dart';
+import 'package:immich_mobile/domain/models/store.model.dart';
+import 'package:immich_mobile/domain/services/store.service.dart';
+import 'package:immich_mobile/infrastructure/repositories/db.repository.dart';
+import 'package:immich_mobile/infrastructure/repositories/store.repository.dart';
 import 'package:immich_mobile/models/map/map_state.model.dart';
 import 'package:immich_mobile/presentation/actions/action.dart';
 import 'package:immich_mobile/presentation/widgets/asset_viewer/asset_details/location_details.widget.dart';
@@ -14,10 +20,25 @@ import 'package:immich_mobile/theme/theme_data.dart';
 import 'package:immich_mobile/utils/asset_filter.dart';
 
 import '../../../modules/map/map_mocks.dart';
+import '../../../test_utils.dart';
 import '../../../unit/factories/remote_asset_factory.dart';
 import '../../../widget_tester_extensions.dart';
 
 void main() {
+  late Drift db;
+
+  setUpAll(() async {
+    TestUtils.init();
+    db = Drift(DatabaseConnection(NativeDatabase.memory(), closeStreamsSynchronously: true));
+    await StoreService.init(storeRepository: DriftStoreRepository(db), listenUpdates: false);
+    await StoreService.I.put(StoreKey.serverEndpoint, 'https://example.test');
+  });
+
+  tearDownAll(() async {
+    await StoreService.I.dispose();
+    await db.close();
+  });
+
   testWidgets('shows available place fields when city is missing', (tester) async {
     await pumpLocationDetails(
       tester,

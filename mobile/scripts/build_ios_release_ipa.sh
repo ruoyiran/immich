@@ -79,6 +79,7 @@ read_xcconfig_value() {
 }
 
 flutter_cmd=()
+flutter_defines=()
 detect_flutter() {
   if command -v mise >/dev/null 2>&1 && [[ -f "$mobile_root/mise.toml" ]]; then
     local flutter_version
@@ -94,6 +95,13 @@ detect_flutter() {
     flutter_cmd=(flutter)
   else
     die "Flutter was not found. Install mise tools from mobile/mise.toml or put flutter on PATH."
+  fi
+}
+
+configure_flutter_defines() {
+  local amap_web_key="${IMMICH_AMAP_WEB_KEY:-${PC_AMAP_KEY:-}}"
+  if [[ -n "$amap_web_key" ]]; then
+    flutter_defines=("--dart-define=IMMICH_AMAP_WEB_KEY=$amap_web_key")
   fi
 }
 
@@ -154,6 +162,7 @@ if [[ -z "$expected_bundle_id" ]]; then
 fi
 
 detect_flutter
+configure_flutter_defines
 
 info "Mobile root: $mobile_root"
 
@@ -161,7 +170,7 @@ if [[ "$skip_build" != "1" ]]; then
   info "Building iOS Release app"
   (
     cd "$mobile_root"
-    run "${flutter_cmd[@]}" build ios --release
+    run "${flutter_cmd[@]}" build ios --release "${flutter_defines[@]}"
   )
 else
   info "Skipping Flutter build; packaging existing app"
