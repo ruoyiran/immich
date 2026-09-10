@@ -66,3 +66,6 @@ libisar.so
 
 # Translation file
 lib/generated/
+
+# Local build secrets (AMAP web key for the China map backend); never commit
+.env.local

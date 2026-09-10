@@ -4,9 +4,19 @@ set -Eeuo pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 mobile_dir="$(cd "$script_dir/.." && pwd)"
 
+# Key source precedence: env var > mobile/.env.local (git-ignored, never committed)
 amap_web_key="${IMMICH_AMAP_WEB_KEY:-${PC_AMAP_KEY:-}}"
+if [[ -z "$amap_web_key" && -f "$mobile_dir/.env.local" ]]; then
+  while IFS='=' read -r key value; do
+    [[ -z "${key// /}" || "${key:0:1}" == "#" ]] && continue
+    if [[ "$key" == "IMMICH_AMAP_WEB_KEY" && -n "$value" ]]; then
+      amap_web_key="$value"
+      break
+    fi
+  done < "$mobile_dir/.env.local"
+fi
 if [[ -z "$amap_web_key" ]]; then
-  echo "Set PC_AMAP_KEY or IMMICH_AMAP_WEB_KEY before building the China Android release APK." >&2
+  echo "Set IMMICH_AMAP_WEB_KEY (or put it in mobile/.env.local) before building the China Android release APK." >&2
   exit 2
 fi
 
