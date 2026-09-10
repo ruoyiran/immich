@@ -1,6 +1,6 @@
 # 同步协议契约：会话 ack 持久化与 syncResetV1 纪律
 
-- 日期：2026-09-10
+- 日期：2026-09-10（2026-09-11 更新：服务端修复已落地，见文末）
 - 适用仓库：`photo-classifier`（服务端，权威实现方）；本文从 mobile 客户端行为推导契约
 - 关联问题：mobile 冷启动后时间线整库清空重填（全量重拉）
 
@@ -90,3 +90,15 @@ photo-classifier 当前行为：客户端每次冷启动的 `/sync/stream` 都�
 2. 无 `SyncResetV1 received`；
 3. `Remote sync completed` 的按类型计数为增量规模（非全库 backfill）；
 4. 时间线不再清空重填。
+
+## 服务端修复落地记录（2026-09-11）
+
+根因最终定位在 `photo-classifier` 的 `sync_http.go` stream handler：任一请求类型的 checkpoint 游标低于 history floor（`immich_sync_state` singleton 行，由 `RunHistoryRetention` 每 5 分钟按 100k 变更窗口推进）时，下发单个 `SyncResetV1` 并立即返回 → 客户端清空全部远端表 → ack `SyncResetV1` → 服务端删光该会话全部 checkpoint → 全量 backfill。`photos`/`videos` 表的 AFTER UPDATE 触发器（每次行更新写一条 change）使 pipeline 全库任务轻易冲破 100k 窗口，冷启动高频触发。
+
+修复（已实现，`server/internal/immichcompat/`）：
+
+- `sync_http.go`：checkpoint 低于 floor 时**不再下发 `SyncResetV1`**——服务端只删除该会话中过期类型的 checkpoint，`buildStream` 对这些类型改走全量 backfill（客户端时间线保持已填充，upsert 原地收敛）；未过期的类型照常增量。
+- 已知取舍（`docs/backlog.md` 已记录）：prune 掉的历史窗口内发生的服务端删除不再以 delete 事件到达该客户端（本地可能残留 ghost 行）。缓解方向：PruneHistory 保留 delete-action 行并补发，或客户端在 syncCompleteV1 后 prune。
+- 测试：`sync_http_test.go` 两个场景（stale-only、stale+fresh 混合）；`mysql_sync_store_integration_test.go` 重写 reset 段为断言 backfill 行为。**集成测试需要 `PC_TEST_DATABASE_URL` 指向 MySQL，本地未跑**，需在有 MySQL 的环境执行 `cd server && go test ./internal/immichcompat/ -run TestMySQLSyncStoreLifecycle`。
+
+本仓库（immich mobile）无需再改：协议消费方行为不变，诊断日志（`Remote sync session acks` / `SyncResetV1 received` / 按类型计数）即验收工具。
