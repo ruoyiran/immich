@@ -100,6 +100,16 @@ detect_flutter() {
 
 configure_flutter_defines() {
   local amap_web_key="${IMMICH_AMAP_WEB_KEY:-${PC_AMAP_KEY:-}}"
+  # Key source precedence: env var > mobile/.env.local (git-ignored, never committed)
+  if [[ -z "$amap_web_key" && -f "$mobile_root/.env.local" ]]; then
+    while IFS='=' read -r env_key env_value; do
+      [[ -z "${env_key// /}" || "${env_key:0:1}" == "#" ]] && continue
+      if [[ "$env_key" == "IMMICH_AMAP_WEB_KEY" && -n "$env_value" ]]; then
+        amap_web_key="$env_value"
+        break
+      fi
+    done < "$mobile_root/.env.local"
+  fi
   if [[ -n "$amap_web_key" ]]; then
     flutter_defines=("--dart-define=IMMICH_AMAP_WEB_KEY=$amap_web_key")
   fi
