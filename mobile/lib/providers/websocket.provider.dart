@@ -35,9 +35,19 @@ class WebsocketNotifier extends StateNotifier<WebsocketState> {
   );
   final List<dynamic> _batchedAssetUploadReady = [];
 
+  // Remote-change events arrive in bursts (bulk edits, ML updates, ...) and every
+  // syncRemote is a full /sync/stream round-trip, so coalesce them like the
+  // upload batches above: the first event fires immediately, the rest within the
+  // window collapse into a single sync.
+  final Debouncer _remoteChangeDebouncer = Debouncer(
+    interval: const Duration(seconds: 5),
+    maxWaitTime: const Duration(seconds: 10),
+  );
+
   @override
   void dispose() {
     _batchDebouncer.dispose();
+    _remoteChangeDebouncer.dispose();
     state.socket?.dispose();
     super.dispose();
   }
@@ -178,7 +188,16 @@ class WebsocketNotifier extends StateNotifier<WebsocketState> {
   }
 
   void _handleRemoteChange(dynamic _) {
-    unawaited(_ref.read(backgroundSyncProvider).syncRemote(enqueue: true));
+    requestRemoteSync();
+  }
+
+  /// Debounced entry point for remote-change websocket events. Each burst of
+  /// events produces one immediate sync plus at most one trailing sync.
+  @visibleForTesting
+  void requestRemoteSync() {
+    _remoteChangeDebouncer.run(() {
+      unawaited(_ref.read(backgroundSyncProvider).syncRemote(enqueue: true));
+    });
   }
 
   void _handleSyncAssetEditReadyV2(dynamic data) {

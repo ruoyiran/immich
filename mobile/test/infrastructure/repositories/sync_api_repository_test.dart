@@ -11,6 +11,7 @@ import 'package:immich_mobile/infrastructure/repositories/db.repository.dart';
 import 'package:immich_mobile/infrastructure/repositories/store.repository.dart';
 import 'package:immich_mobile/infrastructure/repositories/sync_api.repository.dart';
 import 'package:immich_mobile/utils/semver.dart';
+import 'package:logging/logging.dart';
 import 'package:mocktail/mocktail.dart';
 import 'package:openapi/api.dart';
 
@@ -392,4 +393,50 @@ void main() {
 
     expect(onDataCallCount, 0);
   });
+
+  test('streamChanges logs per-type event counts on completion', () async {
+    final logRecords = <LogRecord>[];
+    final previousLevel = Logger.root.level;
+    Logger.root.level = Level.ALL;
+    final subscription = Logger.root.onRecord.listen(logRecords.add);
+    addTearDown(() async {
+      await subscription.cancel();
+      Logger.root.level = previousLevel;
+    });
+
+    final streamChangesFuture = streamChanges(
+      (_, __, ___) async {},
+      const SemVer(major: 2, minor: 5, patch: 0),
+    );
+
+    await Future.delayed(const Duration(milliseconds: 50));
+    responseStreamController.add(
+      utf8.encode(
+        _createJsonLine(SyncEntityType.userDeleteV1.toString(), SyncUserDeleteV1(userId: 'user1').toJson(), 'ack1') +
+            _createJsonLine(SyncEntityType.userV1.toString(), _syncUserV1Json('user2'), 'ack2') +
+            _createJsonLine(SyncEntityType.userV1.toString(), _syncUserV1Json('user3'), 'ack3'),
+      ),
+    );
+    await responseStreamController.close();
+    await expectLater(streamChangesFuture, completes);
+
+    final completionMessage = logRecords
+        .where((record) => record.loggerName == 'SyncApiRepository' && record.message.contains('Remote sync completed'))
+        .map((record) => record.message)
+        .join('\n');
+    expect(completionMessage, contains('3 events in 1 batches'));
+    expect(completionMessage, contains('${SyncEntityType.userDeleteV1}=1'));
+    expect(completionMessage, contains('${SyncEntityType.userV1}=2'));
+  });
+}
+
+Map<String, dynamic> _syncUserV1Json(String id) {
+  return {
+    'id': id,
+    'name': 'User $id',
+    'email': '$id@example.com',
+    'hasProfileImage': false,
+    'deletedAt': null,
+    'profileChangedAt': '2025-01-01T00:00:00.000Z',
+  };
 }

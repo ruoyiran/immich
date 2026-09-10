@@ -19,6 +19,10 @@ class SyncApiRepository {
     return _api.syncApi.sendSyncAck(SyncAckSetDto(acks: data));
   }
 
+  Future<List<SyncAckDto>> getSyncAcks() async {
+    return await _api.syncApi.getSyncAck() ?? [];
+  }
+
   Future<void> deleteSyncAck(List<SyncEntityType> types) {
     return _api.syncApi.deleteSyncAck(SyncAckDeleteDto(types: Optional.present(types)));
   }
@@ -92,6 +96,7 @@ class SyncApiRepository {
     int nextBatchSize = initialBatchSize;
     int processedBatchCount = 0;
     int processedEventCount = 0;
+    final Map<SyncEntityType, int> eventCounts = {};
     bool receivedFirstByte = false;
 
     bool shouldAbort = false;
@@ -108,6 +113,9 @@ class SyncApiRepository {
       await onData(events, abort, reset);
       processedBatchCount++;
       processedEventCount += events.length;
+      for (final event in events) {
+        eventCounts.update(event.type, (count) => count + 1, ifAbsent: () => 1);
+      }
 
       if (processedBatchCount == 1) {
         _logger.info(
@@ -165,9 +173,10 @@ class SyncApiRepository {
       return Future.error(error, stack);
     }
     stopwatch.stop();
+    final typeSummary = eventCounts.entries.map((e) => '${e.key}=${e.value}').join(' ');
     _logger.info(
       "Remote sync completed in ${stopwatch.elapsedMilliseconds}ms "
-      "($processedEventCount events in $processedBatchCount batches)",
+      "($processedEventCount events in $processedBatchCount batches${typeSummary.isEmpty ? '' : '; $typeSummary'})",
     );
   }
 

@@ -129,7 +129,14 @@ class LocalSyncService {
         onlySecond: addAlbum,
       );
 
-      await _nativeSyncApi.checkpointSync();
+      // A cancelled full sync may have skipped albums mid-diff; checkpointing now
+      // would advance the native cursor past changes that were never applied to
+      // the DB, so the next sync must redo the full pass instead.
+      if (_isCancelled) {
+        _log.warning("Full device sync cancelled - skipping checkpoint so the next sync redoes the full pass");
+      } else {
+        await _nativeSyncApi.checkpointSync();
+      }
       stopwatch.stop();
       _log.info("Full device sync took - ${stopwatch.elapsedMilliseconds}ms");
     } on PlatformException catch (e, s) {

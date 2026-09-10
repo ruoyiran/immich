@@ -54,6 +54,21 @@ class SyncStreamService {
 
     final serverSemVer = SemVer(major: serverVersion.major, minor: serverVersion.minor, patch: serverVersion.patch_);
 
+    // Logged before the pre-sync migration tasks on purpose: they delete server-side
+    // acks for specific types, so a later log could not distinguish "the server
+    // forgot our acks" from "our migration deleted them". An empty ack set here
+    // on a warm install means the server is not durably persisting session acks.
+    try {
+      final acks = await _syncApiRepository.getSyncAcks();
+      final latestAckByType = <SyncEntityType, String>{
+        for (final ack in acks) ack.type: ack.ack,
+      };
+      final typeSummary = latestAckByType.entries.map((e) => '${e.key}=${e.value}').join(', ');
+      _logger.info("Remote sync session acks: ${latestAckByType.length} (types: $typeSummary)");
+    } catch (error, stack) {
+      _logger.warning("Failed to fetch sync session acks", error, stack);
+    }
+
     final value = Store.get(StoreKey.syncMigrationStatus, "[]");
     final migrations = (jsonDecode(value) as List).cast<String>();
     int previousLength = migrations.length;

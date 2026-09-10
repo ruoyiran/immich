@@ -38,4 +38,17 @@ void main() {
     await Future.delayed(const Duration(milliseconds: 300));
     expect(counter.count, 1);
   });
+
+  test('Executes immediately when maxWaitTime is set and no call was made before', () async {
+    final counter = _Counter();
+    final debouncer = Debouncer(
+      interval: const Duration(milliseconds: 100),
+      maxWaitTime: const Duration(seconds: 10),
+    );
+    debouncer.run(() => counter.increment());
+    // The first call fires immediately (no previous action time), so a burst of
+    // events still surfaces the first one without waiting for the interval.
+    await Future.delayed(Duration.zero);
+    expect(counter.count, 1);
+  });
 }

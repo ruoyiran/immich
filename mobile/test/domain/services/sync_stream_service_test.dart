@@ -15,6 +15,7 @@ import 'package:immich_mobile/infrastructure/repositories/store.repository.dart'
 import 'package:immich_mobile/infrastructure/repositories/sync_api.repository.dart';
 import 'package:immich_mobile/infrastructure/repositories/sync_stream.repository.dart';
 import 'package:immich_mobile/utils/semver.dart';
+import 'package:logging/logging.dart';
 import 'package:mocktail/mocktail.dart';
 import 'package:openapi/api.dart';
 
@@ -94,6 +95,7 @@ void main() {
 
     when(() => mockSyncApiRepo.ack(any())).thenAnswer((_) async => {});
     when(() => mockSyncApiRepo.deleteSyncAck(any())).thenAnswer((_) async => {});
+    when(() => mockSyncApiRepo.getSyncAcks()).thenAnswer((_) async => []);
 
     when(() => mockApi.serverInfoApi).thenReturn(mockServerApi);
     when(
@@ -146,6 +148,62 @@ void main() {
     await sut.sync();
     await handleEventsCallback(events, mockAbortCallbackWrapper.call, mockResetCallbackWrapper.call);
   }
+
+  group("SyncStreamService - diagnostics", () {
+    test("fetches and logs server acks before streaming", () async {
+      when(() => mockSyncApiRepo.getSyncAcks()).thenAnswer(
+        (_) async => [SyncAckDto(ack: 'AssetV2|74032|complete', type: SyncEntityType.assetV2)],
+      );
+
+      final logRecords = <LogRecord>[];
+      final previousLevel = Logger.root.level;
+      Logger.root.level = Level.ALL;
+      final subscription = Logger.root.onRecord.listen(logRecords.add);
+      addTearDown(() async {
+        await subscription.cancel();
+        Logger.root.level = previousLevel;
+      });
+
+      await sut.sync();
+
+      verify(
+        () => mockSyncApiRepo.streamChanges(
+          any(),
+          onReset: any(named: 'onReset'),
+          serverVersion: any(named: 'serverVersion'),
+          abortSignal: any(named: 'abortSignal'),
+        ),
+      ).called(1);
+      expect(
+        logRecords.any(
+          (record) =>
+              record.loggerName == 'SyncStreamService' &&
+              record.level == Level.INFO &&
+              record.message.contains('Remote sync session acks: 1') &&
+              record.message.contains('AssetV2=AssetV2|74032|complete'),
+        ),
+        isTrue,
+        reason: 'Expected the session ack state to be logged at info level, got: '
+            '${logRecords.map((r) => r.message)}',
+      );
+    });
+
+    test("continues syncing when fetching acks fails", () async {
+      when(() => mockSyncApiRepo.getSyncAcks()).thenThrow(Exception('network error'));
+
+      final result = await sut.sync();
+
+      expect(result, isTrue);
+      verify(
+        () => mockSyncApiRepo.streamChanges(
+          any(),
+          onReset: any(named: 'onReset'),
+          serverVersion: any(named: 'serverVersion'),
+          abortSignal: any(named: 'abortSignal'),
+        ),
+      ).called(1);
+    });
+  });
 
   group("SyncStreamService - _handleEvents", () {
     test("processes events and acks successfully when handlers succeed", () async {

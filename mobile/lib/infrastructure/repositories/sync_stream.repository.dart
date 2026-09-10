@@ -41,7 +41,10 @@ class SyncStreamRepository extends DriftDatabaseRepository {
   SyncStreamRepository(super.db) : _db = db;
 
   Future<void> reset() async {
-    _logger.fine("SyncResetV1 received. Resetting remote entities");
+    // Info level on purpose: this wipes every remote table and empties the
+    // timeline until the backfill re-populates it, so it must be visible at
+    // the default log level.
+    _logger.info("SyncResetV1 received. Resetting remote entities");
     try {
       await _db.exclusively(() async {
         // foreign_keys PRAGMA is no-op within transactions
