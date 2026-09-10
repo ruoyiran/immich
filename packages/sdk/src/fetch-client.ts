@@ -1150,6 +1150,8 @@ export type DuplicateResponseDto = {
     assets: AssetResponseDto[];
     /** Duplicate group ID */
     duplicateId: string;
+    /** Highest similarity score within the duplicate group */
+    maxSimilarity: number;
     /** Suggested asset IDs to keep based on file size and EXIF data */
     suggestedKeepAssetIds: string[];
 };

@@ -56,6 +56,7 @@ void main() {
       DuplicateGroup(
         id: 'group',
         captureDay: DateTime(2026, 9, 6),
+        maxSimilarity: 0.97,
         assets: [keeper, other],
         suggestedKeepIds: {'keeper'},
       ),
@@ -70,5 +71,37 @@ void main() {
     expect(repository.resolved.single.keepAssetIds, {'keeper'});
     expect(repository.resolved.single.trashAssetIds, {'other'});
     expect(notifier.state.value!.groups, isEmpty);
+  });
+
+  test('filters groups from 90 to 100 percent and bulk resolves visible selections', () async {
+    final repository = FakeDuplicateRepository([
+      DuplicateGroup(
+        id: 'lower',
+        captureDay: DateTime(2026, 9, 6),
+        maxSimilarity: 0.91,
+        assets: [remote('lower-keeper'), remote('lower-other')],
+        suggestedKeepIds: {'lower-keeper'},
+      ),
+      DuplicateGroup(
+        id: 'higher',
+        captureDay: DateTime(2026, 9, 6),
+        maxSimilarity: 0.98,
+        assets: [remote('higher-keeper'), remote('higher-other')],
+        suggestedKeepIds: {'higher-keeper'},
+      ),
+    ]);
+    final notifier = DuplicatesNotifier(repository);
+
+    await notifier.load();
+    expect(notifier.state.value!.visibleGroups.map((group) => group.id), ['lower', 'higher']);
+    expect(notifier.state.value!.selectedAssetCount, 2);
+
+    notifier.setMinimumSimilarity(0.95);
+    expect(notifier.state.value!.visibleGroups.map((group) => group.id), ['higher']);
+    expect(notifier.state.value!.selectedAssetCount, 1);
+
+    expect(await notifier.resolveAllSelected(), 1);
+    expect(repository.resolved.map((group) => group.groupId), ['higher']);
+    expect(notifier.state.value!.groups.map((group) => group.id), ['lower']);
   });
 }

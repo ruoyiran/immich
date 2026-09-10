@@ -46,7 +46,9 @@ test.describe('Duplicates utility', () => {
       return route.fulfill({
         status: 200,
         contentType: 'application/json',
-        json: [{ duplicateId: faker.string.uuid(), assets, suggestedKeepAssetIds: [assets[0].id] }],
+        json: [
+          { duplicateId: faker.string.uuid(), assets, maxSimilarity: 0.97, suggestedKeepAssetIds: [assets[0].id] },
+        ],
       });
     });
 

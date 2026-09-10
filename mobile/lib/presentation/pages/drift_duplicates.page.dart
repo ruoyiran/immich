@@ -14,33 +14,55 @@ import 'package:immich_mobile/routing/router.dart';
 import 'package:intl/intl.dart';
 
 @RoutePage()
-class DriftDuplicatesPage extends ConsumerWidget {
+class DriftDuplicatesPage extends ConsumerStatefulWidget {
   const DriftDuplicatesPage({super.key});
 
-  void _openAsset(
-    BuildContext context,
-    WidgetRef ref,
-    DuplicateGroup group,
-    BaseAsset asset,
-  ) {
+  @override
+  ConsumerState<DriftDuplicatesPage> createState() => _DriftDuplicatesPageState();
+}
+
+class _DriftDuplicatesPageState extends ConsumerState<DriftDuplicatesPage> {
+  bool _isResolvingAll = false;
+
+  void _openAsset(DuplicateGroup group, BaseAsset asset) {
     final index = group.assets.indexWhere((item) => item.id == asset.id);
-    if (index < 0) return;
+    if (index < 0) {
+      return;
+    }
 
     AssetViewer.setAsset(ref, asset);
     unawaited(
       context.pushRoute(
         AssetViewerRoute(
           initialIndex: index,
-          timelineService: ref
-              .read(timelineFactoryProvider)
-              .fromAssets(group.assets, TimelineOrigin.search),
+          timelineService: ref.read(timelineFactoryProvider).fromAssets(group.assets, TimelineOrigin.search),
         ),
       ),
     );
   }
 
+  Future<void> _resolveAllSelected(int selectedCount) async {
+    setState(() => _isResolvingAll = true);
+    try {
+      final resolvedCount = await ref.read(duplicatesProvider.notifier).resolveAllSelected();
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('已将 $resolvedCount 张照片移入回收站')));
+    } catch (_) {
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('无法删除所选的 $selectedCount 张照片，请重试')));
+    } finally {
+      if (mounted) {
+        setState(() => _isResolvingAll = false);
+      }
+    }
+  }
+
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  Widget build(BuildContext context) {
     final duplicates = ref.watch(duplicatesProvider);
 
     return Scaffold(
@@ -57,10 +79,7 @@ class DriftDuplicatesPage extends ConsumerWidget {
                 const SizedBox(height: 12),
                 const Text('无法加载相似照片'),
                 const SizedBox(height: 12),
-                FilledButton(
-                  onPressed: () => ref.invalidate(duplicatesProvider),
-                  child: const Text('重试'),
-                ),
+                FilledButton(onPressed: () => ref.invalidate(duplicatesProvider), child: const Text('重试')),
               ],
             ),
           ),
@@ -68,56 +87,129 @@ class DriftDuplicatesPage extends ConsumerWidget {
         data: (data) {
           if (data.groups.isEmpty) {
             return const Center(
+              key: Key('duplicates-empty-state'),
               child: Column(
                 mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(Icons.auto_awesome, size: 56),
-                  SizedBox(height: 16),
-                  Text('没有需要清理的相似照片'),
-                ],
+                children: [Icon(Icons.auto_awesome, size: 56), SizedBox(height: 16), Text('没有需要清理的相似照片')],
               ),
             );
           }
 
+          final groups = data.visibleGroups;
+          final selectedCount = data.selectedAssetCount;
+          final minimumSimilarity = (data.minimumSimilarity * 100).round();
+
           return CustomScrollView(
             key: const PageStorageKey<String>('duplicates-scroll-list'),
             slivers: [
-              SliverPadding(
-                padding: const EdgeInsets.fromLTRB(16, 12, 16, 32),
-                sliver: SliverList.builder(
-                  itemCount: data.groups.length,
-                  itemBuilder: (context, index) {
-                    final group = data.groups[index];
-                    return Padding(
-                      padding: const EdgeInsets.only(bottom: 16),
-                      child: DuplicateGroupCard(
-                        key: ValueKey('duplicate-group-${group.id}'),
-                        group: group,
-                        trashIds: data.trashIdsFor(group.id),
-                        onOpenAsset: (asset) =>
-                            _openAsset(context, ref, group, asset),
-                        onToggleAsset: (assetId) {
-                          final trashIds = {...data.trashIdsFor(group.id)};
-                          if (trashIds.contains(assetId)) {
-                            trashIds.remove(assetId);
-                          } else if (trashIds.length < group.assets.length - 1) {
-                            trashIds.add(assetId);
-                          }
-                          ref
-                              .read(duplicatesProvider.notifier)
-                              .setTrashIdsForGroup(group.id, trashIds);
-                        },
-                        onResolve: () => ref
-                            .read(duplicatesProvider.notifier)
-                            .resolveGroup(group.id),
-                        onDismiss: () => ref
-                            .read(duplicatesProvider.notifier)
-                            .dismissGroup(group.id),
-                      ),
-                    );
-                  },
+              SliverToBoxAdapter(
+                child: Card(
+                  margin: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+                  elevation: 0,
+                  child: Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        Row(
+                          children: [
+                            Expanded(
+                              child: Text(
+                                '${groups.length} 组相似照片',
+                                key: const Key('duplicates-group-count'),
+                                style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),
+                              ),
+                            ),
+                            Text(
+                              '已选 $selectedCount 张',
+                              key: const Key('duplicates-selected-count'),
+                              style: Theme.of(
+                                context,
+                              ).textTheme.bodyMedium?.copyWith(color: Theme.of(context).colorScheme.onSurfaceVariant),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 12),
+                        Row(
+                          children: [
+                            const Expanded(child: Text('最低相似度')),
+                            Text('$minimumSimilarity%', style: Theme.of(context).textTheme.labelLarge),
+                          ],
+                        ),
+                        Slider(
+                          key: const Key('duplicates-similarity-slider'),
+                          min: 90,
+                          max: 100,
+                          divisions: 10,
+                          label: '$minimumSimilarity%',
+                          value: minimumSimilarity.toDouble(),
+                          onChanged: _isResolvingAll
+                              ? null
+                              : (value) => ref.read(duplicatesProvider.notifier).setMinimumSimilarity(value / 100),
+                        ),
+                        Text(
+                          '只比较同一天拍摄的照片',
+                          style: Theme.of(
+                            context,
+                          ).textTheme.bodySmall?.copyWith(color: Theme.of(context).colorScheme.onSurfaceVariant),
+                        ),
+                        const SizedBox(height: 12),
+                        FilledButton.icon(
+                          key: const Key('duplicates-resolve-all'),
+                          onPressed: selectedCount == 0 || _isResolvingAll
+                              ? null
+                              : () => unawaited(_resolveAllSelected(selectedCount)),
+                          icon: _isResolvingAll
+                              ? const SizedBox.square(dimension: 18, child: CircularProgressIndicator(strokeWidth: 2))
+                              : const Icon(Icons.delete_sweep_outlined),
+                          label: Text('全部移入回收站 ($selectedCount)'),
+                        ),
+                      ],
+                    ),
+                  ),
                 ),
               ),
+              if (groups.isEmpty)
+                const SliverFillRemaining(
+                  hasScrollBody: false,
+                  child: Center(key: Key('duplicates-filter-empty-state'), child: Text('当前相似度下没有照片组')),
+                ),
+              if (groups.isNotEmpty)
+                SliverPadding(
+                  padding: const EdgeInsets.fromLTRB(16, 12, 16, 32),
+                  sliver: SliverList.builder(
+                    itemCount: groups.length,
+                    itemBuilder: (context, index) {
+                      final group = groups[index];
+                      return Padding(
+                        padding: const EdgeInsets.only(bottom: 16),
+                        child: DuplicateGroupCard(
+                          key: ValueKey('duplicate-group-${group.id}'),
+                          group: group,
+                          trashIds: data.trashIdsFor(group.id),
+                          onOpenAsset: (asset) => _openAsset(group, asset),
+                          onToggleAsset: _isResolvingAll
+                              ? null
+                              : (assetId) {
+                                  final trashIds = {...data.trashIdsFor(group.id)};
+                                  if (trashIds.contains(assetId)) {
+                                    trashIds.remove(assetId);
+                                  } else if (trashIds.length < group.assets.length - 1) {
+                                    trashIds.add(assetId);
+                                  }
+                                  ref.read(duplicatesProvider.notifier).setTrashIdsForGroup(group.id, trashIds);
+                                },
+                          onResolve: _isResolvingAll
+                              ? null
+                              : () => ref.read(duplicatesProvider.notifier).resolveGroup(group.id),
+                          onDismiss: _isResolvingAll
+                              ? null
+                              : () => ref.read(duplicatesProvider.notifier).dismissGroup(group.id),
+                        ),
+                      );
+                    },
+                  ),
+                ),
             ],
           );
         },
@@ -147,9 +239,7 @@ class DuplicateGroupCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final date = group.assets.isEmpty
-        ? ''
-        : DateFormat.yMMMd().format(group.assets.first.createdAt.toLocal());
+    final date = group.assets.isEmpty ? '' : DateFormat.yMMMd().format(group.assets.first.createdAt.toLocal());
 
     return Card(
       clipBehavior: Clip.antiAlias,
@@ -167,18 +257,26 @@ class DuplicateGroupCard extends StatelessWidget {
             Row(
               children: [
                 Expanded(
+                  child: Text(date, style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700)),
+                ),
+                Container(
+                  margin: const EdgeInsets.only(right: 8),
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: theme.colorScheme.secondaryContainer,
+                    borderRadius: BorderRadius.circular(99),
+                  ),
                   child: Text(
-                    date,
-                    style: theme.textTheme.titleMedium?.copyWith(
+                    '${(group.maxSimilarity * 100).toStringAsFixed(1)}%',
+                    style: theme.textTheme.labelMedium?.copyWith(
+                      color: theme.colorScheme.onSecondaryContainer,
                       fontWeight: FontWeight.w700,
                     ),
                   ),
                 ),
                 Text(
                   '${group.assets.length} 张',
-                  style: theme.textTheme.bodyMedium?.copyWith(
-                    color: theme.colorScheme.onSurfaceVariant,
-                  ),
+                  style: theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant),
                 ),
               ],
             ),
@@ -220,9 +318,7 @@ class DuplicateGroupCard extends StatelessWidget {
                               shape: const CircleBorder(),
                               child: Checkbox(
                                 value: selected,
-                                onChanged: onToggleAsset == null
-                                    ? null
-                                    : (_) => onToggleAsset!(asset.id),
+                                onChanged: onToggleAsset == null ? null : (_) => onToggleAsset!(asset.id),
                                 visualDensity: VisualDensity.compact,
                               ),
                             ),
@@ -237,15 +333,11 @@ class DuplicateGroupCard extends StatelessWidget {
                                   borderRadius: BorderRadius.circular(99),
                                 ),
                                 child: Padding(
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 9,
-                                    vertical: 4,
-                                  ),
+                                  padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
                                   child: Text(
                                     '保留',
                                     style: theme.textTheme.labelMedium?.copyWith(
-                                      color: theme
-                                          .colorScheme.onPrimaryContainer,
+                                      color: theme.colorScheme.onPrimaryContainer,
                                       fontWeight: FontWeight.w700,
                                     ),
                                   ),
@@ -256,12 +348,7 @@ class DuplicateGroupCard extends StatelessWidget {
                       ),
                     ),
                     const SizedBox(height: 6),
-                    Text(
-                      asset.name,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: theme.textTheme.bodySmall,
-                    ),
+                    Text(asset.name, maxLines: 1, overflow: TextOverflow.ellipsis, style: theme.textTheme.bodySmall),
                   ],
                 );
               },
@@ -271,9 +358,7 @@ class DuplicateGroupCard extends StatelessWidget {
               children: [
                 Expanded(
                   child: OutlinedButton.icon(
-                    onPressed: onDismiss == null
-                        ? null
-                        : () => unawaited(onDismiss!()),
+                    onPressed: onDismiss == null ? null : () => unawaited(onDismiss!()),
                     icon: const Icon(Icons.check_circle_outline),
                     label: const Text('全部保留'),
                   ),
@@ -281,9 +366,7 @@ class DuplicateGroupCard extends StatelessWidget {
                 const SizedBox(width: 8),
                 Expanded(
                   child: FilledButton.icon(
-                    onPressed: trashIds.isEmpty || onResolve == null
-                        ? null
-                        : () => unawaited(onResolve!()),
+                    onPressed: trashIds.isEmpty || onResolve == null ? null : () => unawaited(onResolve!()),
                     icon: const Icon(Icons.delete_outline),
                     label: Text('移入回收站 (${trashIds.length})'),
                   ),

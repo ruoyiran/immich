@@ -4,12 +4,14 @@ class DuplicateGroup {
   const DuplicateGroup({
     required this.id,
     required this.captureDay,
+    required this.maxSimilarity,
     required this.assets,
     required this.suggestedKeepIds,
   });
 
   final String id;
   final DateTime captureDay;
+  final double maxSimilarity;
   final List<RemoteAssetExif> assets;
   final Set<String> suggestedKeepIds;
 }

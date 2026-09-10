@@ -39,6 +39,7 @@ void main() {
       (_) async => [
         DuplicateResponseDto(
           duplicateId: '11111111-1111-4111-8111-111111111111',
+          maxSimilarity: 0.91,
           assets: [
             asset('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', older),
             asset('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', older),
@@ -47,6 +48,7 @@ void main() {
         ),
         DuplicateResponseDto(
           duplicateId: '22222222-2222-4222-8222-222222222222',
+          maxSimilarity: 0.98,
           assets: [
             asset('cccccccc-cccc-4ccc-8ccc-cccccccccccc', newer),
             asset('dddddddd-dddd-4ddd-8ddd-dddddddddddd', newer),
@@ -63,6 +65,7 @@ void main() {
       '11111111-1111-4111-8111-111111111111',
     ]);
     expect(groups.first.captureDay, DateTime(2026, 9, 6));
+    expect(groups.first.maxSimilarity, 0.98);
     expect(groups.first.suggestedKeepIds, {'cccccccc-cccc-4ccc-8ccc-cccccccccccc'});
   });
 }

@@ -5,13 +5,25 @@ import 'package:immich_mobile/domain/models/duplicate_group.model.dart';
 import 'package:immich_mobile/repositories/duplicate_api.repository.dart';
 
 class DuplicatesState {
-  const DuplicatesState({required this.groups, required this.currentIndex, required this.trashSelections});
+  const DuplicatesState({
+    required this.groups,
+    required this.currentIndex,
+    required this.trashSelections,
+    this.minimumSimilarity = 0.9,
+  });
 
   final List<DuplicateGroup> groups;
   final int currentIndex;
   final Map<String, Set<String>> trashSelections;
+  final double minimumSimilarity;
 
   DuplicateGroup? get currentGroup => groups.isEmpty ? null : groups[currentIndex];
+
+  List<DuplicateGroup> get visibleGroups =>
+      groups.where((group) => group.maxSimilarity + 0.0000001 >= minimumSimilarity).toList(growable: false);
+
+  int get selectedAssetCount =>
+      visibleGroups.fold(0, (count, group) => count + (trashSelections[group.id]?.length ?? 0));
 
   Set<String> trashIdsFor(String groupId) => Set.unmodifiable(trashSelections[groupId] ?? const <String>{});
 
@@ -19,10 +31,12 @@ class DuplicatesState {
     List<DuplicateGroup>? groups,
     int? currentIndex,
     Map<String, Set<String>>? trashSelections,
+    double? minimumSimilarity,
   }) => DuplicatesState(
     groups: groups ?? this.groups,
     currentIndex: currentIndex ?? this.currentIndex,
     trashSelections: trashSelections ?? this.trashSelections,
+    minimumSimilarity: minimumSimilarity ?? this.minimumSimilarity,
   );
 }
 
@@ -76,14 +90,60 @@ class DuplicatesNotifier extends StateNotifier<AsyncValue<DuplicatesState>> {
       return;
     }
 
-    state = AsyncData(
-      current.copyWith(
-        trashSelections: {
-          ...current.trashSelections,
-          groupId: trashIds,
-        },
-      ),
-    );
+    state = AsyncData(current.copyWith(trashSelections: {...current.trashSelections, groupId: trashIds}));
+  }
+
+  void setMinimumSimilarity(double value) {
+    final current = state.valueOrNull;
+    if (current == null) {
+      return;
+    }
+    final percentage = (value.clamp(0.9, 1.0) * 100).round();
+    state = AsyncData(current.copyWith(minimumSimilarity: percentage / 100, currentIndex: 0));
+  }
+
+  Future<int> resolveAllSelected() async {
+    final current = state.valueOrNull;
+    if (current == null) {
+      return 0;
+    }
+
+    final selectedCounts = <String, int>{};
+    final resolutions = <DuplicateResolution>[];
+    for (final group in current.visibleGroups) {
+      final trash = current.trashIdsFor(group.id);
+      if (trash.isEmpty) {
+        continue;
+      }
+      selectedCounts[group.id] = trash.length;
+      resolutions.add(
+        DuplicateResolution(
+          groupId: group.id,
+          keepAssetIds: group.assets.map((asset) => asset.id).where((id) => !trash.contains(id)).toSet(),
+          trashAssetIds: trash,
+        ),
+      );
+    }
+    if (resolutions.isEmpty) {
+      return 0;
+    }
+
+    final response = await _repository.resolve(resolutions);
+    final responseById = {for (final result in response) result.id: result};
+    final successfulIds = resolutions
+        .where((resolution) => responseById[resolution.groupId]?.success == true)
+        .map((resolution) => resolution.groupId)
+        .toSet();
+    if (successfulIds.isNotEmpty) {
+      _removeGroups(state.valueOrNull ?? current, successfulIds);
+    }
+
+    final failed = resolutions.where((resolution) => !successfulIds.contains(resolution.groupId)).toList();
+    if (failed.isNotEmpty) {
+      final message = responseById[failed.first.groupId]?.errorMessage.orElse(null);
+      throw StateError(message ?? 'Failed to resolve selected duplicate groups');
+    }
+    return successfulIds.fold<int>(0, (count, id) => count + selectedCounts[id]!);
   }
 
   Future<void> resolveGroup(String groupId) async {
@@ -131,7 +191,7 @@ class DuplicatesNotifier extends StateNotifier<AsyncValue<DuplicatesState>> {
       final message = response.isEmpty ? null : response.first.errorMessage.orElse(null);
       throw StateError(message ?? 'Failed to resolve duplicate group');
     }
-    _removeGroup(current, group.id);
+    _removeGroups(current, {group.id});
   }
 
   Future<void> dismissCurrent() async {
@@ -141,7 +201,7 @@ class DuplicatesNotifier extends StateNotifier<AsyncValue<DuplicatesState>> {
       return;
     }
     await _repository.dismissGroups([group.id]);
-    _removeGroup(current, group.id);
+    _removeGroups(current, {group.id});
   }
 
   void previous() {
@@ -160,9 +220,10 @@ class DuplicatesNotifier extends StateNotifier<AsyncValue<DuplicatesState>> {
     state = AsyncData(current.copyWith(currentIndex: current.currentIndex + 1));
   }
 
-  void _removeGroup(DuplicatesState current, String groupId) {
-    final groups = current.groups.where((group) => group.id != groupId).toList(growable: false);
-    final selections = _copySelections(current.trashSelections)..remove(groupId);
+  void _removeGroups(DuplicatesState current, Set<String> groupIds) {
+    final groups = current.groups.where((group) => !groupIds.contains(group.id)).toList(growable: false);
+    final selections = _copySelections(current.trashSelections)
+      ..removeWhere((groupId, _) => groupIds.contains(groupId));
     final index = groups.isEmpty || current.currentIndex >= groups.length ? 0 : current.currentIndex;
     state = AsyncData(current.copyWith(groups: groups, currentIndex: index, trashSelections: selections));
   }

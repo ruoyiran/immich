@@ -18889,6 +18889,12 @@
             "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$",
             "type": "string"
           },
+          "maxSimilarity": {
+            "description": "Highest similarity score within the duplicate group",
+            "maximum": 1,
+            "minimum": 0.9,
+            "type": "number"
+          },
           "suggestedKeepAssetIds": {
             "description": "Suggested asset IDs to keep based on file size and EXIF data",
             "items": {
@@ -18902,6 +18908,7 @@
         "required": [
           "assets",
           "duplicateId",
+          "maxSimilarity",
           "suggestedKeepAssetIds"
         ],
         "type": "object"

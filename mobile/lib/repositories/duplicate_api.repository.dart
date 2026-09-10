@@ -27,7 +27,11 @@ class DuplicateApiRepository implements DuplicateRepository {
     final groups = response.map(_toDomain).toList(growable: false)
       ..sort((left, right) {
         final day = right.captureDay.compareTo(left.captureDay);
-        return day != 0 ? day : left.id.compareTo(right.id);
+        if (day != 0) {
+          return day;
+        }
+        final similarity = right.maxSimilarity.compareTo(left.maxSimilarity);
+        return similarity != 0 ? similarity : left.id.compareTo(right.id);
       });
     return groups;
   }
@@ -66,9 +70,14 @@ class DuplicateApiRepository implements DuplicateRepository {
     if (keepIDs.isEmpty || !memberIDs.containsAll(keepIDs)) {
       throw const FormatException('Duplicate group has invalid suggested keep assets');
     }
+    final maxSimilarity = dto.maxSimilarity.toDouble();
+    if (!maxSimilarity.isFinite || maxSimilarity < 0.9 || maxSimilarity > 1) {
+      throw const FormatException('Duplicate group has invalid similarity');
+    }
     return DuplicateGroup(
       id: dto.duplicateId,
       captureDay: firstDay,
+      maxSimilarity: maxSimilarity,
       assets: dto.assets.map((asset) => asset.toDtoWithExif()).toList(growable: false),
       suggestedKeepIds: keepIDs,
     );
