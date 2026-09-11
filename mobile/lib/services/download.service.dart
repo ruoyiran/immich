@@ -7,18 +7,26 @@ import 'package:background_downloader/background_downloader.dart';
 import 'package:collection/collection.dart';
 import 'package:flutter/services.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:immich_mobile/domain/models/asset/base_asset.model.dart';
+import 'package:immich_mobile/domain/models/original_media.model.dart';
 import 'package:immich_mobile/models/download/livephotos_medatada.model.dart';
 import 'package:immich_mobile/repositories/download.repository.dart';
 import 'package:immich_mobile/repositories/file_media.repository.dart';
+import 'package:immich_mobile/repositories/original_media_cache.repository.dart';
 import 'package:logging/logging.dart';
 
 final downloadServiceProvider = Provider(
-  (ref) => DownloadService(ref.watch(fileMediaRepositoryProvider), ref.watch(downloadRepositoryProvider)),
+  (ref) => DownloadService(
+    ref.watch(fileMediaRepositoryProvider),
+    ref.watch(downloadRepositoryProvider),
+    ref.watch(originalMediaCacheRepositoryProvider),
+  ),
 );
 
 class DownloadService {
   final DownloadRepository _downloadRepository;
   final FileMediaRepository _fileMediaRepository;
+  final OriginalMediaCacheRepository _originalMediaCacheRepository;
   final Logger _log = Logger("DownloadService");
   void Function(TaskStatusUpdate)? onImageDownloadStatus;
   void Function(TaskStatusUpdate)? onVideoDownloadStatus;
@@ -27,13 +35,69 @@ class DownloadService {
   /// Active Live Photo IDs undergoing saving
   final Set<String> _savingLivePhotoIds = {};
 
-  DownloadService(this._fileMediaRepository, this._downloadRepository) {
+  DownloadService(this._fileMediaRepository, this._downloadRepository, this._originalMediaCacheRepository) {
     _downloadRepository.onImageDownloadStatus = _onImageDownloadCallback;
     _downloadRepository.onVideoDownloadStatus = _onVideoDownloadCallback;
     _downloadRepository.onTaskProgress = _onTaskProgressCallback;
     _downloadRepository.onLivePhotoRecordComplete = _onLivePhotoRecordComplete;
 
     unawaited(_savePreviouslyCompletedLivePhotos());
+  }
+
+  Future<List<bool>> downloadAllAssets(List<RemoteAsset> assets) async {
+    final results = List<bool?>.filled(assets.length, null);
+    final missing = <RemoteAsset>[];
+    final missingIndexes = <int>[];
+
+    for (var index = 0; index < assets.length; index++) {
+      final asset = assets[index];
+      if (!asset.isRemoteOnly) {
+        results[index] = false;
+        continue;
+      }
+
+      final saved = await _saveCachedAsset(asset);
+      if (saved == null) {
+        missing.add(asset);
+        missingIndexes.add(index);
+      } else {
+        results[index] = saved;
+      }
+    }
+
+    if (missing.isNotEmpty) {
+      final queued = await _downloadRepository.downloadAllAssets(missing);
+      for (var index = 0; index < missingIndexes.length; index++) {
+        results[missingIndexes[index]] = index < queued.length ? queued[index] : false;
+      }
+    }
+
+    return results.map((result) => result ?? false).toList(growable: false);
+  }
+
+  Future<bool?> _saveCachedAsset(RemoteAsset asset) async {
+    // Android downloads a server-generated Motion HEIC, while iOS requires both
+    // Live Photo components. A single cached component is not a safe substitute.
+    if (asset.isMotionPhoto) {
+      return null;
+    }
+
+    final type = asset.isVideo ? OriginalMediaType.video : OriginalMediaType.image;
+    try {
+      final file = await _originalMediaCacheRepository.get(asset, type);
+      if (file == null) {
+        return null;
+      }
+
+      final relativePath = Platform.isAndroid ? 'DCIM/Immich' : null;
+      final saved = asset.isVideo
+          ? await _fileMediaRepository.saveVideo(file, title: asset.name, relativePath: relativePath)
+          : await _fileMediaRepository.saveImageWithFile(file.path, title: asset.name, relativePath: relativePath);
+      return saved == null ? null : true;
+    } catch (error, stack) {
+      _log.severe('Error saving cached original media', error, stack);
+      return null;
+    }
   }
 
   Future<void> _savePreviouslyCompletedLivePhotos() async {

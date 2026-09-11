@@ -23,6 +23,13 @@ class VideoPlayerState {
   }
 }
 
+typedef VideoPlaybackRestorePlan = ({Duration position, bool shouldPlay});
+
+VideoPlaybackRestorePlan videoPlaybackRestorePlan(VideoPlayerState state) => (
+  position: state.position,
+  shouldPlay: state.status == VideoPlaybackStatus.playing || state.status == VideoPlaybackStatus.buffering,
+);
+
 const _defaultState = VideoPlayerState(
   position: Duration.zero,
   duration: Duration.zero,
@@ -52,7 +59,11 @@ class VideoPlayerNotifier extends StateNotifier<VideoPlayerState> {
   void dispose() {
     _bufferingTimer?.cancel();
     _seekTimer?.cancel();
-    unawaited(WakelockPlus.disable());
+    unawaited(
+      WakelockPlus.disable().catchError((error, stack) {
+        _log.warning('Error disabling wakelock', error, stack);
+      }),
+    );
     _controller = null;
 
     super.dispose();
@@ -62,12 +73,19 @@ class VideoPlayerNotifier extends StateNotifier<VideoPlayerState> {
     _controller = controller;
   }
 
-  Future<void> load(VideoSource source) async {
+  Future<bool> load(VideoSource source) async {
+    final controller = _controller;
+    if (controller == null) {
+      return false;
+    }
     _startBufferingTimer();
     try {
-      await _controller?.loadVideoSource(source);
+      await controller.loadVideoSource(source);
+      return true;
     } catch (e) {
+      _bufferingTimer?.cancel();
       _log.severe('Error loading video source: $e');
+      return false;
     }
   }
 

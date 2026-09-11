@@ -7,7 +7,7 @@ import 'package:immich_mobile/domain/models/asset/base_asset.model.dart';
 import 'package:immich_mobile/generated/translations.g.dart';
 import 'package:immich_mobile/presentation/actions/action.dart';
 import 'package:immich_mobile/providers/background_sync.provider.dart';
-import 'package:immich_mobile/repositories/download.repository.dart';
+import 'package:immich_mobile/services/download.service.dart';
 import 'package:immich_mobile/utils/error_handler.dart';
 
 final _stateProvider = Provider.family.autoDispose<List<RemoteAsset>?, ActionSource>((ref, source) {
@@ -31,7 +31,7 @@ class DownloadAction extends AssetActionBuilder {
 
   Future<void> _download(WidgetRef ref, List<RemoteAsset> assets) async {
     final backgroundSync = ref.read(backgroundSyncProvider);
-    final downloads = ref.read(downloadRepositoryProvider);
+    final downloads = ref.read(downloadServiceProvider);
 
     try {
       await downloads.downloadAllAssets(assets);

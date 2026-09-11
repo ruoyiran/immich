@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:auto_route/auto_route.dart';
@@ -7,6 +8,7 @@ import 'package:flutter/material.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:immich_mobile/domain/models/asset/base_asset.model.dart';
 import 'package:immich_mobile/domain/models/events.model.dart';
+import 'package:immich_mobile/domain/models/original_media.model.dart';
 import 'package:immich_mobile/domain/services/timeline.service.dart';
 import 'package:immich_mobile/domain/utils/event_stream.dart';
 import 'package:immich_mobile/extensions/build_context_extensions.dart';
@@ -21,9 +23,13 @@ import 'package:immich_mobile/presentation/widgets/images/image_provider.dart';
 import 'package:immich_mobile/presentation/widgets/images/thumbnail.widget.dart';
 import 'package:immich_mobile/providers/asset_viewer/asset_viewer.provider.dart';
 import 'package:immich_mobile/providers/asset_viewer/is_motion_video_playing.provider.dart';
+import 'package:immich_mobile/providers/infrastructure/asset_viewer/asset.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/settings.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/timeline.provider.dart';
 import 'package:immich_mobile/providers/view_intent/view_intent_file_path.provider.dart';
+import 'package:immich_mobile/repositories/original_media_cache.repository.dart';
+import 'package:immich_mobile/utils/bytes_units.dart';
+import 'package:immich_mobile/utils/error_handler.dart';
 import 'package:immich_mobile/widgets/common/immich_loading_indicator.dart';
 import 'package:immich_mobile/widgets/photo_view/photo_view.dart';
 
@@ -51,7 +57,10 @@ class _AssetPageState extends ConsumerState<AssetPage> {
 
   bool _showingDetails = false;
   bool _isZoomed = false;
-  final Set<String> _originalRequestedAssetIds = {};
+  final Map<String, File> _cachedOriginalFiles = {};
+  final Map<String, OriginalMediaDownloadProgress> _originalDownloadProgress = {};
+  final Set<String> _loadingOriginalFiles = {};
+  final Set<String> _uncachedOriginalRequestedFiles = {};
 
   final _scrollController = SnapScrollController();
   double _snapOffset = 0.0;
@@ -329,6 +338,66 @@ class _AssetPageState extends ConsumerState<AssetPage> {
     _listenForScaleBoundaries(controller);
   }
 
+  Future<void> _cacheOriginal(RemoteAsset asset, OriginalMediaType type) async {
+    final repository = ref.read(originalMediaCacheRepositoryProvider);
+    final key = repository.cacheKey(asset, type);
+    if (!_loadingOriginalFiles.add(key)) {
+      return;
+    }
+    setState(() => _originalDownloadProgress[key] = (downloadedBytes: 0, totalBytes: null));
+
+    try {
+      final file = await repository.getOrDownload(
+        asset,
+        type,
+        onProgress: (progress) {
+          if (!mounted) {
+            return;
+          }
+          final previous = _originalDownloadProgress[key];
+          final previousPercent = _progressPercent(previous);
+          final nextPercent = _progressPercent(progress);
+          if (previous?.totalBytes != progress.totalBytes || previousPercent != nextPercent) {
+            setState(() => _originalDownloadProgress[key] = progress);
+          }
+        },
+      );
+      if (type == OriginalMediaType.image && mounted) {
+        await precacheImage(FileImage(file), context);
+      }
+      if (mounted) {
+        setState(() => _cachedOriginalFiles[key] = file);
+      }
+    } on OriginalMediaCacheClearedException {
+      // Clearing the cache is deliberate; do not immediately start an
+      // uncached replacement request from a viewer that is still mounted.
+    } on OriginalMediaCacheLimitException {
+      if (mounted) {
+        setState(() => _uncachedOriginalRequestedFiles.add(key));
+      }
+    } catch (error, stack) {
+      handleError(error, stack: stack, description: 'Failed to cache original media');
+      if (mounted) {
+        setState(() => _uncachedOriginalRequestedFiles.add(key));
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _loadingOriginalFiles.remove(key);
+          _originalDownloadProgress.remove(key);
+        });
+      }
+    }
+  }
+
+  int? _progressPercent(OriginalMediaDownloadProgress? progress) {
+    final totalBytes = progress?.totalBytes;
+    if (progress == null || totalBytes == null || totalBytes <= 0) {
+      return null;
+    }
+    return (progress.downloadedBytes / totalBytes * 100).clamp(0, 100).round();
+  }
+
   Widget _buildPhotoView({
     required BaseAsset asset,
     required PhotoViewHeroAttributes? heroAttributes,
@@ -343,13 +412,13 @@ class _AssetPageState extends ConsumerState<AssetPage> {
       asset,
       size: size,
       forceOriginal: forceOriginal,
-      localFilePath: localFilePath,
+      localFilePath: asset.isImage && !isPlayingMotionVideo ? localFilePath : null,
       remoteThumbnailSize: remoteThumbnailSize,
     );
 
     if (asset.isImage && !isPlayingMotionVideo) {
       return PhotoView(
-        key: Key('${asset.heroTag}:$forceOriginal'),
+        key: Key(originalMediaViewerKey(asset, forceOriginal: forceOriginal)),
         index: widget.index,
         imageProvider: imageProvider,
         heroAttributes: heroAttributes,
@@ -376,7 +445,7 @@ class _AssetPageState extends ConsumerState<AssetPage> {
     }
 
     return PhotoView.customChild(
-      key: Key('${asset.heroTag}:$forceOriginal'),
+      key: Key(originalMediaViewerKey(asset, forceOriginal: forceOriginal)),
       childSize: asset.width != null && asset.height != null
           ? Size(asset.width!.toDouble(), asset.height!.toDouble())
           : null,
@@ -396,7 +465,7 @@ class _AssetPageState extends ConsumerState<AssetPage> {
       onPageBuild: _onPageBuild,
       enablePanAlways: true,
       child: NativeVideoViewer(
-        key: _NativeVideoViewerKey('${asset.heroTag}:$forceOriginal'),
+        key: _NativeVideoViewerKey(asset.heroTag),
         asset: asset,
         localFilePath: localFilePath,
         isCurrent: isCurrent,
@@ -448,13 +517,40 @@ class _AssetPageState extends ConsumerState<AssetPage> {
     }
 
     final viewIntentFilePath = timelineOrigin == TimelineOrigin.deepLink ? ref.watch(viewIntentFilePathProvider) : null;
-    final forceOriginal = _originalRequestedAssetIds.contains(displayAsset.id);
+    final originalMediaType = originalMediaTypeFor(displayAsset, isPlayingMotionVideo: isPlayingMotionVideo);
+    final OriginalMediaCacheRequest? cacheRequest = displayAsset is RemoteAsset && originalMediaType != null
+        ? (asset: displayAsset, type: originalMediaType)
+        : null;
+    final cacheStateKey = cacheRequest == null
+        ? null
+        : ref.read(originalMediaCacheRepositoryProvider).cacheKey(cacheRequest.asset, cacheRequest.type);
+    final discoveredOriginal = cacheRequest == null
+        ? null
+        : _cachedOriginalFiles[cacheStateKey] ?? ref.watch(originalMediaCacheFileProvider(cacheRequest)).valueOrNull;
+    final cachedOriginal = discoveredOriginal != null && discoveredOriginal.existsSync() ? discoveredOriginal : null;
+    final directFilePath = cachedOriginal?.path ?? viewIntentFilePath;
+    final forceOriginal =
+        cachedOriginal != null || (cacheStateKey != null && _uncachedOriginalRequestedFiles.contains(cacheStateKey));
+    final originalLoading = cacheStateKey != null && _loadingOriginalFiles.contains(cacheStateKey);
+    final originalProgress = cacheStateKey == null ? null : _originalDownloadProgress[cacheStateKey];
+    final metadataFileSize = cacheRequest == null || cacheRequest.asset.isEdited
+        ? null
+        : ref.watch(originalMediaFileSizeProvider(cacheRequest)).valueOrNull;
+    final remoteFileSize = cacheRequest != null && cacheRequest.asset.isEdited
+        ? ref.watch(originalMediaRemoteSizeProvider(cacheRequest)).valueOrNull
+        : null;
+    final cachedFileSize = cachedOriginal?.lengthSync();
+    final originalFileSize = cachedFileSize ?? originalProgress?.totalBytes ?? remoteFileSize ?? metadataFileSize;
+    final progressTotal = originalProgress?.totalBytes;
+    final originalProgressValue = originalProgress == null || progressTotal == null || progressTotal <= 0
+        ? null
+        : (originalProgress.downloadedBytes / progressTotal).clamp(0.0, 1.0);
     final originalMediaKind = originalMediaActionFor(
       asset: displayAsset,
       config: appConfig,
       isPlayingMotionVideo: isPlayingMotionVideo,
       originalRequested: forceOriginal,
-      hasDirectFile: viewIntentFilePath != null,
+      hasDirectFile: directFilePath != null,
     );
 
     return Stack(
@@ -477,7 +573,7 @@ class _AssetPageState extends ConsumerState<AssetPage> {
                     isCurrent: isCurrent,
                     isPlayingMotionVideo: isPlayingMotionVideo,
                     forceOriginal: forceOriginal,
-                    localFilePath: viewIntentFilePath,
+                    localFilePath: directFilePath,
                     remoteThumbnailSize: thumbnailSize,
                   ),
                 ),
@@ -517,7 +613,14 @@ class _AssetPageState extends ConsumerState<AssetPage> {
           OriginalMediaActionOverlay(
             kind: originalMediaKind,
             showingControls: showingControls,
-            onPressed: () => setState(() => _originalRequestedAssetIds.add(displayAsset.id)),
+            loading: originalLoading,
+            progress: originalProgressValue,
+            sizeLabel: originalFileSize == null ? null : formatBytes(originalFileSize),
+            onPressed: () {
+              if (cacheRequest != null) {
+                unawaited(_cacheOriginal(cacheRequest.asset, cacheRequest.type));
+              }
+            },
           ),
         if (stackChildren != null && stackChildren.isNotEmpty)
           Positioned(

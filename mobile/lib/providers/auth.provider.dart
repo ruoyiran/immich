@@ -12,6 +12,7 @@ import 'package:immich_mobile/models/auth/login_response.model.dart';
 import 'package:immich_mobile/providers/api.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/settings.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/user.provider.dart';
+import 'package:immich_mobile/repositories/original_media_cache.repository.dart';
 import 'package:immich_mobile/services/api.service.dart';
 import 'package:immich_mobile/services/auth.service.dart';
 import 'package:immich_mobile/services/foreground_upload.service.dart';
@@ -89,6 +90,11 @@ class AuthNotifier extends StateNotifier<AuthState> {
     try {
       await _secureStorageService.delete(kSecuredPinCode);
       await _widgetService.clearCredentials();
+      try {
+        await _ref.read(originalMediaCacheRepositoryProvider).clear();
+      } catch (error, stackTrace) {
+        _log.warning('Failed to clear the original media cache during logout', error, stackTrace);
+      }
 
       await _authService.logout();
       _ref.read(foregroundUploadServiceProvider).cancel();

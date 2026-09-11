@@ -19,6 +19,19 @@ import 'package:immich_mobile/services/api.service.dart';
 import 'package:logging/logging.dart';
 import 'package:native_video_player/native_video_player.dart';
 
+typedef _PendingVideoSourceReplacement = ({
+  Future<VideoSource?> source,
+  VideoPlaybackRestorePlan restore,
+  int operation,
+  bool fallbackToTranscoded,
+});
+
+bool shouldApplyPendingVideoSource({
+  required bool isCurrent,
+  required bool sourceChanged,
+  required bool hasPendingReplacement,
+}) => isCurrent && (sourceChanged || hasPendingReplacement);
+
 class NativeVideoViewer extends ConsumerStatefulWidget {
   final BaseAsset asset;
   final String? localFilePath;
@@ -45,7 +58,12 @@ class _NativeVideoViewerState extends ConsumerState<NativeVideoViewer> with Widg
   static final _log = Logger('NativeVideoViewer');
 
   NativeVideoPlayerController? _controller;
-  late final Future<VideoSource?> _videoSource;
+  late Future<VideoSource?> _videoSource;
+  VideoPlaybackRestorePlan? _pendingRestore;
+  _PendingVideoSourceReplacement? _pendingSourceReplacement;
+  Future<void> _sourceLoadQueue = Future.value();
+  int _sourceOperation = 0;
+  bool _fallbackToTranscodedOnError = false;
   Timer? _loadTimer;
   bool _isVideoReady = false;
   bool _shouldPlayOnForeground = false;
@@ -63,7 +81,32 @@ class _NativeVideoViewerState extends ConsumerState<NativeVideoViewer> with Widg
   void didUpdateWidget(NativeVideoViewer oldWidget) {
     super.didUpdateWidget(oldWidget);
 
+    final sourceChanged =
+        widget.localFilePath != oldWidget.localFilePath || widget.forceOriginal != oldWidget.forceOriginal;
+    Future<VideoSource?>? replacementSource;
+    VideoPlaybackRestorePlan? restorePlan;
+    int? sourceOperation;
+    if (sourceChanged) {
+      restorePlan = videoPlaybackRestorePlan(ref.read(videoPlayerProvider(widget.asset.id)));
+      replacementSource = _videoSource = _createSource();
+      sourceOperation = ++_sourceOperation;
+      _pendingSourceReplacement = (
+        source: replacementSource,
+        restore: restorePlan,
+        operation: sourceOperation,
+        fallbackToTranscoded: widget.forceOriginal,
+      );
+    }
+
     if (widget.isCurrent == oldWidget.isCurrent || _controller == null) {
+      if (_controller != null &&
+          shouldApplyPendingVideoSource(
+            isCurrent: widget.isCurrent,
+            sourceChanged: sourceChanged,
+            hasPendingReplacement: _pendingSourceReplacement != null,
+          )) {
+        _applyPendingSourceReplacement();
+      }
       return;
     }
 
@@ -78,7 +121,13 @@ class _NativeVideoViewerState extends ConsumerState<NativeVideoViewer> with Widg
     }
 
     // Prevent unnecessary loading when swiping between assets.
-    _loadTimer = Timer(const Duration(milliseconds: 200), _loadVideo);
+    _loadTimer = Timer(const Duration(milliseconds: 200), () {
+      if (_pendingSourceReplacement != null) {
+        _applyPendingSourceReplacement();
+      } else {
+        unawaited(_loadVideo());
+      }
+    });
   }
 
   @override
@@ -111,7 +160,7 @@ class _NativeVideoViewerState extends ConsumerState<NativeVideoViewer> with Widg
     }
   }
 
-  Future<VideoSource?> _createSource() async {
+  Future<VideoSource?> _createSource({bool ignoreDirectFile = false, bool forceRemotePlayback = false}) async {
     if (!mounted) {
       return null;
     }
@@ -122,7 +171,7 @@ class _NativeVideoViewerState extends ConsumerState<NativeVideoViewer> with Widg
     }
 
     try {
-      final localFilePath = widget.localFilePath;
+      final localFilePath = ignoreDirectFile ? null : widget.localFilePath;
       if (localFilePath != null) {
         final file = File(localFilePath);
         // ignore: avoid_slow_async_io
@@ -168,8 +217,8 @@ class _NativeVideoViewerState extends ConsumerState<NativeVideoViewer> with Widg
       }
 
       final postfixUrl = selectRemoteVideoEndpoint(
-        loadOriginalVideo: ref.read(appConfigProvider).viewer.loadOriginalVideo,
-        forceOriginal: widget.forceOriginal,
+        loadOriginalVideo: forceRemotePlayback ? false : ref.read(appConfigProvider).viewer.loadOriginalVideo,
+        forceOriginal: forceRemotePlayback ? false : widget.forceOriginal,
       );
       final String assetId = remoteAsset.livePhotoVideoId ?? remoteAsset.id;
       final String videoUrl = '$serverEndpoint/assets/$assetId/$postfixUrl';
@@ -234,6 +283,18 @@ class _NativeVideoViewerState extends ConsumerState<NativeVideoViewer> with Widg
 
     setState(() => _isVideoReady = true);
 
+    final restore = _pendingRestore;
+    if (restore != null) {
+      _pendingRestore = null;
+      if (restore.position > Duration.zero) {
+        _notifier.seekTo(restore.position);
+      }
+      if (restore.shouldPlay) {
+        await _notifier.play();
+      }
+      return;
+    }
+
     if (ref.read(assetViewerProvider).showingDetails) {
       return;
     }
@@ -270,31 +331,126 @@ class _NativeVideoViewerState extends ConsumerState<NativeVideoViewer> with Widg
     _notifier.onNativeStatusChanged();
   }
 
+  void _onPlaybackError() {
+    if (!mounted || !_fallbackToTranscodedOnError || _controller?.onError.value == null) {
+      return;
+    }
+    _fallbackToTranscodedOnError = false;
+    final restore = _pendingRestore ?? videoPlaybackRestorePlan(ref.read(videoPlayerProvider(widget.asset.id)));
+    _queueSourceLoad(
+      _createSource(ignoreDirectFile: true, forceRemotePlayback: true),
+      restore,
+      ++_sourceOperation,
+      fallbackToTranscoded: false,
+    );
+  }
+
   void _removeListeners() {
     _controller?.onPlaybackPositionChanged.removeListener(_onPlaybackPositionChanged);
     _controller?.onPlaybackStatusChanged.removeListener(_onPlaybackStatusChanged);
     _controller?.onPlaybackReady.removeListener(_onPlaybackReady);
     _controller?.onPlaybackEnded.removeListener(_onPlaybackEnded);
+    _controller?.onError.removeListener(_onPlaybackError);
   }
 
-  Future<void> _loadVideo() async {
+  void _addListeners(NativeVideoPlayerController controller) {
+    controller.onPlaybackPositionChanged.addListener(_onPlaybackPositionChanged);
+    controller.onPlaybackStatusChanged.addListener(_onPlaybackStatusChanged);
+    controller.onPlaybackReady.addListener(_onPlaybackReady);
+    controller.onPlaybackEnded.addListener(_onPlaybackEnded);
+    controller.onError.addListener(_onPlaybackError);
+  }
+
+  void _queueSourceLoad(
+    Future<VideoSource?> source,
+    VideoPlaybackRestorePlan restore,
+    int operation, {
+    required bool fallbackToTranscoded,
+  }) {
+    _sourceLoadQueue = _sourceLoadQueue.then((_) async {
+      if (!mounted || operation != _sourceOperation) {
+        return;
+      }
+      await _loadVideo(
+        replace: true,
+        sourceFuture: source,
+        restore: restore,
+        fallbackToTranscoded: fallbackToTranscoded,
+      );
+    });
+  }
+
+  void _applyPendingSourceReplacement() {
+    final pending = _pendingSourceReplacement;
+    if (pending == null) {
+      return;
+    }
+    _pendingSourceReplacement = null;
+    _queueSourceLoad(
+      pending.source,
+      pending.restore,
+      pending.operation,
+      fallbackToTranscoded: pending.fallbackToTranscoded,
+    );
+  }
+
+  Future<void> _loadVideo({
+    bool replace = false,
+    Future<VideoSource?>? sourceFuture,
+    VideoPlaybackRestorePlan? restore,
+    bool fallbackToTranscoded = false,
+  }) async {
     final nc = _controller;
-    if (nc == null || nc.videoSource != null || !mounted) {
+    if (nc == null || !replace && nc.videoSource != null || !mounted) {
       return;
     }
 
-    final source = await _videoSource;
+    final source = await (sourceFuture ?? _videoSource);
     if (source == null || !mounted) {
       return;
+    }
+
+    if (replace) {
+      _pendingRestore = restore;
+      _fallbackToTranscodedOnError = fallbackToTranscoded;
+      if (_isVideoReady) {
+        setState(() => _isVideoReady = false);
+      }
+      _removeListeners();
+      try {
+        await nc.stop();
+      } catch (error) {
+        _log.warning('Error stopping video before source replacement', error);
+      }
+      if (!mounted) {
+        return;
+      }
+      _addListeners(nc);
     }
 
     // Grab refs to prevent reading after dispose
     final loopVideo = ref.read(appConfigProvider).viewer.loopVideo;
     final localNotifier = _notifier;
 
-    await localNotifier.load(source);
-    await localNotifier.setLoop(!widget.asset.isMotionPhoto && loopVideo);
-    await localNotifier.setVolume(1);
+    var loaded = false;
+    loaded = await localNotifier.load(source);
+    if (!loaded && replace && fallbackToTranscoded) {
+      _fallbackToTranscodedOnError = false;
+      final fallbackSource = await _createSource(ignoreDirectFile: true, forceRemotePlayback: true);
+      if (fallbackSource != null && mounted) {
+        loaded = await localNotifier.load(fallbackSource);
+      }
+    }
+    if (loaded) {
+      await localNotifier.setLoop(!widget.asset.isMotionPhoto && loopVideo);
+      await localNotifier.setVolume(1);
+    }
+
+    if (!loaded) {
+      _pendingRestore = null;
+      _fallbackToTranscodedOnError = false;
+      return;
+    }
   }
 
   void _initController(NativeVideoPlayerController nc) {
@@ -304,15 +460,16 @@ class _NativeVideoViewerState extends ConsumerState<NativeVideoViewer> with Widg
 
     _notifier.attachController(nc);
 
-    nc.onPlaybackPositionChanged.addListener(_onPlaybackPositionChanged);
-    nc.onPlaybackStatusChanged.addListener(_onPlaybackStatusChanged);
-    nc.onPlaybackReady.addListener(_onPlaybackReady);
-    nc.onPlaybackEnded.addListener(_onPlaybackEnded);
+    _addListeners(nc);
 
     _controller = nc;
 
     if (widget.isCurrent) {
-      unawaited(_loadVideo());
+      if (_pendingSourceReplacement != null) {
+        _applyPendingSourceReplacement();
+      } else {
+        unawaited(_loadVideo());
+      }
     }
   }
 

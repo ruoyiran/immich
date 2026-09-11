@@ -11,7 +11,7 @@ import 'package:immich_mobile/presentation/actions/tag.action.dart';
 import 'package:immich_mobile/providers/background_sync.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/toast.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/user_metadata.provider.dart';
-import 'package:immich_mobile/repositories/download.repository.dart';
+import 'package:immich_mobile/services/download.service.dart';
 import 'package:immich_ui/immich_ui.dart';
 import 'package:mocktail/mocktail.dart';
 
@@ -20,13 +20,18 @@ import '../../factories/local_asset_factory.dart';
 import '../../factories/remote_asset_factory.dart';
 import '../presentation_context.dart';
 
+class MockDownloadService extends Mock implements DownloadService {}
+
 void main() {
   late PresentationContext context;
   late MockTagService tagService;
+  late DownloadService downloadService;
 
   setUp(() async {
     context = await PresentationContext.create();
     tagService = context.service.tag.service;
+    downloadService = MockDownloadService();
+    when(() => context.service.backgroundSync.syncLocal()).thenAnswer((_) async => true);
   });
 
   tearDown(() async {
@@ -41,7 +46,7 @@ void main() {
       const DownloadAction(source: .timeline),
       overrides: [
         ...context.selected(selection),
-        downloadRepositoryProvider.overrideWithValue(context.repository.download.repo),
+        downloadServiceProvider.overrideWithValue(downloadService),
         backgroundSyncProvider.overrideWithValue(context.service.backgroundSync),
       ],
     );
@@ -54,20 +59,22 @@ void main() {
 
     testWidgets('downloads every selected remote asset', (tester) async {
       final asset = owned();
+      when(() => downloadService.downloadAllAssets([asset])).thenAnswer((_) async => [true]);
 
       await pumpDownload(tester, {asset});
       await settleDownload(tester);
 
-      verify(() => context.repository.download.repo.downloadAllAssets([asset])).called(1);
+      verify(() => downloadService.downloadAllAssets([asset])).called(1);
     });
 
     testWidgets('ignores local-only assets, which are already on the device', (tester) async {
       final remote = owned();
+      when(() => downloadService.downloadAllAssets([remote])).thenAnswer((_) async => [true]);
 
       await pumpDownload(tester, {remote, LocalAssetFactory.create()});
       await settleDownload(tester);
 
-      verify(() => context.repository.download.repo.downloadAllAssets([remote])).called(1);
+      verify(() => downloadService.downloadAllAssets([remote])).called(1);
     });
 
     testWidgets('is hidden when nothing remote is selected', (tester) async {

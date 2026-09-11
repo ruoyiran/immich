@@ -11,6 +11,7 @@ import 'package:immich_mobile/extensions/build_context_extensions.dart';
 import 'package:immich_mobile/providers/infrastructure/platform.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/readonly_mode.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/settings.provider.dart';
+import 'package:immich_mobile/repositories/original_media_cache.repository.dart';
 import 'package:immich_mobile/repositories/permission.repository.dart';
 import 'package:immich_mobile/services/app_settings.service.dart';
 import 'package:immich_mobile/utils/bytes_units.dart';
@@ -143,7 +144,11 @@ class AdvancedSettings extends HookConsumerWidget {
         onTap: () async {
           final int clearedBytes;
           try {
-            clearedBytes = await remoteImageApi.clearCache();
+            final cleared = await Future.wait([
+              remoteImageApi.clearCache(),
+              ref.read(originalMediaCacheRepositoryProvider).clear(),
+            ]);
+            clearedBytes = cleared.any((bytes) => bytes < 0) ? -1 : cleared.fold(0, (sum, bytes) => sum + bytes);
           } catch (e) {
             if (!context.mounted) {
               return;

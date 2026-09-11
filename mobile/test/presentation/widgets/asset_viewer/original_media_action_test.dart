@@ -3,6 +3,7 @@ import 'package:immich_mobile/domain/models/asset/base_asset.model.dart';
 import 'package:immich_mobile/domain/models/config/app_config.dart';
 import 'package:immich_mobile/domain/models/config/image_config.dart';
 import 'package:immich_mobile/domain/models/config/viewer_config.dart';
+import 'package:immich_mobile/domain/models/original_media.model.dart';
 import 'package:immich_mobile/presentation/widgets/asset_viewer/original_media_action.widget.dart';
 
 import '../../../fixtures/asset.stub.dart';
@@ -76,5 +77,22 @@ void main() {
     expect(selectRemoteVideoEndpoint(loadOriginalVideo: false, forceOriginal: false), 'video/playback');
     expect(selectRemoteVideoEndpoint(loadOriginalVideo: false, forceOriginal: true), 'original');
     expect(selectRemoteVideoEndpoint(loadOriginalVideo: true, forceOriginal: false), 'original');
+  });
+
+  test('selects the cache media type for images, videos, and motion playback', () {
+    final image = RemoteAssetFactory.create();
+    final video = RemoteAssetFactory.create(type: AssetType.video);
+    final motion = RemoteAssetFactory.create().copyWith(livePhotoVideoId: 'motion-video');
+
+    expect(originalMediaTypeFor(image), OriginalMediaType.image);
+    expect(originalMediaTypeFor(video), OriginalMediaType.video);
+    expect(originalMediaTypeFor(motion, isPlayingMotionVideo: true), OriginalMediaType.video);
+    expect(originalMediaTypeFor(LocalAssetStub.image1), isNull);
+  });
+
+  test('keeps the viewer identity stable while switching to the original source', () {
+    final asset = RemoteAssetFactory.create();
+
+    expect(originalMediaViewerKey(asset, forceOriginal: false), originalMediaViewerKey(asset, forceOriginal: true));
   });
 }
