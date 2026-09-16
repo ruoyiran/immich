@@ -35,7 +35,9 @@ class TimelineHeader extends HookWidget {
   }
 
   String _formatDay(BuildContext context, DateTime date) {
-    final formatter = DateFormat.yMMMEd(context.locale.toLanguageTag());
+    final formatter = date.year == DateTime.now().year
+        ? DateFormat.MMMd(context.locale.toLanguageTag())
+        : DateFormat.yMMMd(context.locale.toLanguageTag());
     return formatter.format(date);
   }
 
@@ -45,7 +47,9 @@ class TimelineHeader extends HookWidget {
       return const SizedBox.shrink();
     }
 
-    final date = (bucket as TimeBucket).date;
+    final timeBucket = bucket as TimeBucket;
+    final date = timeBucket.date;
+    final cityLabel = timeBucket.cities.join(' & ');
     final isMonthHeader = header == HeaderType.month || header == HeaderType.monthAndDay;
     final isDayHeader = header == HeaderType.day || header == HeaderType.monthAndDay;
 
@@ -75,7 +79,24 @@ class TimelineHeader extends HookWidget {
                     toBeginningOfSentenceCase(_formatDay(context, date)),
                     style: context.textTheme.labelLarge?.copyWith(fontSize: 15),
                   ),
-                  const Spacer(),
+                  if (cityLabel.isNotEmpty) ...[
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Tooltip(
+                        message: cityLabel,
+                        child: Text(
+                          cityLabel,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: context.textTheme.labelLarge?.copyWith(
+                            fontSize: 15,
+                            color: context.colorScheme.onSurfaceSecondary,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ] else
+                    const Spacer(),
                   _BulkSelectIconButton(bucket: bucket, assetOffset: assetOffset),
                 ],
               ),

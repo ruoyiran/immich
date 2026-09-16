@@ -1,6 +1,7 @@
 import 'remote_asset.entity.dart';
 import 'stack.entity.dart';
 import 'local_asset.entity.dart';
+import 'exif.entity.dart';
 
 mergedAsset:
 SELECT
@@ -47,7 +48,8 @@ LIMIT $limit;
 mergedBucket(:group_by AS INTEGER):
 SELECT
 	COUNT(*) as asset_count,
-	bucket_date
+	bucket_date,
+	GROUP_CONCAT(DISTINCT HEX(city)) AS cities
 FROM
 (
 	SELECT
@@ -60,11 +62,14 @@ FROM
 				STRFTIME('%Y-%m', rae.local_date_time),
 				STRFTIME('%Y-%m', rae.created_at, 'localtime')
 			)
-		END as bucket_date
+		END as bucket_date,
+		TRIM(ree.city) as city
 	FROM
 		remote_asset_entity rae
 	LEFT JOIN
         stack_entity se ON rae.stack_id = se.id
+	LEFT JOIN
+		remote_exif_entity ree ON ree.asset_id = rae.id
 	WHERE
 		rae.deleted_at IS NULL
 		AND rae.visibility = 0 -- timeline visibility

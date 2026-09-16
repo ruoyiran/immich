@@ -1,3 +1,5 @@
+import 'package:collection/collection.dart';
+
 enum GroupAssetsBy { day, month, auto, none }
 
 enum HeaderType { none, month, day, monthAndDay }
@@ -20,14 +22,15 @@ class Bucket {
 
 class TimeBucket extends Bucket {
   final DateTime date;
+  final List<String> cities;
 
-  const TimeBucket({required this.date, required super.assetCount});
+  const TimeBucket({required this.date, required super.assetCount, this.cities = const []});
 
   @override
   bool operator ==(covariant TimeBucket other) {
-    return super == other && date == other.date;
+    return super == other && date == other.date && const ListEquality<String>().equals(cities, other.cities);
   }
 
   @override
-  int get hashCode => super.hashCode ^ date.hashCode;
+  int get hashCode => super.hashCode ^ date.hashCode ^ Object.hashAll(cities);
 }

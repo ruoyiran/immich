@@ -2,9 +2,14 @@ import 'package:drift/drift.dart' hide isNull;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:immich_mobile/domain/models/album/local_album.model.dart';
 import 'package:immich_mobile/domain/models/asset/base_asset.model.dart';
+import 'package:immich_mobile/domain/models/place.model.dart';
+import 'package:immich_mobile/domain/models/timeline.model.dart';
+import 'package:immich_mobile/infrastructure/entities/exif.entity.drift.dart';
+import 'package:immich_mobile/infrastructure/entities/local_asset.entity.dart';
 import 'package:immich_mobile/infrastructure/entities/remote_asset.entity.drift.dart';
 import 'package:immich_mobile/infrastructure/repositories/timeline.repository.dart';
 import 'package:intl/date_symbol_data_local.dart';
+import 'package:maplibre_gl/maplibre_gl.dart';
 
 import '../repository_context.dart';
 
@@ -94,6 +99,72 @@ LIMIT 101 OFFSET 10000
       expect(details, contains('idx_remote_asset_owner_visibility_deleted_local_date_time'));
       expect(details, isNot(contains('USE TEMP B-TREE FOR ORDER BY')));
     });
+
+    test('groups trimmed unique cities in a deterministic order for each day bucket', () async {
+      final user = await ctx.newUser();
+      final day = DateTime.utc(2026, 9, 14, 12);
+      final berlin = await ctx.newRemoteAsset(ownerId: user.id, createdAt: day);
+      final shanghai = await ctx.newRemoteAsset(ownerId: user.id, createdAt: day.add(const Duration(hours: 1)));
+      final duplicateShanghai = await ctx.newRemoteAsset(
+        ownerId: user.id,
+        createdAt: day.add(const Duration(hours: 2)),
+      );
+      final blank = await ctx.newRemoteAsset(ownerId: user.id, createdAt: day.add(const Duration(hours: 3)));
+      final missing = await ctx.newRemoteAsset(ownerId: user.id, createdAt: day.add(const Duration(hours: 4)));
+      final commaCity = await ctx.newRemoteAsset(ownerId: user.id, createdAt: day.add(const Duration(hours: 5)));
+
+      await ctx.db.batch((batch) {
+        batch.insert(
+          ctx.db.remoteExifEntity,
+          RemoteExifEntityCompanion(assetId: Value(berlin.id), city: const Value(' Berlin ')),
+        );
+        batch.insert(
+          ctx.db.remoteExifEntity,
+          RemoteExifEntityCompanion(assetId: Value(shanghai.id), city: const Value('Shanghai')),
+        );
+        batch.insert(
+          ctx.db.remoteExifEntity,
+          RemoteExifEntityCompanion(assetId: Value(duplicateShanghai.id), city: const Value(' shanghai ')),
+        );
+        batch.insert(
+          ctx.db.remoteExifEntity,
+          RemoteExifEntityCompanion(assetId: Value(blank.id), city: const Value('   ')),
+        );
+        batch.insert(ctx.db.remoteExifEntity, RemoteExifEntityCompanion(assetId: Value(missing.id)));
+        batch.insert(
+          ctx.db.remoteExifEntity,
+          RemoteExifEntityCompanion(assetId: Value(commaCity.id), city: const Value('Washington, D.C.')),
+        );
+      });
+
+      final buckets = await sut.main([user.id], .day).bucketSource().first;
+
+      expect((buckets.single as TimeBucket).cities, ['Berlin', 'Shanghai', 'Washington, D.C.']);
+    });
+
+    test('keeps city lists independent between main timeline day buckets', () async {
+      final user = await ctx.newUser();
+      final newestDay = DateTime.utc(2026, 9, 15, 12);
+      final olderDay = DateTime.utc(2026, 9, 14, 12);
+      final shanghai = await ctx.newRemoteAsset(ownerId: user.id, createdAt: newestDay);
+      final berlin = await ctx.newRemoteAsset(ownerId: user.id, createdAt: olderDay);
+
+      await ctx.db.batch((batch) {
+        batch.insert(
+          ctx.db.remoteExifEntity,
+          RemoteExifEntityCompanion(assetId: Value(shanghai.id), city: const Value('Shanghai')),
+        );
+        batch.insert(
+          ctx.db.remoteExifEntity,
+          RemoteExifEntityCompanion(assetId: Value(berlin.id), city: const Value('Berlin')),
+        );
+      });
+
+      final buckets = await sut.main([user.id], .day).bucketSource().first;
+
+      expect((buckets[0] as TimeBucket).cities, ['Shanghai']);
+      expect((buckets[1] as TimeBucket).cities, ['Berlin']);
+    });
   });
 
   group('remoteAlbum assets', () {
@@ -120,6 +191,20 @@ LIMIT 101 OFFSET 10000
       expect((assets.first as RemoteAsset).id, remoteAsset.id);
       expect([localAsset1.id, localAsset2.id], contains((assets.first as RemoteAsset).localId));
     });
+
+    test('includes cities in remote album day buckets', () async {
+      final user = await ctx.newUser();
+      final album = await ctx.newRemoteAlbum(ownerId: user.id);
+      final asset = await ctx.newRemoteAsset(ownerId: user.id);
+      await ctx.newRemoteAlbumAsset(albumId: album.id, assetId: asset.id);
+      await ctx.db
+          .into(ctx.db.remoteExifEntity)
+          .insert(RemoteExifEntityCompanion(assetId: Value(asset.id), city: const Value('Shanghai')));
+
+      final buckets = await sut.remoteAlbum(album.id, .day).bucketSource().first;
+
+      expect((buckets.single as TimeBucket).cities, ['Shanghai']);
+    });
   });
 
   group('person assets', () {
@@ -142,6 +227,70 @@ LIMIT 101 OFFSET 10000
       final assets = await query.assetSource(0, 10);
       expect(assets, hasLength(1));
       expect((assets.first as RemoteAsset).id, asset.id);
+    });
+
+    test('includes cities in person day buckets', () async {
+      final user = await ctx.newUser();
+      final asset = await ctx.newRemoteAsset(ownerId: user.id);
+      final person = await ctx.newPerson(ownerId: user.id);
+      await ctx.newFace(assetId: asset.id, personId: person.id);
+      await ctx.db
+          .into(ctx.db.remoteExifEntity)
+          .insert(RemoteExifEntityCompanion(assetId: Value(asset.id), city: const Value('Ningbo')));
+
+      final buckets = await sut.person(user.id, person.id, .day).bucketSource().first;
+
+      expect((buckets.single as TimeBucket).cities, ['Ningbo']);
+    });
+  });
+
+  group('remote filtered assets', () {
+    test('includes cities in favorite day buckets', () async {
+      final user = await ctx.newUser();
+      final asset = await ctx.newRemoteAsset(ownerId: user.id, isFavorite: true);
+      await ctx.db
+          .into(ctx.db.remoteExifEntity)
+          .insert(RemoteExifEntityCompanion(assetId: Value(asset.id), city: const Value('Hangzhou')));
+
+      final buckets = await sut.favorite(user.id, .day).bucketSource().first;
+
+      expect((buckets.single as TimeBucket).cities, ['Hangzhou']);
+    });
+  });
+
+  group('place and map assets', () {
+    test('includes cities in place day buckets', () async {
+      final user = await ctx.newUser();
+      final asset = await ctx.newRemoteAsset(ownerId: user.id);
+      await ctx.db
+          .into(ctx.db.remoteExifEntity)
+          .insert(RemoteExifEntityCompanion(assetId: Value(asset.id), city: const Value('Suzhou')));
+
+      final buckets = await sut.place(const PlacePath(city: 'Suzhou'), .day).bucketSource().first;
+
+      expect((buckets.single as TimeBucket).cities, ['Suzhou']);
+    });
+
+    test('includes cities in map day buckets', () async {
+      final user = await ctx.newUser();
+      final asset = await ctx.newRemoteAsset(ownerId: user.id);
+      await ctx.db
+          .into(ctx.db.remoteExifEntity)
+          .insert(
+            RemoteExifEntityCompanion(
+              assetId: Value(asset.id),
+              city: const Value('Wuxi'),
+              latitude: const Value(31.5),
+              longitude: const Value(120.3),
+            ),
+          );
+      final options = TimelineMapOptions(
+        bounds: LatLngBounds(southwest: const LatLng(31, 120), northeast: const LatLng(32, 121)),
+      );
+
+      final buckets = await sut.map([user.id], options, .day).bucketSource().first;
+
+      expect((buckets.single as TimeBucket).cities, ['Wuxi']);
     });
   });
 
@@ -239,6 +388,70 @@ LIMIT 101 OFFSET 10000
 
       expect(buckets, hasLength(1));
       expect(buckets.single.assetCount, 1);
+    });
+
+    test('includes the current user city in local album day buckets', () async {
+      const checksum = 'local-album-city-checksum';
+      final album = await ctx.newLocalAlbum();
+      final local = await ctx.newLocalAsset(checksum: checksum);
+      await ctx.newLocalAlbumAsset(albumId: album.id, assetId: local.id);
+      final remote = await ctx.newRemoteAsset(ownerId: userId, checksum: checksum);
+      await ctx.db
+          .into(ctx.db.remoteExifEntity)
+          .insert(RemoteExifEntityCompanion(assetId: Value(remote.id), city: const Value('Shaoxing')));
+
+      final buckets = await sut.localAlbum(album.id, .day).bucketSource().first;
+
+      expect((buckets.single as TimeBucket).cities, ['Shaoxing']);
+    });
+  });
+
+  group('in-memory grouped assets', () {
+    test('resolves persisted cities for cleanup-shaped local assets without remote ids', () async {
+      final user = await ctx.newUser();
+      await ctx.newAuthUser(id: user.id);
+      const checksum = 'cleanup-city-checksum';
+      final remote = await ctx.newRemoteAsset(ownerId: user.id, checksum: checksum);
+      final local = await ctx.newLocalAsset(checksum: checksum);
+      await ctx.db
+          .into(ctx.db.remoteExifEntity)
+          .insert(RemoteExifEntityCompanion(assetId: Value(remote.id), city: const Value('Jiaxing')));
+      final cleanupAsset = local.toDto();
+      expect(cleanupAsset.remoteId, isNull);
+
+      final buckets = await sut.fromAssetsWithBuckets([cleanupAsset], .search).bucketSource().first;
+
+      expect((buckets.single as TimeBucket).cities, ['Jiaxing']);
+    });
+
+    test('resolves cities when cleanup assets exceed the SQLite variable limit', () async {
+      final user = await ctx.newUser();
+      await ctx.newAuthUser(id: user.id);
+      const matchingChecksum = 'cleanup-large-library-0';
+      final remote = await ctx.newRemoteAsset(ownerId: user.id, checksum: matchingChecksum);
+      await ctx.db
+          .into(ctx.db.remoteExifEntity)
+          .insert(RemoteExifEntityCompanion(assetId: Value(remote.id), city: const Value('Huzhou')));
+      final date = DateTime(2026, 9, 15);
+      final assets = List<BaseAsset>.generate(
+        32767,
+        (index) => LocalAsset(
+          id: 'cleanup-local-$index',
+          name: 'cleanup-$index.jpg',
+          checksum: 'cleanup-large-library-$index',
+          type: AssetType.image,
+          createdAt: date,
+          updatedAt: date,
+          playbackStyle: AssetPlaybackStyle.image,
+          isEdited: false,
+        ),
+        growable: false,
+      );
+
+      final buckets = await sut.fromAssetsWithBuckets(assets, .search).bucketSource().first;
+
+      expect(buckets.single.assetCount, assets.length);
+      expect((buckets.single as TimeBucket).cities, ['Huzhou']);
     });
   });
 }
