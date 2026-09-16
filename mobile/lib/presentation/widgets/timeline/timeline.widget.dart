@@ -18,6 +18,7 @@ import 'package:immich_mobile/extensions/build_context_extensions.dart';
 import 'package:immich_mobile/presentation/widgets/action_buttons/download_status_floating_button.widget.dart';
 import 'package:immich_mobile/presentation/widgets/bottom_sheet/general_bottom_sheet.widget.dart';
 import 'package:immich_mobile/presentation/widgets/timeline/constants.dart';
+import 'package:immich_mobile/presentation/widgets/timeline/scroll_date_overlay.widget.dart';
 import 'package:immich_mobile/presentation/widgets/timeline/scrubber.widget.dart';
 import 'package:immich_mobile/presentation/widgets/timeline/segment.model.dart';
 import 'package:immich_mobile/presentation/widgets/timeline/timeline.state.dart';
@@ -143,7 +144,12 @@ class _SliverTimeline extends ConsumerStatefulWidget {
 
 class _SliverTimelineState extends ConsumerState<_SliverTimeline> with WidgetsBindingObserver {
   late final ScrollController _scrollController;
+  final GlobalKey _segmentedListKey = GlobalKey();
   StreamSubscription? _eventSubscription;
+  Timer? _scrollDateHideTimer;
+  DateTime? _scrollDate;
+  HeaderType? _scrollDateHeader;
+  bool _isScrollDateVisible = false;
 
   // Drag selection state
   bool _dragging = false;
@@ -257,9 +263,78 @@ class _SliverTimelineState extends ConsumerState<_SliverTimeline> with WidgetsBi
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _scrollDateHideTimer?.cancel();
     _scrollController.dispose();
     unawaited(_eventSubscription?.cancel());
     super.dispose();
+  }
+
+  ({DateTime date, HeaderType header})? _getVisibleScrollDate(List<Segment> segments, double scrollOffset) {
+    final renderObject = _segmentedListKey.currentContext?.findRenderObject();
+    if (renderObject is! _RenderSliverTimelineBoxAdaptor || renderObject.geometry?.visible != true) {
+      return null;
+    }
+
+    final timelineOffset = (scrollOffset - renderObject.constraints.precedingScrollExtent).clamp(
+      0.0,
+      renderObject.geometry!.scrollExtent,
+    );
+    final segment = _findSegmentByOffset(segments, timelineOffset);
+    if (segment == null || segment.header == HeaderType.none || segment.bucket is! TimeBucket) {
+      return null;
+    }
+
+    return (date: (segment.bucket as TimeBucket).date, header: segment.header);
+  }
+
+  Segment? _findSegmentByOffset(List<Segment> segments, double offset) {
+    if (segments.isEmpty) {
+      return null;
+    }
+
+    var low = 0;
+    var high = segments.length - 1;
+    while (low < high) {
+      final middle = (low + high) ~/ 2;
+      if (segments[middle].endOffset >= offset) {
+        high = middle;
+      } else {
+        low = middle + 1;
+      }
+    }
+
+    return segments[low];
+  }
+
+  bool _onScrollNotification(ScrollNotification notification, List<Segment> segments) {
+    if (notification.depth != 0) {
+      return false;
+    }
+
+    if (notification is ScrollStartNotification ||
+        notification is ScrollUpdateNotification ||
+        notification is OverscrollNotification) {
+      _scrollDateHideTimer?.cancel();
+      final current = _getVisibleScrollDate(segments, notification.metrics.pixels);
+      final dateChanged = current?.date != _scrollDate || current?.header != _scrollDateHeader;
+      final shouldShow = current != null;
+      if (dateChanged || shouldShow != _isScrollDateVisible) {
+        setState(() {
+          _scrollDate = current?.date;
+          _scrollDateHeader = current?.header;
+          _isScrollDateVisible = shouldShow;
+        });
+      }
+    } else if (notification is ScrollEndNotification) {
+      _scrollDateHideTimer?.cancel();
+      _scrollDateHideTimer = Timer(const Duration(milliseconds: 600), () {
+        if (mounted && _isScrollDateVisible) {
+          setState(() => _isScrollDateVisible = false);
+        }
+      });
+    }
+
+    return false;
   }
 
   void _scrollToTop() {
@@ -445,6 +520,7 @@ class _SliverTimelineState extends ConsumerState<_SliverTimeline> with WidgetsBi
                   if (isSelectionMode) const SelectionSliverAppBar() else if (widget.appBar != null) widget.appBar!,
                   if (widget.topSliverWidget != null) widget.topSliverWidget!,
                   _SliverSegmentedList(
+                    key: _segmentedListKey,
                     segments: segments,
                     delegate: SliverChildBuilderDelegate(
                       (ctx, index) {
@@ -480,6 +556,10 @@ class _SliverTimelineState extends ConsumerState<_SliverTimeline> with WidgetsBi
               } else {
                 timeline = grid;
               }
+              final observedTimeline = NotificationListener<ScrollNotification>(
+                onNotification: (notification) => _onScrollNotification(notification, segments),
+                child: timeline,
+              );
 
               return RawGestureDetector(
                 gestures: {
@@ -520,7 +600,20 @@ class _SliverTimelineState extends ConsumerState<_SliverTimeline> with WidgetsBi
                   child: Stack(
                     clipBehavior: Clip.none,
                     children: [
-                      timeline,
+                      observedTimeline,
+                      Positioned(
+                        top: MediaQuery.paddingOf(context).top + 8,
+                        left: 0,
+                        right: 0,
+                        child: Align(
+                          alignment: Alignment.topCenter,
+                          child: TimelineScrollDateOverlay(
+                            date: _scrollDate,
+                            header: _scrollDateHeader,
+                            visible: _isScrollDateVisible,
+                          ),
+                        ),
+                      ),
                       if (isBottomWidgetVisible)
                         Positioned(
                           top: MediaQuery.paddingOf(context).top,
@@ -546,7 +639,7 @@ class _SliverTimelineState extends ConsumerState<_SliverTimeline> with WidgetsBi
 class _SliverSegmentedList extends SliverMultiBoxAdaptorWidget {
   final List<Segment> _segments;
 
-  const _SliverSegmentedList({required this._segments, required super.delegate});
+  const _SliverSegmentedList({super.key, required this._segments, required super.delegate});
 
   @override
   _RenderSliverTimelineBoxAdaptor createRenderObject(BuildContext context) =>
