@@ -1,8 +1,12 @@
 import 'dart:async';
 
+import 'package:immich_mobile/domain/services/background_task.service.dart';
 import 'package:immich_mobile/domain/utils/migrate_cloud_ids.dart' as m;
+import 'package:immich_mobile/extensions/translate_extensions.dart';
+import 'package:immich_mobile/platform/background_task_api.g.dart';
 import 'package:immich_mobile/providers/infrastructure/sync.provider.dart';
 import 'package:immich_mobile/utils/isolate.dart';
+import 'package:logging/logging.dart';
 import 'package:worker_manager/worker_manager.dart';
 
 typedef SyncCallback = void Function();
@@ -10,6 +14,8 @@ typedef SyncCallbackWithResult<T> = void Function(T result);
 typedef SyncErrorCallback = void Function(String error);
 
 class BackgroundSyncManager {
+  final _log = Logger('BackgroundSyncManager');
+  final BackgroundTaskService? backgroundTaskService;
   final Cancelable<bool?> Function()? remoteSyncTaskFactory;
   final SyncCallback? onRemoteSyncStart;
   final SyncCallbackWithResult<bool?>? onRemoteSyncComplete;
@@ -28,12 +34,17 @@ class BackgroundSyncManager {
   final SyncErrorCallback? onCloudIdSyncError;
 
   Cancelable<bool?>? _syncTask;
+  Future<bool>? _syncFuture;
+  BackgroundTask? _remoteBackgroundTask;
+  bool _remoteSyncUserInitiated = false;
+  bool Function()? _resumeRetry;
   bool _syncQueued = false;
   Cancelable<void>? _syncWebsocketTask;
   Cancelable<void>? _cloudIdSyncTask;
   Cancelable<void>? _deviceAlbumSyncTask;
 
   BackgroundSyncManager({
+    this.backgroundTaskService,
     this.remoteSyncTaskFactory,
     this.onRemoteSyncStart,
     this.onRemoteSyncComplete,
@@ -56,7 +67,11 @@ class BackgroundSyncManager {
   List<Cancelable?> get _allTasks => [_syncWebsocketTask, _cloudIdSyncTask, ..._resumeSyncTasks];
 
   Future<void> cancel() async {
+    _remoteBackgroundTask = null;
+    _remoteSyncUserInitiated = false;
     _syncQueued = false;
+    _resumeRetry = null;
+    _syncFuture = null;
     final tasks = _allTasks;
     _syncTask = null;
     _syncWebsocketTask = null;
@@ -66,11 +81,21 @@ class BackgroundSyncManager {
   }
 
   Future<void> cancelResumeSyncs() async {
+    _remoteBackgroundTask = null;
+    _remoteSyncUserInitiated = false;
     _syncQueued = false;
+    _resumeRetry = null;
+    _syncFuture = null;
     final tasks = _resumeSyncTasks;
     _syncTask = null;
     _deviceAlbumSyncTask = null;
     await _cancelAll(tasks);
+  }
+
+  Future<void> cancelLocalSync() async {
+    final task = _deviceAlbumSyncTask;
+    _deviceAlbumSyncTask = null;
+    await _cancelAll([task]);
   }
 
   // Cancels every task in [tasks] and waits for them to unwind. Callers null out
@@ -128,22 +153,67 @@ class BackgroundSyncManager {
         });
   }
 
-  Future<bool> syncRemote({bool enqueue = false}) {
+  Future<bool> resumeRemoteSync({required bool Function() shouldContinue}) {
+    if (!shouldContinue()) {
+      return Future.value(false);
+    }
+    if (_syncTask != null) {
+      _resumeRetry = shouldContinue;
+    }
+    return syncRemote();
+  }
+
+  bool _takeResumeRetry() {
+    final shouldContinue = _resumeRetry;
+    _resumeRetry = null;
+    return shouldContinue?.call() ?? false;
+  }
+
+  Future<bool> _restartRemoteSync() {
+    _log.info('Retrying failed remote sync after foreground resume');
+    _syncTask = null;
+    _syncFuture = null;
+    _syncQueued = false;
+    _remoteBackgroundTask = null;
+    return syncRemote(userInitiated: _remoteSyncUserInitiated);
+  }
+
+  Future<bool> syncRemote({bool enqueue = false, bool userInitiated = false}) {
     if (_syncTask != null) {
       _syncQueued |= enqueue;
-      return _syncTask!.future.then((result) => result ?? false).catchError((_) => false);
+      if (userInitiated && !_remoteSyncUserInitiated) {
+        _remoteSyncUserInitiated = true;
+        unawaited(_remoteBackgroundTask?.requestContinuedProcessing());
+      }
+      return _syncFuture!;
     }
 
     onRemoteSyncStart?.call();
+    _remoteSyncUserInitiated = userInitiated;
 
     final task = _syncTask =
+        backgroundTaskService?.execute<bool>(
+          title: 'sync'.t(),
+          description: 'sync_remote'.t(),
+          mode: userInitiated ? BackgroundTaskMode.continued : BackgroundTaskMode.limited,
+          onTaskCreated: (task) {
+            _remoteBackgroundTask = task;
+            if (_remoteSyncUserInitiated) {
+              unawaited(task.requestContinuedProcessing());
+            }
+          },
+          factory: (taskId) => remoteSyncTaskFactory?.call() ?? _runRemoteSync(taskId),
+        ) ??
         remoteSyncTaskFactory?.call() ??
-        runInIsolateGentle(computation: (ref) => ref.read(syncStreamServiceProvider).sync(), debugLabel: 'remote-sync');
-    return task
-        .then((result) {
+        _runRemoteSync(null);
+    return _syncFuture = task
+        .then<bool>((result) {
           final success = result ?? false;
           if (!identical(_syncTask, task)) {
             return success;
+          }
+          if (!success && _takeResumeRetry()) {
+            return _restartRemoteSync();
           }
           onRemoteSyncComplete?.call(success);
           _syncQueued &= success;
@@ -159,6 +229,8 @@ class BackgroundSyncManager {
             // only heard onRemoteSyncStart, so without this it stays stuck on
             // "syncing" forever (the "always syncing" symptom).
             onRemoteSyncCancel?.call();
+          } else if (_takeResumeRetry()) {
+            return _restartRemoteSync();
           } else {
             onRemoteSyncError?.call(error.toString());
           }
@@ -170,6 +242,10 @@ class BackgroundSyncManager {
         .whenComplete(() {
           if (identical(_syncTask, task)) {
             _syncTask = null;
+            _syncFuture = null;
+            _remoteBackgroundTask = null;
+            _remoteSyncUserInitiated = false;
+            _resumeRetry = null;
             if (_syncQueued) {
               _syncQueued = false;
               unawaited(syncRemote());
@@ -237,6 +313,32 @@ class BackgroundSyncManager {
         });
   }
 }
+
+Cancelable<bool?> _runRemoteSync(String? taskId) => runInIsolateGentle(
+  computation: (ref) {
+    var lastProgress = DateTime.fromMillisecondsSinceEpoch(0);
+    return ref
+        .read(syncStreamServiceProvider)
+        .sync(
+          onProgress: taskId == null
+              ? null
+              : (completed) async {
+                  final now = DateTime.now();
+                  if (now.difference(lastProgress) < const Duration(seconds: 1)) {
+                    return;
+                  }
+                  lastProgress = now;
+                  try {
+                    await BackgroundTaskHostApi().updateProgress(taskId, completed, -1);
+                  } catch (_) {
+                    // Progress reporting must not fail a committed sync batch.
+                  }
+                },
+        );
+  },
+  debugLabel: 'remote-sync',
+  waitForCancellation: taskId != null,
+);
 
 Cancelable<void> _handleWsAssetUploadReadyV1Batch(List<dynamic> batchData) => runInIsolateGentle(
   computation: (ref) => ref.read(syncStreamServiceProvider).handleWsAssetUploadReadyV1Batch(batchData),

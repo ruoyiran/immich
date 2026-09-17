@@ -190,6 +190,37 @@ void main() {
       await settleUpload(tester);
     });
 
+    testWidgets('closing the processing dialog keeps the upload running', (tester) async {
+      final asset = LocalAssetFactory.create();
+      final finish = Completer<void>();
+      late Completer<void> cancellation;
+      late UploadCallbacks callbacks;
+      when(
+        () => uploadService.uploadManual(
+          any(),
+          cancelToken: any(named: 'cancelToken'),
+          callbacks: any(named: 'callbacks'),
+        ),
+      ).thenAnswer((invocation) async {
+        cancellation = invocation.namedArguments[#cancelToken] as Completer<void>;
+        callbacks = invocation.namedArguments[#callbacks] as UploadCallbacks;
+        callbacks.onProcessing?.call(asset.id);
+        await finish.future;
+        callbacks.onSuccess?.call(asset.id, asset.id);
+      });
+      await pumpUpload(tester, {asset}, showProgress: true);
+      await tester.tap(find.byType(ImmichIconButton));
+      await tester.pump();
+      expect(find.text(StaticTranslations.instance.waiting), findsOneWidget);
+      expect(find.text(StaticTranslations.instance.close), findsOneWidget);
+      await tester.tap(find.text(StaticTranslations.instance.close));
+      await tester.pumpAndSettle();
+      expect(cancellation.isCompleted, isFalse);
+      expect(find.text(StaticTranslations.instance.uploading), findsNothing);
+      finish.complete();
+      await settleUpload(tester);
+    });
+
     testWidgets('is hidden for a remote asset, which has nothing to upload', (tester) async {
       await pumpUpload(tester, {RemoteAssetFactory.create()});
 
@@ -204,6 +235,54 @@ void main() {
   });
 
   group('uploadAssets', () {
+    for (final finishedId in ['first', 'second']) {
+      testWidgets('finishing $finishedId preserves the other batch progress and cancellation', (tester) async {
+        final first = LocalAssetFactory.create(id: 'first');
+        final second = LocalAssetFactory.create(id: 'second');
+        final finishes = <String, Completer<void>>{'first': Completer<void>(), 'second': Completer<void>()};
+        when(
+          () => uploadService.uploadManual(
+            any(),
+            cancelToken: any(named: 'cancelToken'),
+            callbacks: any(named: 'callbacks'),
+          ),
+        ).thenAnswer((invocation) async {
+          final assets = invocation.positionalArguments.single as List<LocalAsset>;
+          final callbacks = invocation.namedArguments[#callbacks] as UploadCallbacks;
+          callbacks.onProcessing?.call(assets.single.id);
+          await finishes[assets.single.id]!.future;
+          callbacks.onSuccess?.call(assets.single.id, assets.single.id);
+        });
+        late WidgetRef capturedRef;
+        await tester.pumpTestWidget(
+          context,
+          Consumer(
+            builder: (_, ref, _) {
+              capturedRef = ref;
+              return const SizedBox.shrink();
+            },
+          ),
+          overrides: uploadOverrides(),
+        );
+        final buildContext = tester.element(find.byType(SizedBox));
+        final firstWork = uploadAssets(buildContext, capturedRef, [first]);
+        final firstCancellation = capturedRef.read(manualUploadCancelTokenProvider);
+        final secondWork = uploadAssets(buildContext, capturedRef, [second]);
+        final secondCancellation = capturedRef.read(manualUploadCancelTokenProvider);
+        final remainingId = finishedId == 'first' ? 'second' : 'first';
+        finishes[finishedId]!.complete();
+        await (finishedId == 'first' ? firstWork : secondWork);
+        expect(capturedRef.read(assetUploadProgressProvider)[remainingId]?.phase, AssetUploadPhase.processing);
+        expect(
+          capturedRef.read(manualUploadCancelTokenProvider),
+          same(finishedId == 'first' ? secondCancellation : firstCancellation),
+        );
+        finishes[remainingId]!.complete();
+        await (finishedId == 'first' ? secondWork : firstWork);
+        await settleUpload(tester);
+      });
+    }
+
     testWidgets('clears the tracked progress once the upload settles', (tester) async {
       final asset = LocalAssetFactory.create();
       answerUploadWith(succeeded: {asset.id});

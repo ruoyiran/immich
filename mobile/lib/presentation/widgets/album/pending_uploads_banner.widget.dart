@@ -191,11 +191,7 @@ class _PendingUploadsSheet extends ConsumerWidget {
                   if (canAbort)
                     TextButton.icon(
                       onPressed: () {
-                        final cancelToken = ref.read(manualUploadCancelTokenProvider);
-                        if (cancelToken != null && !cancelToken.isCompleted) {
-                          cancelToken.complete();
-                        }
-                        ref.read(manualUploadCancelTokenProvider.notifier).state = null;
+                        ref.read(manualUploadCancelTokenProvider.notifier).cancelCurrent();
                         ref.read(pendingAlbumUploadsProvider(albumId).notifier).clear();
                       },
                       icon: const Icon(Icons.stop_circle_outlined, size: 18),

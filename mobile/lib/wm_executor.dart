@@ -19,8 +19,26 @@ const _maxId = 9007199254740992;
 class _GentleTask<R> extends Task<R> implements Gentle {
   @override
   final GentleExecution<R> execution;
+  final bool waitForCancellation;
+  bool _cancellationRequested = false;
 
-  _GentleTask({required super.id, required super.completer, required super.workPriority, required this.execution});
+  _GentleTask({
+    required super.id,
+    required super.completer,
+    required super.workPriority,
+    required this.execution,
+    required this.waitForCancellation,
+  });
+
+  @override
+  bool get canceled => _cancellationRequested || super.canceled;
+
+  void cancelAfterDrain() => _cancellationRequested = true;
+
+  @override
+  void complete(R? value, Object? error, StackTrace? stackTrace) {
+    super.complete(value, _cancellationRequested ? CanceledError() : error, stackTrace);
+  }
 }
 
 class Mixinable<T> {
@@ -95,13 +113,27 @@ class _Executor extends Mixinable<_Executor> with _ExecutorLogger {
 
   /// Runs [execution] on a worker isolate; its [Completer] completes when the
   /// returned [Cancelable] is cancelled.
-  Cancelable<R> executeGentle<R>(GentleExecution<R> execution, {WorkPriority priority = WorkPriority.immediately}) {
+  ///
+  /// With [waitForCancellation], cancelling active work waits for its computation
+  /// and cleanup before completing with [CanceledError]. Queued work cancels
+  /// immediately. Existing callers retain immediate cancellation by default.
+  Cancelable<R> executeGentle<R>(
+    GentleExecution<R> execution, {
+    WorkPriority priority = WorkPriority.immediately,
+    bool waitForCancellation = false,
+  }) {
     if (_nextTaskId + 1 == _maxId) {
       _nextTaskId = _minId;
     }
     final id = _nextTaskId.toString();
     _nextTaskId++;
-    final task = _GentleTask<R>(id: id, workPriority: priority, execution: execution, completer: Completer<R>());
+    final task = _GentleTask<R>(
+      id: id,
+      workPriority: priority,
+      execution: execution,
+      completer: Completer<R>(),
+      waitForCancellation: waitForCancellation,
+    );
     _queue.add(task);
     _schedule();
     logTaskAdded(task.id);
@@ -179,10 +211,15 @@ class _Executor extends Mixinable<_Executor> with _ExecutorLogger {
 
   @override
   void _cancel(Task task) {
-    task.cancel();
+    final worker = _pool.firstWhereOrNull((worker) => worker.taskId == task.id);
+    if (task is _GentleTask && task.waitForCancellation && worker != null && !task.completer.isCompleted) {
+      task.cancelAfterDrain();
+    } else {
+      task.cancel();
+    }
     _queue.remove(task);
     // All tasks are gentle: signal cancellation; the worker unwinds on its own.
-    _pool.firstWhereOrNull((worker) => worker.taskId == task.id)?.cancelGentle();
+    worker?.cancelGentle();
     super._cancel(task);
   }
 }

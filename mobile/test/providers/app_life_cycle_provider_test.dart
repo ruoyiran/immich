@@ -65,6 +65,7 @@ class TestWebsocketNotifier extends WebsocketNotifier {
 }
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
   late LogService logService;
   late Completer<ServerVersion?> serverVersion;
   late MockServerInfoService serverInfoService;

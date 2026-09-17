@@ -132,7 +132,7 @@ class UploadRepository {
     try {
       final endpoint =
           _endpointOverride ?? Store.get(StoreKey.serverEndpoint) ?? (throw StateError('Server endpoint is missing'));
-      await _ensureServerCapability(endpoint);
+      await _ensureServerCapability(endpoint, abortTrigger: cancelToken?.future);
       final logicalUploadId = _deriveResumableUploadId(endpoint, uploadId, checksum);
       if (await _readResumableAttempt(logicalUploadId, checksum) == null) {
         final size = await file.length();
@@ -141,6 +141,7 @@ class UploadRepository {
           localAssetId: uploadId,
           checksum: checksum,
           size: size,
+          abortTrigger: cancelToken?.future,
         );
         if (duplicate != null) {
           final metadata =
@@ -152,11 +153,16 @@ class UploadRepository {
                 )
                 ..remove('live_photo_role')
                 ..remove('container');
-          await _updateDuplicateMetadata(endpoint, duplicate.remoteAssetId!, metadata);
+          await _updateDuplicateMetadata(
+            endpoint,
+            duplicate.remoteAssetId!,
+            metadata,
+            abortTrigger: cancelToken?.future,
+          );
           return duplicate;
         }
       }
-      return await _uploadResumable(
+      final result = await _uploadResumable(
         file: file,
         originalFileName: originalFileName,
         fields: fields,
@@ -166,20 +172,33 @@ class UploadRepository {
         onProgress: onProgress,
         onProcessing: onProcessing,
       );
+      return !result.isSuccess && (cancelToken?.isCompleted ?? false) ? UploadResult.cancelled() : result;
+    } on RequestAbortedException {
+      return UploadResult.cancelled();
     } on _UploadHTTPException catch (error) {
+      if (cancelToken?.isCompleted ?? false) {
+        return UploadResult.cancelled();
+      }
       return UploadResult.error(statusCode: error.statusCode, errorMessage: error.message);
     } catch (error, stackTrace) {
+      if (error is ClientException && (cancelToken?.isCompleted ?? false)) {
+        return UploadResult.cancelled();
+      }
       logger.warning("Error uploading $logContext: $error: $stackTrace");
       return UploadResult.error(errorMessage: error.toString());
     }
   }
 
-  Future<UploadResult?> preflightResumableTerminal({required String checksum, required String uploadId}) async {
+  Future<UploadResult?> preflightResumableTerminal({
+    required String checksum,
+    required String uploadId,
+    Completer<void>? cancelToken,
+  }) async {
     try {
       await cleanupStalePMLiveArtifacts();
       final endpoint =
           _endpointOverride ?? Store.get(StoreKey.serverEndpoint) ?? (throw StateError('Server endpoint is missing'));
-      await _ensureServerCapability(endpoint);
+      await _ensureServerCapability(endpoint, abortTrigger: cancelToken?.future);
       final logicalUploadId = _deriveResumableUploadId(endpoint, uploadId, checksum);
       final attempt = await _readResumableAttempt(logicalUploadId, checksum);
       if (attempt == null) {
@@ -189,6 +208,7 @@ class UploadRepository {
         Uri.parse('$endpoint/uploads/resumable'),
         attempt,
         replaceIncompleteConflict: false,
+        abortTrigger: cancelToken?.future,
       );
       await _persistResumableState(attempt, status);
       if (!status.complete) {
@@ -203,9 +223,17 @@ class UploadRepository {
       await _deleteResumableState(logicalUploadId);
       await _deleteOwnedPMLiveArtifact(attempt.sourcePath, attempt.uploadId);
       return UploadResult.success(remoteAssetId: status.assetId!, assetStatus: status.assetStatus);
+    } on RequestAbortedException {
+      return UploadResult.cancelled();
     } on _UploadHTTPException catch (error) {
+      if (cancelToken?.isCompleted ?? false) {
+        return UploadResult.cancelled();
+      }
       return UploadResult.error(statusCode: error.statusCode, errorMessage: error.message);
     } catch (error, stackTrace) {
+      if (error is ClientException && (cancelToken?.isCompleted ?? false)) {
+        return UploadResult.cancelled();
+      }
       logger.warning('Error checking persisted resumable upload $uploadId: $error: $stackTrace');
       return UploadResult.error(errorMessage: error.toString());
     }
@@ -279,27 +307,29 @@ class UploadRepository {
     required DateTime modifiedAt,
     required String originalFileName,
     required Map<String, String> fields,
+    Completer<void>? cancelToken,
   }) async {
     if (deviceId.isEmpty || localAssetId.isEmpty || size <= 0) {
       return null;
     }
     final endpoint =
         _endpointOverride ?? Store.get(StoreKey.serverEndpoint) ?? (throw StateError('Server endpoint is missing'));
-    await _ensureServerCapability(endpoint);
-    final request = Request('POST', Uri.parse('$endpoint/assets/bulk-device-check'))
-      ..headers.addAll(_requestHeaders)
-      ..headers['Content-Type'] = 'application/json'
-      ..body = jsonEncode({
-        'assets': [
-          {
-            'id': assetId,
-            'deviceId': deviceId,
-            'localAssetId': localAssetId,
-            'size': size,
-            'modifiedTime': modifiedAt.toUtc().microsecondsSinceEpoch * 1000,
-          },
-        ],
-      });
+    await _ensureServerCapability(endpoint, abortTrigger: cancelToken?.future);
+    final request =
+        AbortableRequest('POST', Uri.parse('$endpoint/assets/bulk-device-check'), abortTrigger: cancelToken?.future)
+          ..headers.addAll(_requestHeaders)
+          ..headers['Content-Type'] = 'application/json'
+          ..body = jsonEncode({
+            'assets': [
+              {
+                'id': assetId,
+                'deviceId': deviceId,
+                'localAssetId': localAssetId,
+                'size': size,
+                'modifiedTime': modifiedAt.toUtc().microsecondsSinceEpoch * 1000,
+              },
+            ],
+          });
     final response = await _client.send(request);
     final body = await response.stream.bytesToString();
     if (response.statusCode != 200) {
@@ -326,7 +356,7 @@ class UploadRepository {
       assetId: (checksum: checksum, md5: _md5Hex(checksum), size: size, modifiedAt: modifiedAt),
     });
     final metadata = _buildMetadataWithoutFile(fields: fields, originalFileName: originalFileName, isPMLive: false);
-    await _updateDuplicateMetadata(endpoint, remoteAssetId, metadata);
+    await _updateDuplicateMetadata(endpoint, remoteAssetId, metadata, abortTrigger: cancelToken?.future);
     return UploadResult.success(remoteAssetId: remoteAssetId, assetStatus: 'duplicate');
   }
 
@@ -357,13 +387,19 @@ class UploadRepository {
     return value;
   }
 
-  Future<void> _ensureServerCapability(String endpoint) async {
-    final existing = _serverCapabilityChecks[endpoint];
+  Future<void> _ensureServerCapability(String endpoint, {Future<void>? abortTrigger}) async {
+    if (_serverResumableChunkBytes.containsKey(endpoint)) {
+      return;
+    }
+    // Only tokenless callers share in-flight work. A cancelled upload must not
+    // abort another caller's check or evict its successfully cached capability.
+    final existing = abortTrigger == null ? _serverCapabilityChecks[endpoint] : null;
     if (existing != null) {
       return existing;
     }
     final check = () async {
-      final request = Request('GET', Uri.parse('$endpoint/server/config'))..headers.addAll(_requestHeaders);
+      final request = AbortableRequest('GET', Uri.parse('$endpoint/server/config'), abortTrigger: abortTrigger)
+        ..headers.addAll(_requestHeaders);
       final response = await _client.send(request);
       final body = await response.stream.bytesToString();
       if (response.statusCode != 200) {
@@ -389,15 +425,15 @@ class UploadRepository {
       }
       _serverResumableChunkBytes[endpoint] = advertisedChunkBytes as int? ?? defaultResumableChunkBytes;
     }();
-    _serverCapabilityChecks[endpoint] = check;
+    if (abortTrigger == null) {
+      _serverCapabilityChecks[endpoint] = check;
+    }
     try {
       await check;
-    } catch (_) {
+    } finally {
       if (identical(_serverCapabilityChecks[endpoint], check)) {
         _serverCapabilityChecks.remove(endpoint)?.ignore();
-        _serverResumableChunkBytes.remove(endpoint);
       }
-      rethrow;
     }
   }
 
@@ -406,16 +442,18 @@ class UploadRepository {
     required String localAssetId,
     required String checksum,
     required int size,
+    Future<void>? abortTrigger,
   }) async {
-    final request = Request('POST', Uri.parse('$endpoint/assets/bulk-upload-check'))
-      ..headers.addAll(_requestHeaders)
-      ..headers['Content-Type'] = 'application/json'
-      ..body = jsonEncode({
-        'algorithm': 'md5',
-        'assets': [
-          {'id': localAssetId, 'md5': _md5Hex(checksum), 'size': size},
-        ],
-      });
+    final request =
+        AbortableRequest('POST', Uri.parse('$endpoint/assets/bulk-upload-check'), abortTrigger: abortTrigger)
+          ..headers.addAll(_requestHeaders)
+          ..headers['Content-Type'] = 'application/json'
+          ..body = jsonEncode({
+            'algorithm': 'md5',
+            'assets': [
+              {'id': localAssetId, 'md5': _md5Hex(checksum), 'size': size},
+            ],
+          });
     final response = await _client.send(request);
     final body = await response.stream.bytesToString();
     if (response.statusCode != 200) {
@@ -440,8 +478,13 @@ class UploadRepository {
     return UploadResult.success(remoteAssetId: assetId, assetStatus: 'duplicate');
   }
 
-  Future<void> _updateDuplicateMetadata(String endpoint, String assetId, Map<String, Object> metadata) async {
-    final request = Request('POST', Uri.parse('$endpoint/assets/bulk-metadata'))
+  Future<void> _updateDuplicateMetadata(
+    String endpoint,
+    String assetId,
+    Map<String, Object> metadata, {
+    Future<void>? abortTrigger,
+  }) async {
+    final request = AbortableRequest('POST', Uri.parse('$endpoint/assets/bulk-metadata'), abortTrigger: abortTrigger)
       ..headers.addAll(_requestHeaders)
       ..headers['Content-Type'] = 'application/json'
       ..body = jsonEncode({
@@ -585,7 +628,7 @@ class UploadRepository {
       );
     }
     final size = attempt.size;
-    var status = await _startResumable(uri, attempt);
+    var status = await _startResumable(uri, attempt, abortTrigger: cancelToken?.future);
     await _persistResumableState(attempt, status);
     _reportResumableProgress(status, onProgress, onProcessing);
     if (!status.complete) {
@@ -630,6 +673,7 @@ class UploadRepository {
                   uploadedOffset: offset,
                   totalBytes: size,
                   onProgress: onProgress,
+                  abortTrigger: cancelToken?.future,
                 )
                 ..headers.addAll(_requestHeaders)
                 ..headers['Content-Type'] = 'application/octet-stream'
@@ -680,7 +724,12 @@ class UploadRepository {
         await _deleteOwnedPMLiveArtifact(attempt.sourcePath, attempt.uploadId);
         return UploadResult.cancelled();
       }
-      status = await _sendResumableJSON(uri.replace(path: '${uri.path}/$uploadId'), 'GET', '');
+      status = await _sendResumableJSON(
+        uri.replace(path: '${uri.path}/$uploadId'),
+        'GET',
+        '',
+        abortTrigger: cancelToken?.future,
+      );
       await _persistResumableState(attempt, status);
       _reportResumableProgress(status, onProgress, onProcessing);
     }
@@ -750,12 +799,15 @@ class UploadRepository {
     };
   }
 
-  Future<_ResumableStatus> _sendResumableJSON(Uri uri, String method, String body) async {
-    final request = Request(method, uri)
+  Future<_ResumableStatus> _sendResumableJSON(Uri uri, String method, String body, {Future<void>? abortTrigger}) async {
+    final request = AbortableRequest(method, uri, abortTrigger: abortTrigger)
       ..headers.addAll(_requestHeaders)
       ..headers['Content-Type'] = 'application/json'
       ..headers[queuedFinalizationHeader] = queuedFinalizationV1
       ..body = body;
+    if (method == 'GET') {
+      request.headers['Cache-Control'] = 'no-cache, no-store';
+    }
     final response = await _client.send(request);
     final responseBody = await response.stream.bytesToString();
     if (response.statusCode != 200) {
@@ -768,19 +820,30 @@ class UploadRepository {
     Uri uri,
     _ResumableAttempt attempt, {
     bool replaceIncompleteConflict = true,
+    Future<void>? abortTrigger,
   }) async {
     try {
-      return await _sendResumableJSON(uri, 'POST', attempt.startBody());
+      return await _sendResumableJSON(uri, 'POST', attempt.startBody(), abortTrigger: abortTrigger);
     } on _UploadHTTPException catch (error) {
       if (error.statusCode != 409 || !error.message.contains('replace_generation')) {
         rethrow;
       }
 
-      final current = await _sendResumableJSON(uri.replace(path: '${uri.path}/${attempt.uploadId}'), 'GET', '');
+      final current = await _sendResumableJSON(
+        uri.replace(path: '${uri.path}/${attempt.uploadId}'),
+        'GET',
+        '',
+        abortTrigger: abortTrigger,
+      );
       if (current.complete || current.generation.isEmpty || !replaceIncompleteConflict) {
         return current;
       }
-      return _sendResumableJSON(uri, 'POST', attempt.startBody(replaceGeneration: current.generation));
+      return _sendResumableJSON(
+        uri,
+        'POST',
+        attempt.startBody(replaceGeneration: current.generation),
+        abortTrigger: abortTrigger,
+      );
     }
   }
 
@@ -1050,13 +1113,16 @@ class UploadRepository {
   }
 }
 
-class _ProgressBytesRequest extends BaseRequest {
+class _ProgressBytesRequest extends BaseRequest with Abortable {
   static const int _progressChunkBytes = 64 * 1024;
 
   final Uint8List _body;
   final int uploadedOffset;
   final int totalBytes;
   final void Function(int bytes, int totalBytes)? onProgress;
+
+  @override
+  final Future<void>? abortTrigger;
 
   _ProgressBytesRequest(
     super.method,
@@ -1065,6 +1131,7 @@ class _ProgressBytesRequest extends BaseRequest {
     required this.uploadedOffset,
     required this.totalBytes,
     required this.onProgress,
+    this.abortTrigger,
   }) : _body = body is Uint8List ? body : Uint8List.fromList(body) {
     contentLength = _body.length;
   }

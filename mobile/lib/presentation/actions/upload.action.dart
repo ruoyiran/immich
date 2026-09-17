@@ -21,7 +21,12 @@ final _logger = Logger('UploadAction');
 
 final _stateProvider = Provider.family.autoDispose<List<LocalAsset>?, ActionSource>((ref, source) {
   final assets = ref.watch(assetsActionProvider(source));
-  final local = assets.backedUp(isBackedUp: false).local().toList(growable: false);
+  final progress = ref.watch(assetUploadProgressProvider);
+  final local = assets
+      .backedUp(isBackedUp: false)
+      .local()
+      .where((asset) => !progress.containsKey(asset.id))
+      .toList(growable: false);
   return local.isEmpty ? null : local;
 }, dependencies: [assetsActionProvider]);
 
@@ -41,44 +46,55 @@ class UploadAction extends AssetActionBuilder {
   }
 
   Future<void> _upload(BuildContext context, WidgetRef ref, List<LocalAsset> assets) async {
-    var isDialogOpen = false;
+    DialogRoute<void>? dialog;
+    final navigator = Navigator.of(context, rootNavigator: true);
+    final cancelToken = Completer<void>();
     try {
       if (!showProgress) {
         await uploadAssets(context, ref, assets);
         return;
       }
 
-      // The dialog is not awaited: it stays up while the upload runs and is
-      // dismissed below, unless the user cancelled it themselves first
-      isDialogOpen = true;
-      unawaited(
-        showDialog<void>(
-          context: context,
-          barrierDismissible: false,
-          builder: (_) => const _UploadProgressDialog(),
-        ).whenComplete(() => isDialogOpen = false),
+      dialog = DialogRoute<void>(
+        context: context,
+        barrierDismissible: false,
+        builder: (_) =>
+            _UploadProgressDialog(assetIds: assets.map((asset) => asset.id).toSet(), cancelToken: cancelToken),
       );
+      unawaited(navigator.push(dialog));
 
-      await uploadAssets(context, ref, assets);
+      await uploadAssets(context, ref, assets, cancelToken: cancelToken);
     } catch (error, stack) {
       handleError(error, stack: stack, description: "Failed to upload the assets");
     } finally {
-      if (isDialogOpen && context.mounted) {
-        Navigator.of(context, rootNavigator: true).pop();
+      if (dialog != null && dialog.isActive && navigator.mounted) {
+        navigator.removeRoute(dialog);
       }
     }
   }
 }
 
 @visibleForTesting
-Future<void> uploadAssets(BuildContext context, WidgetRef ref, List<LocalAsset> assets) async {
+Future<void> uploadAssets(
+  BuildContext context,
+  WidgetRef ref,
+  List<LocalAsset> assets, {
+  Completer<void>? cancelToken,
+}) async {
+  final currentProgress = ref.read(assetUploadProgressProvider);
+  assets = assets.where((asset) => !currentProgress.containsKey(asset.id)).toList();
+  if (assets.isEmpty) {
+    return;
+  }
   final progress = ref.read(assetUploadProgressProvider.notifier);
   final uploads = ref.read(foregroundUploadServiceProvider);
   final toastService = ref.read(toastServiceProvider);
   final errorMessage = context.t.scaffold_body_error_occurred;
 
-  final cancelToken = Completer<void>();
-  ref.read(manualUploadCancelTokenProvider.notifier).state = cancelToken;
+  cancelToken ??= Completer<void>();
+  final cancellationState = ref.read(manualUploadCancelTokenProvider.notifier);
+  cancellationState.register(cancelToken);
+  final selection = ref.read(multiSelectProvider.notifier);
 
   final uploaded = <String, String>{};
   final failed = <String>{};
@@ -117,10 +133,12 @@ Future<void> uploadAssets(BuildContext context, WidgetRef ref, List<LocalAsset> 
           uploaded[id] = remoteId;
           failed.remove(id);
           progress.remove(id);
-          timeline.markUploaded(id, remoteId);
+          if (context.mounted) {
+            timeline.markUploaded(id, remoteId);
+          }
           final asset = assetById[id];
-          if (asset != null) {
-            ref.read(multiSelectProvider.notifier).deselectAsset(asset);
+          if (asset != null && context.mounted) {
+            selection.deselectAsset(asset);
           }
           persistenceTasks.add(persistUploadedAsset(id, remoteId));
         },
@@ -131,17 +149,15 @@ Future<void> uploadAssets(BuildContext context, WidgetRef ref, List<LocalAsset> 
       ),
     );
   } finally {
-    ref.read(manualUploadCancelTokenProvider.notifier).state = null;
-    if (failed.isEmpty) {
-      progress.clear();
-    } else {
-      unawaited(Future.delayed(const Duration(seconds: 2), progress.clear));
-    }
+    cancellationState.unregister(cancelToken);
+    progress.clearAssets(assetById.keys, delay: failed.isEmpty ? Duration.zero : const Duration(seconds: 2));
   }
 
   if (persistenceTasks.isNotEmpty) {
     await Future.wait(persistenceTasks);
-    await timeline.reload();
+    if (context.mounted) {
+      await timeline.reload();
+    }
   }
 
   final succeeded = uploaded.keys.toSet().difference(failed);
@@ -152,11 +168,18 @@ Future<void> uploadAssets(BuildContext context, WidgetRef ref, List<LocalAsset> 
 }
 
 class _UploadProgressDialog extends ConsumerWidget {
-  const _UploadProgressDialog();
+  final Set<String> assetIds;
+  final Completer<void> cancelToken;
+
+  const _UploadProgressDialog({required this.assetIds, required this.cancelToken});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final progressMap = ref.watch(assetUploadProgressProvider);
+    final allProgress = ref.watch(assetUploadProgressProvider);
+    final progressMap = {
+      for (final entry in allProgress.entries)
+        if (assetIds.contains(entry.key)) entry.key: entry.value,
+    };
 
     final values = progressMap.values
         .where((value) => value.phase == AssetUploadPhase.uploading)
@@ -186,11 +209,13 @@ class _UploadProgressDialog extends ConsumerWidget {
         ],
       ),
       actions: [
+        ImmichTextButton(onPressed: () => Navigator.of(context).pop(), labelText: context.t.close),
         ImmichTextButton(
           onPressed: () {
-            ref.read(manualUploadCancelTokenProvider)?.complete();
-            ref.read(manualUploadCancelTokenProvider.notifier).state = null;
-            Navigator.of(context, rootNavigator: true).pop();
+            if (!cancelToken.isCompleted) {
+              cancelToken.complete();
+            }
+            Navigator.of(context).pop();
           },
           labelText: context.t.cancel,
         ),

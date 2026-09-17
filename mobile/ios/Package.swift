@@ -7,6 +7,20 @@ let package = Package(
   products: [.library(name: "PMLiveWriterCore", targets: ["PMLiveWriterCore"])],
   targets: [
     .target(
+      name: "BackgroundTaskCore",
+      path: "Runner/Background",
+      exclude: [
+        "BackgroundTask.g.swift", "BackgroundTaskApiImpl.swift", "BackgroundWorker.swift",
+        "BackgroundWorker.g.swift", "BackgroundWorkerApiImpl.swift",
+      ],
+      sources: ["BackgroundTaskSession.swift"]
+    ),
+    .testTarget(
+      name: "BackgroundTaskCoreTests",
+      dependencies: ["BackgroundTaskCore"],
+      path: "BackgroundTaskTests"
+    ),
+    .target(
       name: "PMLiveWriterCore",
       path: "Runner/Sync",
       exclude: [

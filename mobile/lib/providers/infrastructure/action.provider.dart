@@ -195,7 +195,7 @@ class ActionNotifier extends Notifier<void> {
 
     final progressNotifier = ref.read(assetUploadProgressProvider.notifier);
     final cancelToken = Completer<void>();
-    ref.read(manualUploadCancelTokenProvider.notifier).state = cancelToken;
+    ref.read(manualUploadCancelTokenProvider.notifier).register(cancelToken);
     final remoteAssetIds = <String>[];
 
     // Initialize progress for all assets
@@ -254,10 +254,8 @@ class ActionNotifier extends Notifier<void> {
         error: error.toString(),
       );
     } finally {
-      ref.read(manualUploadCancelTokenProvider.notifier).state = null;
-      Future.delayed(const Duration(seconds: 2), () {
-        progressNotifier.clear();
-      });
+      ref.read(manualUploadCancelTokenProvider.notifier).unregister(cancelToken);
+      progressNotifier.clearAssets(assetById.keys, delay: const Duration(seconds: 2));
     }
   }
 }

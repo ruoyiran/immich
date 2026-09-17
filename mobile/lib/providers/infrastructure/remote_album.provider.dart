@@ -230,7 +230,7 @@ class RemoteAlbumNotifier extends Notifier<RemoteAlbumState> {
     Completer<void>? cancelToken;
     if (candidates.localAssetsToUpload.isNotEmpty) {
       cancelToken = Completer<void>();
-      ref.read(manualUploadCancelTokenProvider.notifier).state = cancelToken;
+      ref.read(manualUploadCancelTokenProvider.notifier).register(cancelToken);
     }
 
     try {
@@ -263,9 +263,7 @@ class RemoteAlbumNotifier extends Notifier<RemoteAlbumState> {
         if (cancelToken.isCompleted) {
           pendingNotifier.clear();
         }
-        if (ref.read(manualUploadCancelTokenProvider) == cancelToken) {
-          ref.read(manualUploadCancelTokenProvider.notifier).state = null;
-        }
+        ref.read(manualUploadCancelTokenProvider.notifier).unregister(cancelToken);
       }
     }
   }

@@ -7,6 +7,7 @@ import 'package:immich_mobile/entities/store.entity.dart';
 import 'package:immich_mobile/extensions/platform_extensions.dart';
 import 'package:immich_mobile/providers/auth.provider.dart';
 import 'package:immich_mobile/providers/background_sync.provider.dart';
+import 'package:immich_mobile/providers/background_task.provider.dart';
 import 'package:immich_mobile/providers/gallery_permission.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/memory.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/platform.provider.dart';
@@ -35,6 +36,7 @@ class AppLifeCycleNotifier extends StateNotifier<AppLifeCycleEnum> {
 
   Future<void> handleAppResume() async {
     state = AppLifeCycleEnum.resumed;
+    await _ref.read(backgroundTaskServiceProvider).onForeground();
 
     // Prevent overlapping resume operations
     if (_resumeOperation != null && !_resumeOperation!.isCompleted) {
@@ -112,15 +114,19 @@ class AppLifeCycleNotifier extends StateNotifier<AppLifeCycleEnum> {
 
     final backgroundManager = _ref.read(backgroundSyncProvider);
 
-    // Drop any sync that froze mid-flight while the app was suspended so resume
-    // starts fresh instead of awaiting the stale task (#28082). cancelResumeSyncs
-    // clears the task refs synchronously, so the syncs below see a clean slate.
-    unawaited(backgroundManager.cancelResumeSyncs());
+    // Remote sync owns a native background lease and restarts itself only after
+    // that lease expires. Preserve it across an ordinary foreground transition.
+    await backgroundManager.cancelLocalSync();
 
     try {
       await Future.wait([
         _safeRun(() => backgroundManager.syncLocal(full: CurrentPlatform.isAndroid), "syncLocal"),
-        _safeRun(() async => backgroundManager.syncRemote(), "syncRemote"),
+        _safeRun(
+          () async => backgroundManager.resumeRemoteSync(
+            shouldContinue: () => _shouldContinueOperation() && _ref.read(authProvider).isAuthenticated,
+          ),
+          "syncRemote",
+        ),
       ]);
       _ref.invalidate(driftMemoryFutureProvider);
     } catch (e, stackTrace) {
@@ -142,6 +148,7 @@ class AppLifeCycleNotifier extends StateNotifier<AppLifeCycleEnum> {
   Future<void> handleAppPause() async {
     state = AppLifeCycleEnum.paused;
     _wasPaused = true;
+    await _ref.read(backgroundTaskServiceProvider).onBackground();
 
     // Prevent overlapping pause operations
     if (_pauseOperation != null && !_pauseOperation!.isCompleted) {

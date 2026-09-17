@@ -56,15 +56,12 @@ class SyncStatusNotifier extends Notifier<SyncStatusState> {
   ///
 
   void setRemoteSyncStatus(SyncStatus status, [String? errorMessage]) {
-    // TODO(agg23): These error messages probably should be cleared, not preserved on null
-    state = state.copyWith(
-      remoteSyncStatus: status,
-      errorMessage: (status == SyncStatus.error ? errorMessage : null) ?? state.errorMessage,
-    );
+    state = state.copyWith(remoteSyncStatus: status, errorMessage: status == SyncStatus.error ? errorMessage : null);
   }
 
   void startRemoteSync() => setRemoteSyncStatus(SyncStatus.syncing);
-  void completeRemoteSync() => setRemoteSyncStatus(SyncStatus.success);
+  void completeRemoteSync({bool success = true}) =>
+      setRemoteSyncStatus(success ? SyncStatus.success : SyncStatus.error);
   void errorRemoteSync(String error) => setRemoteSyncStatus(SyncStatus.error, error);
   // A cancelled sync is neither success nor error; reset to idle so the UI does
   // not stay stuck on "syncing" (see background_sync.dart syncRemote catchError).

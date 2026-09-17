@@ -5,6 +5,7 @@ import android.content.Intent
 import android.os.Build
 import android.os.ext.SdkExtensions
 import app.alextran.immich.background.BackgroundEngineLock
+import app.alextran.immich.background.BackgroundTaskPlugin
 import app.alextran.immich.background.BackgroundWorkerApiImpl
 import app.alextran.immich.background.BackgroundWorkerFgHostApi
 import app.alextran.immich.background.BackgroundWorkerLockApi
@@ -43,6 +44,7 @@ class MainActivity : FlutterFragmentActivity() {
       HttpClientManager.initialize(ctx)
       NativeVideoPlayerPlugin.dataSourceFactory = HttpClientManager::createDataSourceFactory
       flutterEngine.plugins.add(NetworkApiPlugin())
+      flutterEngine.plugins.add(BackgroundTaskPlugin())
 
       val messenger = flutterEngine.dartExecutor.binaryMessenger
       val backgroundEngineLockImpl = BackgroundEngineLock(ctx)

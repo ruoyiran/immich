@@ -151,9 +151,9 @@ void main() {
 
   group("SyncStreamService - diagnostics", () {
     test("fetches and logs server acks before streaming", () async {
-      when(() => mockSyncApiRepo.getSyncAcks()).thenAnswer(
-        (_) async => [SyncAckDto(ack: 'AssetV2|74032|complete', type: SyncEntityType.assetV2)],
-      );
+      when(
+        () => mockSyncApiRepo.getSyncAcks(),
+      ).thenAnswer((_) async => [SyncAckDto(ack: 'AssetV2|74032|complete', type: SyncEntityType.assetV2)]);
 
       final logRecords = <LogRecord>[];
       final previousLevel = Logger.root.level;
@@ -183,7 +183,8 @@ void main() {
               record.message.contains('AssetV2=AssetV2|74032|complete'),
         ),
         isTrue,
-        reason: 'Expected the session ack state to be logged at info level, got: '
+        reason:
+            'Expected the session ack state to be logged at info level, got: '
             '${logRecords.map((r) => r.message)}',
       );
     });
@@ -283,6 +284,12 @@ void main() {
     });
 
     test("aborts and stops processing if cancelled during iteration", () async {
+      final previousLevel = Logger.root.level;
+      Logger.root.level = Level.ALL;
+      addTearDown(() => Logger.root.level = previousLevel);
+      final records = <LogRecord>[];
+      final subscription = Logger.root.onRecord.listen(records.add);
+      addTearDown(subscription.cancel);
       final cancellation = Completer<void>();
 
       sut = SyncStreamService(
@@ -309,6 +316,7 @@ void main() {
       verify(() => mockAbortCallbackWrapper()).called(1);
 
       verify(() => mockSyncApiRepo.ack(["2"])).called(1);
+      expect(records.where((record) => record.level >= Level.WARNING), isEmpty);
     });
 
     test("aborts and stops processing if cancelled before processing batch", () async {

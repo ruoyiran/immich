@@ -7,6 +7,7 @@ import 'package:immich_mobile/domain/models/store.model.dart';
 import 'package:immich_mobile/entities/store.entity.dart';
 import 'package:immich_mobile/infrastructure/repositories/network.repository.dart';
 import 'package:immich_mobile/infrastructure/repositories/settings.repository.dart';
+import 'package:immich_mobile/utils/cancellable_http_client.dart';
 import 'package:immich_mobile/utils/debug_print.dart';
 import 'package:immich_mobile/utils/url_helper.dart';
 import 'package:logging/logging.dart';
@@ -14,6 +15,7 @@ import 'package:openapi/api.dart';
 
 class ApiService {
   final ApiClient _apiClient = ApiClient(basePath: '');
+  final Future<void>? cancellation;
 
   late UsersApi usersApi;
   late AuthenticationApi authenticationApi;
@@ -38,7 +40,7 @@ class ApiService {
   late TagsApi tagsApi;
   late DuplicatesApi duplicatesApi;
 
-  ApiService() {
+  ApiService({this.cancellation}) {
     // The below line ensures that the api clients are initialized when the service is instantiated
     // This is required to avoid late initialization errors when the clients are access before the endpoint is resolved
     setEndpoint('');
@@ -53,12 +55,18 @@ class ApiService {
 
   Future<void> updateHeaders() async {
     await NetworkRepository.setHeaders(getRequestHeaders(), getServerUrls(), token: nativeAccessToken);
-    _apiClient.client = NetworkRepository.client;
+    _setClient();
+  }
+
+  void _setClient() {
+    final client = NetworkRepository.client;
+    final cancellation = this.cancellation;
+    _apiClient.client = cancellation == null ? client : CancellableHttpClient(client, cancellation);
   }
 
   void setEndpoint(String endpoint) {
     _apiClient.basePath = endpoint;
-    _apiClient.client = NetworkRepository.client;
+    _setClient();
     usersApi = UsersApi(_apiClient);
     authenticationApi = AuthenticationApi(_apiClient);
     oAuthApi = AuthenticationApi(_apiClient);
@@ -141,7 +149,7 @@ class ApiService {
 
   Future<String> _getWellKnownEndpoint(String baseUrl) async {
     try {
-      final res = await NetworkRepository.client
+      final res = await _apiClient.client
           .get(Uri.parse("$baseUrl/.well-known/immich"))
           .timeout(const Duration(seconds: 5));
 

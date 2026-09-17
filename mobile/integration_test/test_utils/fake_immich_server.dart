@@ -129,4 +129,12 @@ class SyncStream {
     _closed = true;
     await _response.close();
   }
+
+  void disconnect() {
+    if (_closed) {
+      return;
+    }
+    _closed = true;
+    _response.deadline = Duration.zero;
+  }
 }

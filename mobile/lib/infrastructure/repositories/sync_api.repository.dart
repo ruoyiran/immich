@@ -6,6 +6,7 @@ import 'package:immich_mobile/constants/constants.dart';
 import 'package:immich_mobile/domain/models/sync_event.model.dart';
 import 'package:immich_mobile/infrastructure/repositories/network.repository.dart';
 import 'package:immich_mobile/services/api.service.dart';
+import 'package:immich_mobile/utils/cancellation.dart';
 import 'package:immich_mobile/utils/semver.dart';
 import 'package:logging/logging.dart';
 import 'package:openapi/api.dart';
@@ -33,6 +34,7 @@ class SyncApiRepository {
     Function()? onReset,
     int initialBatchSize = kSyncEventInitialBatchSize,
     int batchSize = kSyncEventBatchSize,
+    Duration batchFlushInterval = const Duration(seconds: 2),
     http.Client? httpClient,
     Future<void>? abortSignal,
   }) async {
@@ -42,8 +44,12 @@ class SyncApiRepository {
     if (batchSize <= 0) {
       throw ArgumentError.value(batchSize, 'batchSize', 'must be greater than zero');
     }
+    if (batchFlushInterval <= Duration.zero) {
+      throw ArgumentError.value(batchFlushInterval, 'batchFlushInterval', 'must be greater than zero');
+    }
 
     final stopwatch = Stopwatch()..start();
+    final batchStopwatch = Stopwatch();
     final client = httpClient ?? NetworkRepository.client;
     final endpoint = "${_api.apiClient.basePath}/sync/stream";
 
@@ -102,7 +108,7 @@ class SyncApiRepository {
     bool shouldAbort = false;
 
     void abort() {
-      _logger.warning("Abort requested, stopping sync stream");
+      _logger.info("Abort requested, stopping sync stream");
       shouldAbort = true;
     }
 
@@ -111,6 +117,7 @@ class SyncApiRepository {
     Future<void> processBatch(List<String> batchLines) async {
       final events = _parseLines(batchLines);
       await onData(events, abort, reset);
+      batchStopwatch.reset();
       processedBatchCount++;
       processedEventCount += events.length;
       for (final event in events) {
@@ -133,8 +140,12 @@ class SyncApiRepository {
         throw ApiException(response.statusCode, 'Failed to get sync stream: $errorBody');
       }
 
-      await for (final chunk in response.stream.transform(utf8.decoder)) {
-        if (!receivedFirstByte) {
+      batchStopwatch.start();
+      final chunks = response.stream
+          .transform(utf8.decoder)
+          .timeout(batchFlushInterval, onTimeout: (sink) => sink.add(''));
+      await for (final chunk in chunks) {
+        if (chunk.isNotEmpty && !receivedFirstByte) {
           receivedFirstByte = true;
           _logger.info("Remote sync first byte received in ${stopwatch.elapsedMilliseconds}ms");
         }
@@ -163,16 +174,29 @@ class SyncApiRepository {
         if (processedLineCount > 0) {
           lines.removeRange(0, processedLineCount);
         }
+        if (!shouldAbort && lines.isNotEmpty && batchStopwatch.elapsed >= batchFlushInterval) {
+          await processBatch(List.of(lines));
+          lines.clear();
+          nextBatchSize = batchSize;
+        }
       }
 
       if (lines.isNotEmpty && !shouldAbort) {
         await processBatch(lines);
       }
     } catch (error, stack) {
-      _logger.warning("Remote sync failed after ${stopwatch.elapsedMilliseconds}ms", error, stack);
+      if (isCancellationError(error)) {
+        _logger.info("Remote sync cancelled after ${stopwatch.elapsedMilliseconds}ms");
+      } else {
+        _logger.warning("Remote sync failed after ${stopwatch.elapsedMilliseconds}ms", error, stack);
+      }
       return Future.error(error, stack);
     }
     stopwatch.stop();
+    if (shouldAbort) {
+      _logger.info("Remote sync cancelled after ${stopwatch.elapsedMilliseconds}ms");
+      return;
+    }
     final typeSummary = eventCounts.entries.map((e) => '${e.key}=${e.value}').join(' ');
     _logger.info(
       "Remote sync completed in ${stopwatch.elapsedMilliseconds}ms "

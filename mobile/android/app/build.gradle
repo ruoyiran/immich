@@ -89,6 +89,7 @@ flutter {
 }
 
 dependencies {
+  testImplementation libs.junit
   implementation libs.okhttp
   implementation libs.cronet.embedded
   implementation libs.media3.datasource.okhttp

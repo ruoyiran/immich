@@ -450,6 +450,7 @@ void main() {
       }
       expect(request.method, 'GET');
       getRequests++;
+      expect(request.headers['cache-control'], 'no-cache, no-store');
       if (getRequests == 1) {
         return _json(200, {
           'upload_id': 'asset-processing',
@@ -634,6 +635,401 @@ void main() {
     expect(result.isCancelled, isTrue);
     expect(getRequests, 0);
   });
+
+  for (final stage in ['start', 'status', 'status response body']) {
+    test('cancellation aborts an active resumable $stage request', () async {
+      final root = await Directory.systemTemp.createTemp('resumable-$stage-abort-test-');
+      addTearDown(() => root.delete(recursive: true));
+      final source = File('${root.path}/asset.jpg')..writeAsBytesSync(utf8.encode('abcde'));
+      final cancel = Completer<void>();
+      final pending = _PendingResponse(streamResponse: stage == 'status response body');
+      addTearDown(pending.release);
+      final client = _RecordingClient((request, body) async {
+        if (stage == 'start' || request.method == 'GET') {
+          return pending.send(request);
+        }
+        return _json(200, {
+          'upload_id': 'asset-$stage-abort',
+          'generation': 'gen-a',
+          'offset': 5,
+          'size': 5,
+          'complete': true,
+          'processing': true,
+        });
+      });
+      final repository = UploadRepository(
+        client: client,
+        stateDirectory: root,
+        endpoint: 'http://server/api',
+        headers: const {},
+        resumableStatusPollInterval: Duration.zero,
+        registerDownloaderCallbacks: false,
+      );
+
+      final upload = repository.uploadFile(
+        file: source,
+        originalFileName: 'asset.jpg',
+        fields: const {'fileCreatedAt': '2026-08-12T01:02:03Z', 'fileModifiedAt': '2026-08-12T01:02:03Z'},
+        cancelToken: cancel,
+        logContext: '$stage cancellation',
+        checksum: _md5Checksum('abcde'),
+        uploadId: 'asset-$stage-abort',
+      );
+      await pending.started.future;
+      cancel.complete();
+      final result = await upload.timeout(const Duration(seconds: 1));
+
+      expect(result.isCancelled, isTrue);
+      expect(result.errorMessage, isNull);
+      expect(Directory('${root.path}/resumable-uploads').listSync(), hasLength(1));
+    });
+  }
+
+  test('aborting an active chunk preserves the attempt and retries from the server offset', () async {
+    final root = await Directory.systemTemp.createTemp('resumable-chunk-abort-test-');
+    addTearDown(() => root.delete(recursive: true));
+    final source = File('${root.path}/asset.jpg')..writeAsBytesSync(utf8.encode('abcde'));
+    final cancel = Completer<void>();
+    final pending = _PendingResponse();
+    addTearDown(pending.release);
+    final ranges = <String>[];
+    var startRequests = 0;
+    final client = _RecordingClient((request, body) async {
+      if (request.method == 'POST') {
+        startRequests++;
+        return _json(200, {
+          'upload_id': 'asset-chunk-abort',
+          'generation': 'gen-a',
+          // The server accepted a prefix before the first request was aborted.
+          'offset': startRequests == 1 ? 0 : 2,
+          'size': 5,
+          'complete': false,
+        });
+      }
+      ranges.add(request.headers['content-range']!);
+      if (ranges.length == 1) {
+        return pending.send(request);
+      }
+      expect(body, utf8.encode('cde'));
+      return _json(200, {
+        'upload_id': 'asset-chunk-abort',
+        'generation': 'gen-a',
+        'offset': 5,
+        'size': 5,
+        'complete': true,
+        'asset_id': '11111111-1111-4111-8111-111111111111',
+        'asset_status': 'created',
+      });
+    });
+    final repository = UploadRepository(
+      client: client,
+      stateDirectory: root,
+      endpoint: 'http://server/api',
+      headers: const {},
+      registerDownloaderCallbacks: false,
+    );
+
+    Future<UploadResult> upload(Completer<void>? token) => repository.uploadFile(
+      file: source,
+      originalFileName: 'asset.jpg',
+      fields: const {'fileCreatedAt': '2026-08-12T01:02:03Z', 'fileModifiedAt': '2026-08-12T01:02:03Z'},
+      cancelToken: token,
+      logContext: 'chunk cancellation',
+      checksum: _md5Checksum('abcde'),
+      uploadId: 'asset-chunk-abort',
+    );
+
+    final first = upload(cancel);
+    await pending.started.future;
+    cancel.complete();
+    final cancelled = await first.timeout(const Duration(seconds: 1));
+
+    expect(cancelled.isCancelled, isTrue);
+    expect(cancelled.errorMessage, isNull);
+    final states = Directory('${root.path}/resumable-uploads');
+    final checkpoint = jsonDecode(await (states.listSync().single as File).readAsString()) as Map<String, dynamic>;
+    expect(checkpoint['generation'], 'gen-a');
+    expect(checkpoint['offset'], 0);
+    expect(source.existsSync(), isTrue);
+
+    final retried = await upload(Completer<void>());
+
+    expect(retried.remoteAssetId, '11111111-1111-4111-8111-111111111111');
+    expect(startRequests, 2);
+    expect(ranges, ['bytes 0-4/5', 'bytes 2-4/5']);
+    expect(states.listSync(), isEmpty);
+  });
+
+  test('a completed cancellation classifies a failed request as cancelled', () async {
+    final root = await Directory.systemTemp.createTemp('resumable-abort-error-test-');
+    addTearDown(() => root.delete(recursive: true));
+    final source = File('${root.path}/asset.jpg')..writeAsBytesSync(utf8.encode('abcde'));
+    final cancel = Completer<void>();
+    final repository = UploadRepository(
+      client: _RecordingClient((request, body) async {
+        cancel.complete();
+        throw ClientException('Connection closed');
+      }),
+      stateDirectory: root,
+      endpoint: 'http://server/api',
+      headers: const {},
+      registerDownloaderCallbacks: false,
+    );
+
+    final result = await repository.uploadFile(
+      file: source,
+      originalFileName: 'asset.jpg',
+      fields: const {'fileCreatedAt': '2026-08-12T01:02:03Z', 'fileModifiedAt': '2026-08-12T01:02:03Z'},
+      cancelToken: cancel,
+      logContext: 'cancelled request error',
+      checksum: _md5Checksum('abcde'),
+      uploadId: 'asset-abort-error',
+    );
+
+    expect(result.isCancelled, isTrue);
+    expect(result.errorMessage, isNull);
+  });
+
+  for (final stage in ['server/config', 'assets/bulk-upload-check', 'assets/bulk-metadata']) {
+    test('cancellation aborts the uploadFile $stage request', () async {
+      final root = await Directory.systemTemp.createTemp('upload-preflight-abort-test-');
+      addTearDown(() => root.delete(recursive: true));
+      final source = File('${root.path}/asset.jpg')..writeAsBytesSync(utf8.encode('abcde'));
+      final cancel = Completer<void>();
+      final pending = _PendingResponse();
+      addTearDown(pending.release);
+      final requests = <String>[];
+      final client = _RecordingClient(
+        (request, body) async {
+          requests.add(request.url.path);
+          if (request.url.path.endsWith(stage)) {
+            return pending.send(request);
+          }
+          if (request.url.path.endsWith('/server/config')) {
+            return _json(200, {'checksumAlgorithm': 'md5-size'});
+          }
+          if (request.url.path.endsWith('/assets/bulk-upload-check')) {
+            return _json(200, {
+              'results': [
+                {'id': 'asset-preflight-abort', 'action': 'reject', 'assetId': '11111111-1111-4111-8111-111111111111'},
+              ],
+            });
+          }
+          return _json(500, {'error': 'unexpected request after cancellation'});
+        },
+        interceptBulkUploadCheck: false,
+        interceptServerConfig: false,
+      );
+      final repository = UploadRepository(
+        client: client,
+        stateDirectory: root,
+        endpoint: 'http://server/api',
+        headers: const {},
+        registerDownloaderCallbacks: false,
+      );
+
+      final upload = repository.uploadFile(
+        file: source,
+        originalFileName: 'asset.jpg',
+        fields: const {'fileCreatedAt': '2026-08-12T01:02:03Z', 'fileModifiedAt': '2026-08-12T01:02:03Z'},
+        cancelToken: cancel,
+        logContext: 'preflight cancellation',
+        checksum: _md5Checksum('abcde'),
+        uploadId: 'asset-preflight-abort',
+      );
+      await pending.started.future;
+      cancel.complete();
+      final result = await upload.timeout(const Duration(seconds: 1));
+
+      expect(result.isCancelled, isTrue);
+      expect(result.errorMessage, isNull);
+      expect(requests.last, '/api/$stage');
+    });
+  }
+
+  for (final cancelBeforeSuccess in [true, false]) {
+    test('capability cancellation is isolated and retains another successful check ($cancelBeforeSuccess)', () async {
+      final root = await Directory.systemTemp.createTemp('upload-capability-isolation-test-');
+      addTearDown(() => root.delete(recursive: true));
+      final source = File('${root.path}/asset.jpg')..writeAsBytesSync(utf8.encode('abcde'));
+      final firstPending = _PendingResponse();
+      final secondPending = _PendingResponse();
+      addTearDown(firstPending.release);
+      addTearDown(secondPending.release);
+      var capabilityRequests = 0;
+      final client = _RecordingClient((request, body) async {
+        if (request.url.path.endsWith('/server/config')) {
+          capabilityRequests++;
+          return switch (capabilityRequests) {
+            1 => firstPending.send(request),
+            2 => secondPending.send(request),
+            _ => _json(500, {'error': 'successful capability should have been cached'}),
+          };
+        }
+        final start = jsonDecode(utf8.decode(body)) as Map<String, dynamic>;
+        return _json(200, {
+          'upload_id': start['upload_id'],
+          'generation': 'gen-a',
+          'offset': 5,
+          'size': 5,
+          'complete': true,
+          'asset_id': '11111111-1111-4111-8111-111111111111',
+          'asset_status': 'created',
+        });
+      }, interceptServerConfig: false);
+      final repository = UploadRepository(
+        client: client,
+        stateDirectory: root,
+        endpoint: 'http://server/api',
+        headers: const {},
+        registerDownloaderCallbacks: false,
+      );
+
+      Future<UploadResult> upload(String id, Completer<void> token) => repository.uploadFile(
+        file: source,
+        originalFileName: 'asset.jpg',
+        fields: const {'fileCreatedAt': '2026-08-12T01:02:03Z', 'fileModifiedAt': '2026-08-12T01:02:03Z'},
+        cancelToken: token,
+        logContext: 'capability cancellation isolation',
+        checksum: _md5Checksum('abcde'),
+        uploadId: id,
+      );
+
+      final firstCancel = Completer<void>();
+      final first = upload('first', firstCancel);
+      await firstPending.started.future;
+      var secondFinished = false;
+      final second = upload('second', Completer<void>()).whenComplete(() => secondFinished = true);
+      await secondPending.started.future.timeout(const Duration(seconds: 1));
+      if (cancelBeforeSuccess) {
+        firstCancel.complete();
+        expect((await first.timeout(const Duration(seconds: 1))).isCancelled, isTrue);
+        expect(secondFinished, isFalse);
+      }
+
+      secondPending.release(_json(200, {'checksumAlgorithm': 'md5-size'}));
+      expect((await second).isSuccess, isTrue);
+      if (!cancelBeforeSuccess) {
+        firstCancel.complete();
+        expect((await first.timeout(const Duration(seconds: 1))).isCancelled, isTrue);
+      }
+
+      expect((await upload('third', Completer<void>())).isSuccess, isTrue);
+      expect(capabilityRequests, 2);
+    });
+  }
+
+  for (final stage in ['server/config', 'assets/bulk-device-check', 'assets/bulk-metadata']) {
+    test('cancellation aborts the local identity preflight $stage request', () async {
+      final cancel = Completer<void>();
+      final pending = _PendingResponse();
+      addTearDown(pending.release);
+      final requests = <String>[];
+      final repository = UploadRepository(
+        client: _RecordingClient((request, body) async {
+          requests.add(request.url.path);
+          if (request.url.path.endsWith(stage)) {
+            return pending.send(request);
+          }
+          if (request.url.path.endsWith('/server/config')) {
+            return _json(200, {'checksumAlgorithm': 'md5-size'});
+          }
+          if (request.url.path.endsWith('/assets/bulk-device-check')) {
+            return _json(200, {
+              'results': [
+                {
+                  'id': 'local-asset',
+                  'action': 'reject',
+                  'assetId': '11111111-1111-4111-8111-111111111111',
+                  'checksum': _md5Checksum('abcde'),
+                  'isTrashed': false,
+                },
+              ],
+            });
+          }
+          return _json(500, {'error': 'unexpected request after cancellation'});
+        }, interceptServerConfig: false),
+        endpoint: 'http://server/api',
+        headers: const {},
+        registerDownloaderCallbacks: false,
+      );
+
+      final preflight = repository.preflightLocalAssetIdentity(
+        assetId: 'local-asset',
+        localAssetId: 'platform-asset',
+        deviceId: 'device-1',
+        size: 5,
+        modifiedAt: DateTime.utc(2026, 8, 12, 1, 2, 3),
+        originalFileName: 'asset.jpg',
+        fields: const {'fileCreatedAt': '2026-08-12T01:02:03Z', 'fileModifiedAt': '2026-08-12T01:02:03Z'},
+        cancelToken: cancel,
+      );
+      await pending.started.future;
+      final aborted = expectLater(
+        preflight.timeout(const Duration(seconds: 1)),
+        throwsA(isA<RequestAbortedException>()),
+      );
+      cancel.complete();
+      await aborted;
+
+      expect(requests.last, '/api/$stage');
+    });
+  }
+
+  for (final stage in ['capability', 'start', 'conflict status']) {
+    test('cancellation aborts terminal preflight $stage and preserves the checkpoint', () async {
+      final root = await Directory.systemTemp.createTemp('upload-terminal-abort-test-');
+      addTearDown(() => root.delete(recursive: true));
+      final source = File('${root.path}/asset.jpg')..writeAsBytesSync(utf8.encode('abcde'));
+      final checksum = _md5Checksum('abcde');
+      await _writeLegacyState(
+        root,
+        _logicalUploadId('http://server/api', 'terminal-abort', checksum),
+        sourcePath: source.path,
+        originalName: 'asset.jpg',
+        checksum: checksum,
+        size: 5,
+        metadata: {},
+        generation: 'gen-a',
+        offset: 2,
+      );
+      final cancel = Completer<void>();
+      final pending = _PendingResponse();
+      addTearDown(pending.release);
+      final repository = UploadRepository(
+        client: _RecordingClient((request, body) async {
+          if (request.url.path.endsWith('/server/config') && stage != 'capability') {
+            return _json(200, {'checksumAlgorithm': 'md5-size'});
+          }
+          if (stage == 'conflict status' && request.method == 'POST') {
+            return _json(409, {'error': 'upload_id belongs to different file; replace_generation is required'});
+          }
+          return pending.send(request);
+        }, interceptServerConfig: false),
+        stateDirectory: root,
+        endpoint: 'http://server/api',
+        headers: const {},
+        registerDownloaderCallbacks: false,
+      );
+
+      final preflight = repository.preflightResumableTerminal(
+        checksum: checksum,
+        uploadId: 'terminal-abort',
+        cancelToken: cancel,
+      );
+      await pending.started.future;
+      cancel.complete();
+      final result = await preflight.timeout(const Duration(seconds: 1));
+
+      expect(result?.isCancelled, isTrue);
+      expect(result?.errorMessage, isNull);
+      final states = Directory('${root.path}/resumable-uploads');
+      final checkpoint = jsonDecode(await (states.listSync().single as File).readAsString()) as Map<String, dynamic>;
+      expect(checkpoint['generation'], 'gen-a');
+      expect(checkpoint['offset'], 2);
+      expect(source.existsSync(), isTrue);
+    });
+  }
 
   test('resumable upload rejects an unsafe server chunk recommendation', () async {
     final root = await Directory.systemTemp.createTemp('resumable-invalid-chunk-test-');
@@ -2262,23 +2658,51 @@ Future<void> _writeLegacyState(
 
 typedef _Handler = Future<StreamedResponse> Function(BaseRequest request, List<int> body);
 
+class _PendingResponse {
+  final started = Completer<void>();
+  final _response = Completer<StreamedResponse>();
+  final bool streamResponse;
+
+  _PendingResponse({this.streamResponse = false});
+
+  Future<StreamedResponse> send(BaseRequest request) {
+    started.complete();
+    final response = Future.any([
+      _response.future,
+      if (request case Abortable(:final abortTrigger?))
+        abortTrigger.then<StreamedResponse>((_) => throw RequestAbortedException(request.url)),
+    ]);
+    return streamResponse
+        ? Future.value(StreamedResponse(Stream.fromFuture(response).asyncExpand((value) => value.stream), 200))
+        : response;
+  }
+
+  void release([StreamedResponse? response]) {
+    if (!_response.isCompleted) {
+      _response.complete(response ?? _json(503, {'error': 'server response released during test cleanup'}));
+    }
+  }
+}
+
 String _md5Checksum(String value) => base64Encode(md5.convert(utf8.encode(value)).bytes);
 
 class _RecordingClient extends BaseClient {
   final _Handler handler;
   final bool interceptBulkUploadCheck;
+  final bool interceptServerConfig;
   final Map<String, Object> serverConfig;
 
   _RecordingClient(
     this.handler, {
     this.interceptBulkUploadCheck = true,
+    this.interceptServerConfig = true,
     this.serverConfig = const {'checksumAlgorithm': 'md5-size'},
   });
 
   @override
   Future<StreamedResponse> send(BaseRequest request) async {
     final body = await request.finalize().toBytes();
-    if (request.method == 'GET' && request.url.path.endsWith('/server/config')) {
+    if (interceptServerConfig && request.method == 'GET' && request.url.path.endsWith('/server/config')) {
       return _json(200, serverConfig);
     }
     if (interceptBulkUploadCheck &&

@@ -10,6 +10,7 @@ import 'package:immich_mobile/entities/store.entity.dart';
 import 'package:immich_mobile/models/auth/auth_state.model.dart';
 import 'package:immich_mobile/models/auth/login_response.model.dart';
 import 'package:immich_mobile/providers/api.provider.dart';
+import 'package:immich_mobile/providers/background_sync.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/settings.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/user.provider.dart';
 import 'package:immich_mobile/repositories/original_media_cache.repository.dart';
@@ -88,6 +89,15 @@ class AuthNotifier extends StateNotifier<AuthState> {
 
   Future<void> logout() async {
     try {
+      try {
+        await Future.wait([
+          _ref.read(backgroundSyncProvider).cancel(),
+          _ref.read(foregroundUploadServiceProvider).cancelAndDrain(),
+        ]);
+      } catch (error, stackTrace) {
+        _log.warning('Failed to drain active transfers during logout', error, stackTrace);
+      }
+
       await _secureStorageService.delete(kSecuredPinCode);
       await _widgetService.clearCredentials();
       try {
@@ -97,7 +107,6 @@ class AuthNotifier extends StateNotifier<AuthState> {
       }
 
       await _authService.logout();
-      _ref.read(foregroundUploadServiceProvider).cancel();
     } finally {
       await _cleanUp();
     }

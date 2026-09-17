@@ -5,9 +5,12 @@ import 'package:flutter/services.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:immich_mobile/domain/services/log.service.dart';
 import 'package:immich_mobile/entities/store.entity.dart';
+import 'package:immich_mobile/providers/api.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/cancel.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/db.provider.dart';
+import 'package:immich_mobile/services/api.service.dart';
 import 'package:immich_mobile/utils/bootstrap.dart';
+import 'package:immich_mobile/utils/cancellation.dart';
 import 'package:immich_mobile/wm_executor.dart';
 import 'package:logging/logging.dart';
 import 'package:worker_manager/worker_manager.dart' show Cancelable;
@@ -23,6 +26,7 @@ class InvalidIsolateUsageException implements Exception {
 Cancelable<T?> runInIsolateGentle<T>({
   required Future<T> Function(ProviderContainer ref) computation,
   String? debugLabel,
+  bool waitForCancellation = false,
 }) {
   final token = RootIsolateToken.instance;
   if (token == null) {
@@ -36,13 +40,21 @@ Cancelable<T?> runInIsolateGentle<T>({
     final log = Logger("IsolateLogger");
     final (drift, logDb) = await Bootstrap.initDomain(shouldBufferLogs: false, listenStoreUpdates: false);
     final ref = ProviderContainer(
-      overrides: [cancellationProvider.overrideWithValue(onCancel), driftProvider.overrideWith(driftOverride(drift))],
+      overrides: [
+        cancellationProvider.overrideWithValue(onCancel),
+        apiServiceProvider.overrideWith((_) => ApiService(cancellation: onCancel.future)),
+        driftProvider.overrideWith(driftOverride(drift)),
+      ],
     );
 
     try {
       return await computation(ref);
     } catch (error, stack) {
-      log.severe("Error in runInIsolateGentle${debugLabel == null ? '' : ' for $debugLabel'}", error, stack);
+      if (onCancel.isCompleted && isCancellationError(error)) {
+        log.info("Cancelled runInIsolateGentle${debugLabel == null ? '' : ' for $debugLabel'}");
+      } else {
+        log.severe("Error in runInIsolateGentle${debugLabel == null ? '' : ' for $debugLabel'}", error, stack);
+      }
       return null;
     } finally {
       ref.dispose();
@@ -51,5 +63,5 @@ Cancelable<T?> runInIsolateGentle<T>({
       await logDb.close();
       await drift.close();
     }
-  });
+  }, waitForCancellation: waitForCancellation);
 }

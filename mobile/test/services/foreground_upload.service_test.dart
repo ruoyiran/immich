@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -10,11 +11,13 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart';
 import 'package:http/testing.dart';
 import 'package:immich_mobile/domain/models/store.model.dart';
+import 'package:immich_mobile/domain/services/background_task.service.dart';
 import 'package:immich_mobile/domain/services/store.service.dart';
 import 'package:immich_mobile/entities/store.entity.dart';
 import 'package:immich_mobile/infrastructure/repositories/db.repository.dart';
 import 'package:immich_mobile/infrastructure/repositories/settings.repository.dart';
 import 'package:immich_mobile/infrastructure/repositories/store.repository.dart';
+import 'package:immich_mobile/platform/background_task_api.g.dart';
 import 'package:immich_mobile/repositories/upload.repository.dart';
 import 'package:immich_mobile/services/foreground_upload.service.dart';
 import 'package:mocktail/mocktail.dart';
@@ -22,6 +25,7 @@ import 'package:mocktail/mocktail.dart';
 import '../fixtures/asset.stub.dart';
 import '../infrastructure/repository.mock.dart';
 import '../mocks/asset_entity.mock.dart';
+import '../mocks/background_task_host.mock.dart';
 import '../repository.mocks.dart';
 
 void main() {
@@ -64,6 +68,7 @@ void main() {
         modifiedAt: any(named: 'modifiedAt'),
         originalFileName: any(named: 'originalFileName'),
         fields: any(named: 'fields'),
+        cancelToken: any(named: 'cancelToken'),
       ),
     ).thenAnswer((_) async => null);
     when(
@@ -81,6 +86,7 @@ void main() {
       () => mockUploadRepository.preflightResumableTerminal(
         checksum: any(named: 'checksum'),
         uploadId: any(named: 'uploadId'),
+        cancelToken: any(named: 'cancelToken'),
       ),
     ).thenAnswer((_) async => null);
   });
@@ -94,6 +100,7 @@ void main() {
         fields: any(named: 'fields'),
         cancelToken: any(named: 'cancelToken'),
         onProgress: any(named: 'onProgress'),
+        onProcessing: any(named: 'onProcessing'),
         logContext: any(named: 'logContext'),
         checksum: any(named: 'checksum'),
         uploadId: any(named: 'uploadId'),
@@ -115,6 +122,7 @@ void main() {
         fields: any(named: 'fields'),
         cancelToken: any(named: 'cancelToken'),
         onProgress: any(named: 'onProgress'),
+        onProcessing: any(named: 'onProcessing'),
         logContext: any(named: 'logContext'),
         checksum: any(named: 'checksum'),
         uploadId: any(named: 'uploadId'),
@@ -126,7 +134,156 @@ void main() {
     return captured;
   }
 
+  test('shared upload continues after background expiry without reporting a false failure', () async {
+    final host = FakeBackgroundTaskHost();
+    final background = BackgroundTaskService(host);
+    addTearDown(background.dispose);
+    sut = ForegroundUploadService(
+      mockUploadRepository,
+      mockStorageRepository,
+      mockAssetMediaRepository,
+      backgroundTaskService: background,
+    );
+    final root = await Directory.systemTemp.createTemp('background-upload-');
+    addTearDown(() => root.delete(recursive: true));
+    final file = File('${root.path}/photo.jpg')..writeAsBytesSync([1, 2, 3]);
+    when(() => mockStorageRepository.clearCache()).thenAnswer((_) async {});
+    when(() => mockUploadRepository.hashShareIntentFile(file)).thenAnswer((_) async => 'checksum');
+    final started = Completer<void>();
+    var attempts = 0;
+    when(
+      () => mockUploadRepository.uploadFile(
+        file: any(named: 'file'),
+        originalFileName: any(named: 'originalFileName'),
+        fields: any(named: 'fields'),
+        cancelToken: any(named: 'cancelToken'),
+        onProgress: any(named: 'onProgress'),
+        onProcessing: any(named: 'onProcessing'),
+        logContext: any(named: 'logContext'),
+        checksum: any(named: 'checksum'),
+        uploadId: any(named: 'uploadId'),
+      ),
+    ).thenAnswer((invocation) async {
+      attempts++;
+      if (attempts == 1) {
+        started.complete();
+        await (invocation.namedArguments[#cancelToken] as Completer<void>).future;
+        return UploadResult.cancelled();
+      }
+      return UploadResult.success(remoteAssetId: 'uploaded');
+    });
+    final successes = <String>[];
+    final errors = <String>[];
+    final work = sut.uploadShareIntent(
+      [file],
+      onSuccess: (_, id) => successes.add(id),
+      onError: (_, e) => errors.add(e),
+    );
+    await started.future;
+    await background.onBackground();
+    final taskId = host.active.single;
+    host.active.remove(taskId);
+    await background.onExpired(taskId);
+    await Future<void>.delayed(Duration.zero);
+    expect(successes, isEmpty);
+    expect(errors, isEmpty);
+    expect(attempts, 1);
+    await background.onForeground();
+    await work;
+    expect(successes, ['uploaded']);
+    expect(errors, isEmpty);
+    expect(attempts, 2);
+    expect(host.active, isEmpty);
+    expect(host.modes, [BackgroundTaskMode.continued, BackgroundTaskMode.continued]);
+  });
+
   group('uploadSingleAsset', () {
+    test('processing releases transfer slots without reporting success', () async {
+      final directory = await Directory.systemTemp.createTemp('upload-processing-');
+      addTearDown(() => directory.delete(recursive: true));
+      final files = List.generate(5, (index) => File('${directory.path}/photo-$index.jpg')..writeAsBytesSync([index]));
+      when(() => mockStorageRepository.clearCache()).thenAnswer((_) async {});
+      when(() => mockUploadRepository.hashShareIntentFile(any())).thenAnswer((_) async => 'checksum');
+      final processing = <String, void Function()>{};
+      final completed = Completer<void>();
+      final successes = <String>[];
+      when(
+        () => mockUploadRepository.uploadFile(
+          file: any(named: 'file'),
+          originalFileName: any(named: 'originalFileName'),
+          fields: any(named: 'fields'),
+          cancelToken: any(named: 'cancelToken'),
+          onProgress: any(named: 'onProgress'),
+          onProcessing: any(named: 'onProcessing'),
+          logContext: any(named: 'logContext'),
+          checksum: any(named: 'checksum'),
+          uploadId: any(named: 'uploadId'),
+        ),
+      ).thenAnswer((invocation) async {
+        final name = invocation.namedArguments[#originalFileName] as String;
+        final token = invocation.namedArguments[#cancelToken] as Completer<void>;
+        processing[name] = invocation.namedArguments[#onProcessing] as void Function()? ?? () {};
+        await Future.any([completed.future, token.future]);
+        return token.isCompleted ? UploadResult.cancelled() : UploadResult.success(remoteAssetId: name);
+      });
+      final work = sut.uploadShareIntent(files, onSuccess: (_, id) => successes.add(id));
+      try {
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+        expect(processing, hasLength(3));
+        for (final notify in processing.values.toList()) {
+          notify();
+          notify();
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+        expect(processing, hasLength(5));
+        expect(successes, isEmpty);
+        completed.complete();
+        await work;
+        expect(successes, hasLength(5));
+      } finally {
+        sut.cancel();
+        await work;
+      }
+    });
+
+    test('overlapping batches share the transfer limit and cancellation drains queued files', () async {
+      final directory = await Directory.systemTemp.createTemp('upload-batches-');
+      addTearDown(() => directory.delete(recursive: true));
+      final files = List.generate(6, (index) => File('${directory.path}/photo-$index.jpg')..writeAsBytesSync([index]));
+      when(() => mockStorageRepository.clearCache()).thenAnswer((_) async {});
+      when(() => mockUploadRepository.hashShareIntentFile(any())).thenAnswer((_) async => 'checksum');
+      final started = <String>[];
+      when(
+        () => mockUploadRepository.uploadFile(
+          file: any(named: 'file'),
+          originalFileName: any(named: 'originalFileName'),
+          fields: any(named: 'fields'),
+          cancelToken: any(named: 'cancelToken'),
+          onProgress: any(named: 'onProgress'),
+          onProcessing: any(named: 'onProcessing'),
+          logContext: any(named: 'logContext'),
+          checksum: any(named: 'checksum'),
+          uploadId: any(named: 'uploadId'),
+        ),
+      ).thenAnswer((invocation) async {
+        started.add(invocation.namedArguments[#originalFileName] as String);
+        await (invocation.namedArguments[#cancelToken] as Completer<void>).future;
+        return UploadResult.cancelled();
+      });
+      final work = Future.wait([
+        sut.uploadShareIntent(files.take(3).toList()),
+        sut.uploadShareIntent(files.skip(3).toList()),
+      ]);
+      try {
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+        expect(started, hasLength(3));
+      } finally {
+        await sut.cancelAndDrain();
+        await work;
+      }
+      expect(started, hasLength(3));
+    });
+
     test('device tuple match returns before hashing or opening the asset', () async {
       final asset = LocalAssetStub.image1.copyWith(contentSize: 1234);
       when(
@@ -203,6 +360,77 @@ void main() {
           modifiedAt: any(named: 'modifiedAt'),
         ),
       );
+    });
+
+    test('Live Photo releases its motion slot and reacquires before uploading the still', () async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      final directory = await Directory.systemTemp.createTemp('live-processing-');
+      addTearDown(() => directory.delete(recursive: true));
+      final still = File('${directory.path}/live.heic')..writeAsBytesSync([1]);
+      final motion = File('${directory.path}/motion.mov')..writeAsBytesSync([2]);
+      final others = List.generate(3, (index) => File('${directory.path}/other-$index.jpg')..writeAsBytesSync([index]));
+      final asset = LocalAssetStub.image1;
+      final entity = MockAssetEntity();
+      when(() => entity.isLivePhoto).thenReturn(true);
+      when(() => mockStorageRepository.clearCache()).thenAnswer((_) async {});
+      when(() => mockStorageRepository.getAssetEntityForAsset(asset)).thenAnswer((_) async => entity);
+      when(() => mockStorageRepository.isAssetAvailableLocally(asset.id)).thenAnswer((_) async => true);
+      when(() => mockStorageRepository.getFileForAsset(asset.id)).thenAnswer((_) async => still);
+      when(() => mockStorageRepository.getMotionFileForAsset(asset)).thenAnswer((_) async => motion);
+      when(() => mockAssetMediaRepository.getOriginalFilename(asset.id)).thenAnswer((_) async => 'live.heic');
+      when(() => mockUploadRepository.hashShareIntentFile(any())).thenAnswer((_) async => 'checksum');
+      final processing = <String, void Function()>{};
+      final finishes = <String, Completer<void>>{};
+      final fields = <String, Map<String, String>>{};
+      when(
+        () => mockUploadRepository.uploadFile(
+          file: any(named: 'file'),
+          originalFileName: any(named: 'originalFileName'),
+          fields: any(named: 'fields'),
+          cancelToken: any(named: 'cancelToken'),
+          onProgress: any(named: 'onProgress'),
+          onProcessing: any(named: 'onProcessing'),
+          logContext: any(named: 'logContext'),
+          checksum: any(named: 'checksum'),
+          uploadId: any(named: 'uploadId'),
+        ),
+      ).thenAnswer((invocation) async {
+        final name = invocation.namedArguments[#originalFileName] as String;
+        final token = invocation.namedArguments[#cancelToken] as Completer<void>;
+        processing[name] = invocation.namedArguments[#onProcessing] as void Function();
+        fields[name] = invocation.namedArguments[#fields] as Map<String, String>;
+        final finish = finishes[name] = Completer<void>();
+        await Future.any([finish.future, token.future]);
+        return token.isCompleted ? UploadResult.cancelled() : UploadResult.success(remoteAssetId: name);
+      });
+      final manual = sut.uploadManual([asset]);
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+      final shared = sut.uploadShareIntent(others);
+      try {
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+        expect(processing, hasLength(3));
+        processing['live.mov']!();
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+        expect(processing, hasLength(4));
+        expect(processing.containsKey('live.heic'), isFalse);
+        finishes['live.mov']!.complete();
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+        expect(processing.containsKey('live.heic'), isFalse);
+        processing.entries.firstWhere((entry) => entry.key.startsWith('other')).value();
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+        expect(fields['live.heic']?['livePhotoVideoId'], 'live.mov');
+        for (final finish in finishes.values) {
+          if (!finish.isCompleted) {
+            finish.complete();
+          }
+        }
+        await Future.wait([manual, shared]);
+        verify(() => mockStorageRepository.clearCache()).called(1);
+      } finally {
+        await sut.cancelAndDrain();
+        await Future.wait([manual, shared]);
+      }
     });
 
     test(

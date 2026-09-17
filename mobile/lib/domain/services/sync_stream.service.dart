@@ -44,7 +44,7 @@ class SyncStreamService {
 
   bool get isCancelled => _cancellation?.isCompleted ?? false;
 
-  Future<bool> sync() async {
+  Future<bool> sync({Future<void> Function(int completed)? onProgress}) async {
     _logger.info("Remote sync request for user");
     final serverVersion = await _api.serverInfoApi.getServerVersion();
     if (serverVersion == null) {
@@ -60,9 +60,7 @@ class SyncStreamService {
     // on a warm install means the server is not durably persisting session acks.
     try {
       final acks = await _syncApiRepository.getSyncAcks();
-      final latestAckByType = <SyncEntityType, String>{
-        for (final ack in acks) ack.type: ack.ack,
-      };
+      final latestAckByType = <SyncEntityType, String>{for (final ack in acks) ack.type: ack.ack};
       final typeSummary = latestAckByType.entries.map((e) => '${e.key}=${e.value}').join(', ');
       _logger.info("Remote sync session acks: ${latestAckByType.length} (types: $typeSummary)");
     } catch (error, stack) {
@@ -81,8 +79,17 @@ class SyncStreamService {
 
     // Start the sync stream and handle events
     bool shouldReset = false;
+    var completed = 0;
+    Future<void> handleEvents(List<SyncEvent> events, Function() abort, Function() reset) async {
+      await _handleEvents(events, abort, reset);
+      if (!isCancelled) {
+        completed += events.length;
+        await onProgress?.call(completed);
+      }
+    }
+
     await _syncApiRepository.streamChanges(
-      _handleEvents,
+      handleEvents,
       serverVersion: serverSemVer,
       onReset: () => shouldReset = true,
       abortSignal: _cancellation?.future,
@@ -90,7 +97,7 @@ class SyncStreamService {
     if (shouldReset) {
       _logger.info("Resetting sync state as requested by server");
       await _syncApiRepository.streamChanges(
-        _handleEvents,
+        handleEvents,
         serverVersion: serverSemVer,
         abortSignal: _cancellation?.future,
       );
@@ -195,7 +202,7 @@ class SyncStreamService {
     final List<SyncEvent> items = [];
     for (final event in events) {
       if (isCancelled) {
-        _logger.warning("Sync stream cancelled");
+        _logger.info("Sync stream cancelled");
         abort();
         return;
       }

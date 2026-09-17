@@ -72,6 +72,107 @@ void main() {
     }
   });
 
+  test('commits a partial regular batch while the connection stays open', () async {
+    final batches = <int>[];
+    final committed = Completer<void>();
+    final syncing = sut.streamChanges(
+      (events, abort, reset) async {
+        batches.add(events.length);
+        if (batches.length == 2) {
+          committed.complete();
+        }
+      },
+      serverVersion: const SemVer(major: 3, minor: 1, patch: 0),
+      httpClient: mockHttpClient,
+      initialBatchSize: 2,
+      batchSize: 5000,
+    );
+    await Future<void>.delayed(Duration.zero);
+    for (var index = 0; index < 3; index++) {
+      responseStreamController.add(
+        utf8.encode(
+          _createJsonLine(
+            SyncEntityType.userDeleteV1.toString(),
+            SyncUserDeleteV1(userId: 'user-$index').toJson(),
+            'ack-$index',
+          ),
+        ),
+      );
+    }
+    try {
+      await committed.future.timeout(const Duration(seconds: 3));
+      expect(batches, [2, 1]);
+      expect(responseStreamController.isClosed, isFalse);
+    } finally {
+      await responseStreamController.close();
+      await syncing;
+    }
+  });
+
+  test('idle flushes do not invent events or first-byte progress', () async {
+    final records = <LogRecord>[];
+    final subscription = Logger.root.onRecord.listen(records.add);
+    addTearDown(subscription.cancel);
+    final batches = <List<SyncEvent>>[];
+    final syncing = sut.streamChanges(
+      (events, abort, reset) async => batches.add(events),
+      serverVersion: const SemVer(major: 3, minor: 1, patch: 0),
+      httpClient: mockHttpClient,
+      batchFlushInterval: const Duration(milliseconds: 20),
+    );
+    await Future<void>.delayed(const Duration(milliseconds: 65));
+    expect(batches, isEmpty);
+    expect(records.where((record) => record.message.contains('first byte')), isEmpty);
+    await responseStreamController.close();
+    await syncing;
+  });
+
+  test('timed flush preserves an incomplete JSON line until it is complete', () async {
+    final batches = <List<SyncEvent>>[];
+    final first = Completer<void>();
+    final second = Completer<void>();
+    final syncing = sut.streamChanges(
+      (events, abort, reset) async {
+        batches.add(events);
+        if (batches.length == 1) {
+          first.complete();
+        }
+        if (batches.length == 2) {
+          second.complete();
+        }
+      },
+      serverVersion: const SemVer(major: 3, minor: 1, patch: 0),
+      httpClient: mockHttpClient,
+      batchFlushInterval: const Duration(milliseconds: 20),
+    );
+    await Future<void>.delayed(Duration.zero);
+    final completeLine = _createJsonLine(SyncEntityType.userDeleteV1.toString(), {'userId': 'first'}, 'ack-first');
+    final splitLine = _createJsonLine(SyncEntityType.userDeleteV1.toString(), {'userId': 'second'}, 'ack-second');
+    final splitAt = splitLine.length ~/ 2;
+    responseStreamController.add(utf8.encode(completeLine + splitLine.substring(0, splitAt)));
+    await first.future.timeout(const Duration(seconds: 1));
+    expect(batches.single.single.ack, 'ack-first');
+    responseStreamController.add(utf8.encode(splitLine.substring(splitAt)));
+    await second.future.timeout(const Duration(seconds: 1));
+    expect(batches.last.single.ack, 'ack-second');
+    await responseStreamController.close();
+    await syncing;
+  });
+
+  test('rejects non-positive timed flush intervals', () async {
+    for (final interval in [Duration.zero, const Duration(seconds: -1)]) {
+      await expectLater(
+        sut.streamChanges(
+          (events, abort, reset) async {},
+          serverVersion: const SemVer(major: 3, minor: 1, patch: 0),
+          httpClient: mockHttpClient,
+          batchFlushInterval: interval,
+        ),
+        throwsArgumentError,
+      );
+    }
+  });
+
   Future<void> streamChanges(
     Future<void> Function(List<SyncEvent>, Function() abort, Function() reset) onDataCallback,
     SemVer serverVersion, {
@@ -86,6 +187,62 @@ void main() {
       serverVersion: serverVersion,
     );
   }
+
+  test('expected request cancellation is not logged as a sync failure', () async {
+    final previousLevel = Logger.root.level;
+    Logger.root.level = Level.ALL;
+    addTearDown(() => Logger.root.level = previousLevel);
+    final cancellation = Completer<void>();
+    final opened = Completer<void>();
+    final records = <LogRecord>[];
+    final subscription = Logger.root.onRecord.listen(records.add);
+    addTearDown(subscription.cancel);
+    when(() => mockHttpClient.send(any())).thenAnswer((invocation) async {
+      final request = invocation.positionalArguments.single as http.AbortableRequest;
+      opened.complete();
+      await request.abortTrigger;
+      throw http.RequestAbortedException(request.url);
+    });
+
+    final stream = sut.streamChanges(
+      (events, abort, reset) async {},
+      serverVersion: const SemVer(major: 3, minor: 1, patch: 0),
+      httpClient: mockHttpClient,
+      abortSignal: cancellation.future,
+    );
+    final aborted = expectLater(stream, throwsA(isA<http.RequestAbortedException>()));
+    await opened.future;
+    cancellation.complete();
+    await aborted;
+
+    expect(
+      records.where((record) => record.loggerName == 'SyncApiRepository' && record.level >= Level.WARNING),
+      isEmpty,
+    );
+    expect(
+      records.any((record) => record.loggerName == 'SyncApiRepository' && record.message.contains('cancelled')),
+      isTrue,
+    );
+  });
+
+  test('network failures remain visible in sync logs', () async {
+    final previousLevel = Logger.root.level;
+    Logger.root.level = Level.ALL;
+    addTearDown(() => Logger.root.level = previousLevel);
+    final records = <LogRecord>[];
+    final subscription = Logger.root.onRecord.listen(records.add);
+    addTearDown(subscription.cancel);
+    when(() => mockHttpClient.send(any())).thenThrow(http.ClientException('connection lost'));
+
+    await expectLater(
+      streamChanges((events, abort, reset) async {}, const SemVer(major: 3, minor: 1, patch: 0)),
+      throwsA(isA<http.ClientException>()),
+    );
+    expect(
+      records.where((record) => record.loggerName == 'SyncApiRepository' && record.level >= Level.WARNING),
+      hasLength(1),
+    );
+  });
 
   test('streamChanges processes a small initial batch before using the regular batch size', () async {
     const initialBatchSize = 2;
@@ -187,6 +344,12 @@ void main() {
   });
 
   test('streamChanges stops processing stream when abort is called', () async {
+    final previousLevel = Logger.root.level;
+    Logger.root.level = Level.ALL;
+    addTearDown(() => Logger.root.level = previousLevel);
+    final records = <LogRecord>[];
+    final subscription = Logger.root.onRecord.listen(records.add);
+    addTearDown(subscription.cancel);
     int onDataCallCount = 0;
     bool abortWasCalledInCallback = false;
     List<SyncEvent> receivedEventsBatch1 = [];
@@ -236,6 +399,9 @@ void main() {
     expect(onDataCallCount, 1);
     expect(abortWasCalledInCallback, isTrue);
     expect(receivedEventsBatch1.length, testBatchSize);
+    expect(records.where((record) => record.level >= Level.WARNING), isEmpty);
+    expect(records.any((record) => record.message.startsWith('Remote sync completed')), isFalse);
+    expect(records.any((record) => record.message.startsWith('Remote sync cancelled')), isTrue);
   });
 
   test('streamChanges does not process remaining lines in finally block if aborted', () async {
@@ -404,10 +570,7 @@ void main() {
       Logger.root.level = previousLevel;
     });
 
-    final streamChangesFuture = streamChanges(
-      (_, __, ___) async {},
-      const SemVer(major: 2, minor: 5, patch: 0),
-    );
+    final streamChangesFuture = streamChanges((_, __, ___) async {}, const SemVer(major: 2, minor: 5, patch: 0));
 
     await Future.delayed(const Duration(milliseconds: 50));
     responseStreamController.add(

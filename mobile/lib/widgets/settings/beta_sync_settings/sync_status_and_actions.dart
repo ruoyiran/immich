@@ -154,7 +154,7 @@ class SyncStatusAndActions extends HookConsumerWidget {
           leading: const Icon(Icons.cloud_sync),
           trailing: _SyncStatusIcon(status: ref.watch(syncStatusProvider).remoteSyncStatus),
           onTap: () {
-            unawaited(ref.read(backgroundSyncProvider).syncRemote());
+            unawaited(ref.read(backgroundSyncProvider).syncRemote(userInitiated: true));
           },
         ),
         if (CurrentPlatform.isIOS && serverVersion.isAtLeast(major: 2, minor: 5))
